@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Degen Club :: Monkeys Funhouse</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="scanlines"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-monkey">🐒</span>
+      <div class="brand-text">
+        <div class="brand-title">DEGEN CLUB</div>
+        <div class="brand-sub">:: monkeys funhouse ::</div>
+      </div>
+    </div>
+    <div class="stats-row">
+      <div class="stat sim-wallet"><div class="stat-label">💼 Wallet</div><div class="stat-value" id="stat-wallet">—</div></div>
+      <div class="stat"><div class="stat-label">Wallet %</div><div class="stat-value" id="stat-wallet-pct">—</div></div>
+      <div class="stat"><div class="stat-label">Peak / DD</div><div class="stat-value" id="stat-wallet-peak">—</div></div>
+      <div class="stat"><div class="stat-label">Realized P&L</div><div class="stat-value" id="stat-pnl">—</div></div>
+      <div class="stat"><div class="stat-label">Open Positions</div><div class="stat-value" id="stat-open">—</div></div>
+      <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value" id="stat-winrate">—</div></div>
+      <div class="stat"><div class="stat-label">Mints Seen</div><div class="stat-value" id="stat-mints">—</div></div>
+      <div class="stat"><div class="stat-label">Trades Seen</div><div class="stat-value" id="stat-trades">—</div></div>
+      <div class="stat"><div class="stat-label">Wallets</div><div class="stat-value" id="stat-wallets">—</div></div>
+      <div class="stat"><div class="stat-label">Tracked 🎯</div><div class="stat-value" id="stat-tracked">—</div></div>
+      <div class="stat"><div class="stat-label">KOLs 👑</div><div class="stat-value" id="stat-kols">—</div></div>
+      <div class="stat"><div class="stat-label">Copy Signals</div><div class="stat-value" id="stat-signals">—</div></div>
+      <div class="stat"><div class="stat-label">Vol Surges 🔥</div><div class="stat-value" id="stat-volume-surges">—</div></div>
+      <div class="stat"><div class="stat-label">Bundles 🧬</div><div class="stat-value" id="stat-bundles">—</div></div>
+      <div class="stat"><div class="stat-label">🔥 Incinerate</div><div class="stat-value" id="stat-incinerate" title="Unique mints traded × rent per account">—</div></div>
+      <div class="stat"><div class="stat-label">💸 Cashback</div><div class="stat-value" id="stat-cashback" title="Estimated cashback rebates earned across positions in cashback coins">—</div></div>
+      <div class="stat" title="Max SOL per individual trade — clamps any strategy entry"><div class="stat-label">⚙ Max/Trade ◎</div><input id="input-max-per-trade" type="number" step="0.01" min="0.01" max="50" style="width:80px;background:#0a0a0a;color:var(--cyan);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:14px;font-family:inherit;" /></div>
+      <div class="stat" title="Max total SOL exposed across all open positions"><div class="stat-label">⚙ Max Exposure ◎</div><input id="input-max-exposure" type="number" step="0.05" min="0.05" max="1000" style="width:80px;background:#0a0a0a;color:var(--cyan);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:14px;font-family:inherit;" /></div>
+      <div class="stat" title="Abort live buy if coin price drifted up >X% between trigger and tx submit (stale-quote guard)"><div class="stat-label">⚙ Max Entry Slip %</div><input id="input-max-entry-slip" type="number" step="0.01" min="0" max="1" style="width:70px;background:#0a0a0a;color:var(--cyan);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:14px;font-family:inherit;" /></div>
+      <div class="stat" title="Paper-mode latency simulator: hold buys/sells pending this many ms, then fill at the drifted price. 0 = instant (default). Try 500-1000 to simulate live execution."><div class="stat-label">⚙ Paper Lag ms</div><input id="input-paper-latency" type="number" step="50" min="0" max="5000" style="width:80px;background:#0a0a0a;color:var(--cyan);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:14px;font-family:inherit;" /></div>
+      <div class="stat clickable" id="stat-mode-box" title="Click to halt/resume" style="cursor:pointer;user-select:none;"><div class="stat-label" id="stat-mode-label">Mode · click to halt</div><div class="stat-value" id="stat-mode">—</div></div>
+      <div class="stat clickable" id="stat-mode-switch" title="Switch paper ↔ live" style="cursor:pointer;user-select:none;"><div class="stat-label">🔄 Switch</div><div class="stat-value" id="stat-mode-switch-val">→ LIVE</div></div>
+      <div class="stat pulse"><div class="stat-label">Feed</div><div class="stat-value live" id="stat-status">BOOTING</div></div>
+    </div>
+  </header>
+
+  <div id="mode-switch-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-card">
+      <div class="modal-title" id="mode-modal-title">Switch to LIVE mode?</div>
+      <div class="modal-body" id="mode-modal-body">
+        <p>You are about to switch from <b>PAPER</b> to <b>LIVE</b>.</p>
+        <p>Real SOL will be used to open and close positions.</p>
+        <p>To confirm, type <code>LIVE</code> below:</p>
+        <input type="text" id="mode-modal-input" placeholder="type LIVE" autocomplete="off" />
+        <p class="modal-warning" id="mode-modal-warning"></p>
+      </div>
+      <div class="modal-actions">
+        <button class="modal-btn cancel" id="mode-modal-cancel">Cancel</button>
+        <button class="modal-btn confirm" id="mode-modal-confirm" disabled>Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="mints">🐒 <span>MINTS</span></button>
+    <button class="tab" data-tab="devs">👑 <span>DEVS</span></button>
+    <button class="tab" data-tab="traders">🎯 <span>TRADERS</span></button>
+    <button class="tab" data-tab="positions">📊 <span>POSITIONS</span></button>
+    <button class="tab" data-tab="system">⚙️ <span>SYSTEM</span></button>
+    <button class="tab" data-tab="lab">🔬 <span>COIN LAB</span></button>
+    <button class="tab" data-tab="ticker">⚡ <span>TICKER</span></button>
+  </nav>
+
+  <main class="tab-content">
+
+
+    <section class="tab-pane" data-pane="mints">
+      <div class="pane-header">
+        <h1>🐒 MINTS</h1>
+        <p>The funnel — fresh launches → runners → near-graduation → migrated. Click any row to drill in.</p>
+        <div class="toolbar">
+          <button class="pill-btn" data-mintcat="fresh">🆕 FRESH <span class="pill-count" id="mintcat-count-fresh">·</span></button>
+          <button class="pill-btn" data-mintcat="runners">🚀 RUNNERS <span class="pill-count" id="mintcat-count-runners">·</span></button>
+          <button class="pill-btn" data-mintcat="near_grad">👀 NEAR GRAD <span class="pill-count" id="mintcat-count-near_grad">·</span></button>
+          <button class="pill-btn" data-mintcat="migrated">💎 MIGRATED <span class="pill-count" id="mintcat-count-migrated">·</span></button>
+          <button class="pill-btn" data-mintcat="rugged">💀 RUGGED <span class="pill-count" id="mintcat-count-rugged">·</span></button>
+          <button class="pill-btn active" data-mintcat="all">ALL <span class="pill-count" id="mintcat-count-all">·</span></button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th data-sort="created_at">Time</th>
+              <th data-sort="symbol">Symbol</th>
+              <th data-sort="name">Name</th>
+              <th>Mint</th>
+              <th>Creator</th>
+              <th class="num" data-sort="initial_buy_sol">Init SOL</th>
+              <th class="num" data-sort="peak_market_cap_sol">Peak ($)</th>
+              <th class="num" data-sort="current_market_cap_sol">Current ($)</th>
+              <th class="num" data-sort="v_sol_in_curve">Curve</th>
+              <th class="num" data-sort="trade_count">Trades</th>
+              <th class="num" data-sort="unique_buyer_count">Buyers</th>
+              <th>Socials</th>
+              <th>Flags</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="mints-table"><tr><td colspan="14" class="empty">Waiting for ingestion…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tab-pane" data-pane="devs">
+      <div class="pane-header">
+        <h1>👑 DEVS</h1>
+        <p>Creator reputation — auto-classified into 👑 LEGIT · 💎 WHALE · 🚨 RUGGER · 🔥 SERIAL · 🆕 NEW · ❓ NOT_SURE. Click to drill in.</p>
+        <div class="toolbar">
+          <button class="pill-btn active" data-devcat="all">ALL <span class="pill-count" id="devcat-count-all">·</span></button>
+          <button class="pill-btn" data-devcat="LEGIT">👑 LEGIT <span class="pill-count" id="devcat-count-LEGIT">·</span></button>
+          <button class="pill-btn" data-devcat="WHALE">💎 WHALE <span class="pill-count" id="devcat-count-WHALE">·</span></button>
+          <button class="pill-btn" data-devcat="RUGGER">🚨 RUGGER <span class="pill-count" id="devcat-count-RUGGER">·</span></button>
+          <button class="pill-btn" data-devcat="SERIAL">🔥 SERIAL <span class="pill-count" id="devcat-count-SERIAL">·</span></button>
+          <button class="pill-btn" data-devcat="NEW">🆕 NEW <span class="pill-count" id="devcat-count-NEW">·</span></button>
+          <button class="pill-btn" data-devcat="NOT_SURE">❓ NOT_SURE <span class="pill-count" id="devcat-count-NOT_SURE">·</span></button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Creator</th>
+              <th data-sort="category">Category</th>
+              <th class="num" data-sort="launch_count">Launches</th>
+              <th class="num" data-sort="migrated_count">Migrated</th>
+              <th class="num" data-sort="rugged_count">Rugged</th>
+              <th class="num" data-sort="abandoned_count">Abandoned</th>
+              <th class="num" data-sort="_rugRate">Rug Rate</th>
+              <th class="num" data-sort="avg_peak_mcap">Avg Peak ($)</th>
+              <th class="num" data-sort="best_peak_mcap">Best Peak ($)</th>
+              <th class="num" data-sort="avg_cycle_time_seconds">Cycle Time</th>
+              <th class="num" data-sort="avg_launch_lifetime_seconds">Avg Lifetime</th>
+              <th class="num" data-sort="bundle_overlap_count">Bundle Hits</th>
+              <th class="num" data-sort="days_active">Days Active</th>
+              <th class="num" data-sort="reputation_score">Rep Score</th>
+              <th>Flags</th>
+            </tr>
+          </thead>
+          <tbody id="devs-table"><tr><td colspan="15" class="empty">No creators scored yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tab-pane" data-pane="traders">
+      <details class="section" open data-section="boost-status">
+        <summary class="section-summary">⚡ BOOST STATUS <span class="muted" style="font-size:11px;font-style:italic;margin-left:10px;">auto-grader: who's making us money / who's bleeding us</span></summary>
+        <div id="boost-status-panel" class="missed-panel"><div class="empty muted">Loading…</div></div>
+      </details>
+
+      <div class="pane-header">
+        <h1>🎯 TRADERS</h1>
+        <p>Top wallets ranked by 30-day realized P&L. Auto-classified into 🧑 HUMAN · 🤖 BOT · ⚡ SCALPER · 🧬 BUNDLE · ❓ NOT_SURE. Click any wallet to drill in.</p>
+        <div class="toolbar">
+          <button class="pill-btn active" data-cat="all">ALL <span class="pill-count" id="cat-count-all">·</span></button>
+          <button class="pill-btn" data-cat="HUMAN">🧑 HUMANS <span class="pill-count" id="cat-count-HUMAN">·</span></button>
+          <button class="pill-btn" data-cat="BOT">🤖 BOTS <span class="pill-count" id="cat-count-BOT">·</span></button>
+          <button class="pill-btn" data-cat="SCALPER">⚡ SCALPERS <span class="pill-count" id="cat-count-SCALPER">·</span></button>
+          <button class="pill-btn" data-cat="BUNDLE">🧬 BUNDLES <span class="pill-count" id="cat-count-BUNDLE">·</span></button>
+          <button class="pill-btn" data-cat="NOT_SURE">❓ NOT SURE <span class="pill-count" id="cat-count-NOT_SURE">·</span></button>
+          <span class="toolbar-sep">·</span>
+          <button class="pill-btn" data-tracked="1">TRACKED ONLY</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Wallet</th>
+              <th data-sort="category">Category</th>
+              <th class="num" data-sort="realized_pnl_30d">PnL 30d</th>
+              <th class="num" data-sort="realized_pnl">PnL Lifetime</th>
+              <th class="num" data-sort="unrealized_pnl">Unrealized</th>
+              <th class="num" data-sort="closed_30d">Closed 30d</th>
+              <th class="num" data-sort="win_rate_30d">WR 30d</th>
+              <th class="num" data-sort="graduated_touched">Graduated</th>
+              <th class="num" data-sort="sniper_ratio">Snipe %</th>
+              <th class="num" data-sort="first_block_ratio">FB %</th>
+              <th class="num" data-sort="trades_per_position">T/Pos</th>
+              <th class="num" data-sort="avg_hold_seconds">Avg Hold</th>
+              <th class="num" data-sort="sell_100pct_ratio">100%↩ %</th>
+              <th class="num" data-sort="best_coin_pnl">Best</th>
+              <th class="num" data-sort="worst_coin_pnl">Worst</th>
+              <th>Flags</th>
+              <th data-sort="tracked">Tracked</th>
+            </tr>
+          </thead>
+          <tbody id="traders-table"><tr><td colspan="17" class="empty">No wallets with closed positions yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tab-pane" data-pane="positions">
+      <div class="pane-header">
+        <h1>📊 POSITIONS</h1>
+        <p>Paper trading engine. Strategies fire automatically on signals. Toggle on/off below.</p>
+      </div>
+
+      <details class="section" data-section="strategies" open>
+        <summary class="section-summary">STRATEGIES</summary>
+        <div id="strategies-panel" class="strategies-panel"><div class="empty">Loading strategies…</div></div>
+      </details>
+
+      <details class="section" data-section="backtest">
+        <summary class="section-summary">BACKTEST <button id="backtest-btn" class="footer-btn" style="margin-left:10px;">RUN BACKTEST</button></summary>
+        <div id="backtest-panel" class="backtest-panel"><div class="empty muted">Click "RUN BACKTEST" to replay all signals through current strategy params.</div></div>
+      </details>
+
+      <details class="section" data-section="open" open>
+        <summary class="section-summary">OPEN POSITIONS</summary>
+        <div class="table-wrap">
+          <table class="data">
+            <thead>
+              <tr>
+                <th data-sort="entered_at">Entered</th>
+                <th data-sort="strategy">Strategy</th>
+                <th>Coin</th>
+                <th>Tiers</th>
+                <th class="num" data-sort="entry_sol">Entry SOL</th>
+                <th class="num" data-sort="entry_mcap_sol">Entry MCap</th>
+                <th class="num" data-sort="current_market_cap_sol">Now MCap</th>
+                <th class="num" data-sort="sol_realized_so_far">Realized</th>
+                <th class="num" data-sort="unrealized_pnl_sol">Total P&L</th>
+                <th class="num" data-sort="unrealized_pnl_pct">P&L %</th>
+                <th class="num" data-sort="highest_pct">Peak %</th>
+                <th class="num" data-sort="entered_at">Age</th>
+              </tr>
+            </thead>
+            <tbody id="positions-open-table"><tr><td colspan="12" class="empty">No open positions.</td></tr></tbody>
+          </table>
+        </div>
+      </details>
+
+      <details class="section" data-section="closed" open>
+        <summary class="section-summary">CLOSED POSITIONS</summary>
+        <div class="table-wrap">
+          <table class="data">
+            <thead>
+              <tr>
+                <th data-sort="exited_at">Exited</th>
+                <th data-sort="strategy">Strategy</th>
+                <th>Coin</th>
+                <th class="num" data-sort="entry_sol">Entry SOL</th>
+                <th class="num" data-sort="entry_mcap_sol">Entry MC</th>
+                <th class="num" data-sort="_avg_exit_mc">Exit MC</th>
+                <th class="num" data-sort="realized_pnl_sol">P&L SOL</th>
+                <th class="num" data-sort="realized_pnl_pct">P&L %</th>
+                <th class="num" data-sort="highest_pct">Peak Hit</th>
+                <th data-sort="exit_reason">Exit Reason</th>
+                <th class="num" data-sort="_duration">Duration</th>
+              </tr>
+            </thead>
+            <tbody id="positions-closed-table"><tr><td colspan="11" class="empty">No closed trades yet.</td></tr></tbody>
+          </table>
+        </div>
+      </details>
+
+      <details class="section" data-section="missed">
+        <summary class="section-summary">MISSED OPPORTUNITIES <span class="muted" style="font-size:11px;font-style:italic;margin-left:10px;">coins our gates rejected, sorted by what they did after</span></summary>
+        <div id="missed-panel" class="missed-panel"><div class="empty muted">Loading rejections…</div></div>
+      </details>
+
+      <details class="section" data-section="postexit">
+        <summary class="section-summary">POST-EXIT ANALYSIS <span class="muted" style="font-size:11px;font-style:italic;margin-left:10px;">did we exit too early? did the coin keep running?</span></summary>
+        <div id="exit-analysis-panel" class="missed-panel"><div class="empty muted">Loading post-exit data…</div></div>
+      </details>
+
+    </section>
+
+    <section class="tab-pane" data-pane="system">
+      <div class="system-header">
+        <h2 class="system-title">⚙️ SYSTEM AUDIT</h2>
+        <div class="system-window-selector">
+          <button class="win-btn" data-window="1">1H</button>
+          <button class="win-btn active" data-window="6">6H</button>
+          <button class="win-btn" data-window="24">24H</button>
+          <button class="win-btn" data-window="168">7D</button>
+          <button class="win-btn" data-window="all">ALL</button>
+        </div>
+      </div>
+
+      <div id="system-kpis" class="system-kpis"><div class="empty muted">Loading…</div></div>
+
+      <details class="section" open data-section="exit-breakdown">
+        <summary class="section-summary">EXIT REASON BREAKDOWN <span class="muted" style="font-size:11px;font-style:italic;margin-left:10px;">where the P&L comes from / goes to</span></summary>
+        <div id="system-exits" class="missed-panel"><div class="empty muted">Loading…</div></div>
+      </details>
+
+      <details class="section" open data-section="strat-compare">
+        <summary class="section-summary">STRATEGY COMPARISON</summary>
+        <div id="system-strategies" class="missed-panel"><div class="empty muted">Loading…</div></div>
+      </details>
+
+      <details class="section" open data-section="wallet-leaderboard">
+        <summary class="section-summary">🏆 TRACKED-WALLET LEADERBOARD <span class="muted" style="font-size:11px;font-style:italic;margin-left:10px;">which wallets actually carry us</span></summary>
+        <div id="system-wallets" class="missed-panel"><div class="empty muted">Loading…</div></div>
+      </details>
+
+      <details class="section" open data-section="mcap-buckets">
+        <summary class="section-summary">MCAP BUCKET PERFORMANCE</summary>
+        <div id="system-mcap" class="missed-panel"><div class="empty muted">Loading…</div></div>
+      </details>
+
+      <details class="section" open data-section="hour-of-day">
+        <summary class="section-summary">HOUR-OF-DAY HEATMAP</summary>
+        <div id="system-hours" class="missed-panel"><div class="empty muted">Loading…</div></div>
+      </details>
+    </section>
+
+    <section class="tab-pane" data-pane="lab">
+      <div class="system-header">
+        <h2 class="system-title">🔬 COIN LAB</h2>
+        <div class="system-window-selector">
+          <button class="lab-btn" data-window="1">1H</button>
+          <button class="lab-btn active" data-window="6">6H</button>
+          <button class="lab-btn" data-window="24">24H</button>
+          <button class="lab-btn" data-window="168">7D</button>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+        <span class="muted" style="font-size:11px;letter-spacing:2px;">FILTER:</span>
+        <button class="lab-filter active" data-filter="all">ALL</button>
+        <button class="lab-filter" data-filter="migrated">🌙 MIGRATED</button>
+        <button class="lab-filter" data-filter="live">🟢 LIVE</button>
+        <button class="lab-filter" data-filter="rugged">💀 RUGGED</button>
+      </div>
+
+      <details class="section" open data-section="runner-leaderboard">
+        <summary class="section-summary">🚀 RUNNER LEADERBOARD <span class="muted" style="font-size:11px;font-style:italic;margin-left:10px;">live scoring · top scorers shown — score ≥ 70 auto-fires runnerScore strategy (if no tracked wallet involvement)</span></summary>
+        <div id="runner-leaderboard" class="missed-panel"><div class="empty muted">Loading…</div></div>
+      </details>
+
+      <div id="lab-summary" class="missed-summary"></div>
+
+      <div class="muted" style="font-size:11px;font-style:italic;margin:8px 0 14px;">
+        Click any row to drill into the coin. Sortable. Look for patterns: high migrators usually have ≥X buyers in first 5 min, low whale concentration, high SOL inflow rate.
+      </div>
+
+      <div class="table-wrap">
+        <table class="data lab-table">
+          <thead>
+            <tr>
+              <th>SYMBOL</th>
+              <th>STATUS</th>
+              <th class="num">AGE</th>
+              <th class="num">MCAP NOW</th>
+              <th class="num">PEAK MCAP</th>
+              <th class="num">CURVE</th>
+              <th class="num">B 1m</th>
+              <th class="num">B 5m</th>
+              <th class="num">B 15m</th>
+              <th class="num">B 60m</th>
+              <th class="num">SOL 1m</th>
+              <th class="num">SOL 5m</th>
+              <th class="num">SOL 15m</th>
+              <th class="num">SNIPE</th>
+              <th class="num">TRK</th>
+              <th class="num">KOL</th>
+              <th class="num">⚡</th>
+              <th class="num">TRK 1st(s)</th>
+              <th>FLAGS</th>
+              <th>WE</th>
+              <th class="num">P&L</th>
+            </tr>
+          </thead>
+          <tbody id="lab-table"><tr><td colspan="21" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tab-pane" data-pane="coin">
+      <div class="coin-back">
+        <button id="coin-back-btn">← BACK</button>
+        <span class="coin-breadcrumb" id="coin-breadcrumb"></span>
+      </div>
+
+      <div class="coin-header">
+        <img class="coin-image" id="coin-image" src="" alt="" />
+        <div class="coin-header-main">
+          <div class="coin-title-row">
+            <span class="coin-symbol" id="coin-symbol">—</span>
+            <span class="coin-name" id="coin-name"></span>
+            <span class="coin-status-badges" id="coin-status-badges"></span>
+          </div>
+          <div class="coin-sub" id="coin-description"></div>
+          <div class="coin-meta">
+            <span class="label">Creator:</span> <span class="addr copyable" id="coin-creator">—</span>
+            <span class="sep">·</span>
+            <span class="label">Mint:</span> <span class="addr copyable" id="coin-mint">—</span>
+            <span class="sep">·</span>
+            <span class="socials" id="coin-socials"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="coin-stats">
+        <div class="stat"><div class="stat-label">Current MCap</div><div class="stat-value" id="coin-current-mcap">—</div></div>
+        <div class="stat"><div class="stat-label">Peak MCap</div><div class="stat-value" id="coin-peak-mcap">—</div></div>
+        <div class="stat"><div class="stat-label">Age</div><div class="stat-value" id="coin-age">—</div></div>
+        <div class="stat"><div class="stat-label">Trades</div><div class="stat-value" id="coin-trades-count">—</div></div>
+        <div class="stat"><div class="stat-label">Unique Buyers</div><div class="stat-value" id="coin-unique-buyers">—</div></div>
+        <div class="stat"><div class="stat-label">Initial Buy</div><div class="stat-value" id="coin-initial-buy">—</div></div>
+        <div class="stat"><div class="stat-label">Pool</div><div class="stat-value" id="coin-pool">—</div></div>
+      </div>
+
+      <div class="section-title">HOLDERS</div>
+      <div class="holders-panel" id="coin-holders-panel"><div class="empty">Loading holder data…</div></div>
+
+      <div class="section-title">SNIPERS</div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Wallet</th>
+              <th>First Buy</th>
+              <th class="num">SOL In</th>
+              <th class="num">Tokens Bought</th>
+              <th class="num">Tokens Sold</th>
+              <th class="num">Sold %</th>
+              <th class="num">SOL Out</th>
+              <th class="num">Net</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="coin-snipers-table"><tr><td colspan="9" class="empty">No snipers.</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="section-title">TRADES</div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Age</th>
+              <th>Side</th>
+              <th>Wallet</th>
+              <th>Label</th>
+              <th class="num">SOL</th>
+              <th class="num">Tokens</th>
+              <th class="num">Price</th>
+              <th class="num">MCap</th>
+            </tr>
+          </thead>
+          <tbody id="coin-trades-table"><tr><td colspan="9" class="empty">No trades.</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="section-title">CREATOR'S OTHER LAUNCHES</div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Name</th>
+              <th>Mint</th>
+              <th class="num">Peak MCap</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="coin-creator-history"><tr><td colspan="6" class="empty">No other launches.</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="section-title">RUG FLAG LOG</div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Flag</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="coin-flag-log"><tr><td colspan="3" class="empty">No flags fired.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tab-pane" data-pane="dev">
+      <div class="coin-back">
+        <button id="dev-back-btn">← BACK</button>
+        <span class="coin-breadcrumb" id="dev-breadcrumb"></span>
+      </div>
+
+      <div class="coin-header">
+        <div class="coin-header-main">
+          <div class="coin-title-row">
+            <span class="coin-symbol" id="dev-title">CREATOR</span>
+            <span class="coin-status-badges" id="dev-status-badges"></span>
+          </div>
+          <div class="coin-meta">
+            <span class="label">Wallet:</span> <span class="addr copyable" id="dev-wallet">—</span>
+            <span class="sep">·</span>
+            <span class="label">First Launch:</span> <span id="dev-first-launch">—</span>
+            <span class="sep">·</span>
+            <span class="label">Last Launch:</span> <span id="dev-last-launch">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="coin-stats">
+        <div class="stat"><div class="stat-label">Rep Score</div><div class="stat-value" id="dev-rep">—</div></div>
+        <div class="stat"><div class="stat-label">Launches</div><div class="stat-value" id="dev-launches">—</div></div>
+        <div class="stat"><div class="stat-label">Migrated</div><div class="stat-value" id="dev-migrated">—</div></div>
+        <div class="stat"><div class="stat-label">Rugged</div><div class="stat-value" id="dev-rugged">—</div></div>
+        <div class="stat"><div class="stat-label">Abandoned</div><div class="stat-value" id="dev-abandoned">—</div></div>
+        <div class="stat"><div class="stat-label">Best Peak</div><div class="stat-value" id="dev-best">—</div></div>
+        <div class="stat"><div class="stat-label">Avg Peak</div><div class="stat-value" id="dev-avgpeak">—</div></div>
+        <div class="stat"><div class="stat-label">Cycle Time</div><div class="stat-value" id="dev-cycle">—</div></div>
+        <div class="stat"><div class="stat-label">Avg Lifetime</div><div class="stat-value" id="dev-lifetime">—</div></div>
+        <div class="stat"><div class="stat-label">Days Active</div><div class="stat-value" id="dev-days">—</div></div>
+        <div class="stat"><div class="stat-label">Bundle Hits</div><div class="stat-value" id="dev-bundle">—</div></div>
+      </div>
+
+      <div class="section-title">ALSO A TRADER?</div>
+      <div id="dev-as-trader-panel">
+        <div class="empty">This wallet hasn't shown up in our trade feed (creator-only).</div>
+      </div>
+
+      <div class="section-title">ALL LAUNCHES</div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Name</th>
+              <th>Mint</th>
+              <th class="num">Init SOL</th>
+              <th class="num">Peak ($)</th>
+              <th class="num">Current ($)</th>
+              <th class="num">Trades</th>
+              <th class="num">Buyers</th>
+              <th>Flags</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="dev-launches-table"><tr><td colspan="11" class="empty">No launches.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tab-pane" data-pane="wallet">
+      <div class="coin-back">
+        <button id="wallet-back-btn">← BACK</button>
+        <span class="coin-breadcrumb" id="wallet-breadcrumb"></span>
+      </div>
+
+      <div class="coin-header">
+        <div class="coin-header-main">
+          <div class="coin-title-row">
+            <span class="coin-symbol" id="wallet-title">WALLET</span>
+            <span class="coin-status-badges" id="wallet-status-badges"></span>
+          </div>
+          <div class="coin-meta">
+            <span class="label">Address:</span> <span class="addr copyable" id="wallet-address">—</span>
+            <span class="sep">·</span>
+            <span class="label">First Seen:</span> <span id="wallet-first-seen">—</span>
+            <span class="sep">·</span>
+            <span class="label">Last Active:</span> <span id="wallet-last-active">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="coin-stats">
+        <div class="stat"><div class="stat-label">Realized P&L</div><div class="stat-value" id="wallet-realized">—</div></div>
+        <div class="stat"><div class="stat-label">Unrealized</div><div class="stat-value" id="wallet-unrealized">—</div></div>
+        <div class="stat"><div class="stat-label">Positions</div><div class="stat-value" id="wallet-positions">—</div></div>
+        <div class="stat"><div class="stat-label">Closed</div><div class="stat-value" id="wallet-closed">—</div></div>
+        <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value" id="wallet-winrate">—</div></div>
+        <div class="stat"><div class="stat-label">Best Trade</div><div class="stat-value" id="wallet-best">—</div></div>
+        <div class="stat"><div class="stat-label">Worst Trade</div><div class="stat-value" id="wallet-worst">—</div></div>
+      </div>
+
+      <div class="section-title">POSITIONS</div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>First Buy</th>
+              <th>Symbol</th>
+              <th>Mint</th>
+              <th class="num">SOL In</th>
+              <th class="num">SOL Out</th>
+              <th class="num">Sold %</th>
+              <th class="num">Realized</th>
+              <th class="num">Unrealized</th>
+              <th>Status</th>
+              <th>Flags</th>
+            </tr>
+          </thead>
+          <tbody id="wallet-positions-table"><tr><td colspan="10" class="empty">No positions.</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="section-title">CO-TRADERS (bought same coins within 30s)</div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Wallet</th>
+              <th class="num">Overlap Count</th>
+              <th class="num">Their P&L</th>
+              <th>Tracked</th>
+            </tr>
+          </thead>
+          <tbody id="wallet-cotraders-table"><tr><td colspan="4" class="empty">No co-trader data.</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="section-title">RECENT TRADES</div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Mint</th>
+              <th>Side</th>
+              <th>Label</th>
+              <th class="num">SOL</th>
+              <th class="num">Tokens</th>
+              <th class="num">Age at trade</th>
+            </tr>
+          </thead>
+          <tbody id="wallet-trades-table"><tr><td colspan="8" class="empty">No trades.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tab-pane" data-pane="ticker">
+      <div class="pane-header"><h1>⚡ TICKER</h1></div>
+      <div id="ticker-totals" style="display:flex;gap:24px;margin:0 0 16px;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:#0d0d1a;">
+        <div style="flex:1;"><div style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1px;">Paper P&amp;L</div><div id="ticker-paper-pnl" style="font-size:18px;font-weight:bold;margin-top:2px;">—</div></div>
+        <div style="flex:1;"><div style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1px;">Live P&amp;L</div><div id="ticker-live-pnl" style="font-size:18px;font-weight:bold;margin-top:2px;">—</div></div>
+        <div style="flex:1;"><div style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1px;">Open Positions</div><div id="ticker-open-n" style="font-size:18px;font-weight:bold;margin-top:2px;">—</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div><h2 style="font-size:11px;color:var(--muted);margin:0 0 6px;letter-spacing:2px;">OPEN</h2><div id="ticker-open-list"></div></div>
+        <div><h2 style="font-size:11px;color:var(--muted);margin:0 0 6px;letter-spacing:2px;">RECENT CLOSES</h2><div id="ticker-closed-list"></div></div>
+      </div>
+      <div style="color:var(--muted);font-size:10px;text-align:right;margin-top:8px;" id="ticker-stamp">—</div>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <span>// degen-club v0.3.0</span>
+    <span class="sep">·</span>
+    <span id="last-update">never updated</span>
+    <span class="sep">·</span>
+    <span id="db-stats">db: —</span>
+    <button id="reset-wallet-btn" class="footer-btn" title="Reset simulated wallet to 1.0 SOL starting fresh now">RESET WALLET</button>
+    <button id="prune-btn" class="footer-btn" title="Delete trades for rugged + dead coins, then vacuum DB">PRUNE NOW</button>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

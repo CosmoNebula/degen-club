@@ -1,0 +1,27 @@
+{
+  "name": "degen-club",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Degen Club: Monkeys Funhouse — pump.fun tracker & paper-trading dashboard",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "db:reset": "rm -f data/degen.db && node -e \"import('./src/db/index.js').then(m => m.init())\""
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/web3.js": "^1.98.4",
+    "better-sqlite3": "^11.3.0",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "jito-ts": "^4.2.1",
+    "pumpdotfun-sdk": "^1.4.2",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

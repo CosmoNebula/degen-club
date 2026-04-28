@@ -1,0 +1,28 @@
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+.env.bak
+*.key
+*-keypair.json
+
+# Runtime data (let teammates build their own)
+data/
+logs/
+data/runtime-limits.json
+
+# Dependencies
+node_modules/
+
+# OS / editor cruft
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build / cache
+dist/
+build/
+.cache/
+*.log

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>degen-club · ticker</title>
+<style>
+  :root { --bg:#0a0a14; --fg:#e0e0f0; --pink:#ff4dcb; --cyan:#4dffd1; --yellow:#ffe24d; --muted:#7080a0; --border:#202840; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.5 ui-monospace,Menlo,monospace; padding:16px; }
+  h1 { font-size:14px; margin:0 0 12px; color:var(--cyan); letter-spacing:2px; }
+  .totals { display:flex; gap:24px; margin-bottom:16px; padding:10px 14px; border:1px solid var(--border); border-radius:6px; background:#0d0d1a; }
+  .total-card { flex:1; }
+  .total-label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:1px; }
+  .total-value { font-size:18px; font-weight:bold; margin-top:2px; }
+  .pos { color:var(--cyan); }
+  .neg { color:var(--pink); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .col h2 { font-size:11px; color:var(--muted); margin:0 0 6px; letter-spacing:2px; text-transform:uppercase; }
+  .row { display:flex; justify-content:space-between; align-items:center; padding:6px 10px; border-bottom:1px solid var(--border); font-size:12px; }
+  .row:hover { background:#101020; }
+  .mint { color:var(--cyan); font-weight:bold; }
+  .strat { color:var(--muted); font-size:10px; }
+  .mode-live { color:var(--pink); font-weight:bold; }
+  .mode-paper { color:var(--muted); }
+  .pnl { font-weight:bold; }
+  .reason { color:var(--muted); font-size:10px; }
+  .stale { opacity:0.5; }
+  .stamp { color:var(--muted); font-size:10px; text-align:right; margin-top:8px; }
+</style>
+</head>
+<body>
+  <h1>⚡ DEGEN-CLUB · LIVE TICKER</h1>
+  <div class="totals">
+    <div class="total-card"><div class="total-label">Paper P&L</div><div class="total-value" id="paper-pnl">—</div></div>
+    <div class="total-card"><div class="total-label">Live P&L</div><div class="total-value" id="live-pnl">—</div></div>
+    <div class="total-card"><div class="total-label">Open Positions</div><div class="total-value" id="open-n">—</div></div>
+  </div>
+  <div class="grid">
+    <div class="col">
+      <h2>OPEN</h2>
+      <div id="open-list"></div>
+    </div>
+    <div class="col">
+      <h2>RECENT CLOSES</h2>
+      <div id="closed-list"></div>
+    </div>
+  </div>
+  <div class="stamp" id="stamp">—</div>
+<script>
+const fmt = (n) => (n >= 0 ? '+' : '') + n.toFixed(4) + ' SOL';
+const fmtPct = (n) => (n * 100).toFixed(1) + '%';
+const ago = (t) => {
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm';
+  return Math.floor(s/3600) + 'h';
+};
+
+async function tick() {
+  if (document.hidden) return;
+  try {
+    const r = await fetch('/api/ticker');
+    if (!r.ok) return;
+    const d = await r.json();
+
+    const tot = d.totals || {};
+    const pp = document.getElementById('paper-pnl');
+    pp.textContent = `${fmt(tot.paperPnl || 0)} (${tot.paperN || 0})`;
+    pp.className = 'total-value ' + ((tot.paperPnl || 0) >= 0 ? 'pos' : 'neg');
+    const lp = document.getElementById('live-pnl');
+    lp.textContent = `${fmt(tot.livePnl || 0)} (${tot.liveN || 0})`;
+    lp.className = 'total-value ' + ((tot.livePnl || 0) >= 0 ? 'pos' : 'neg');
+    document.getElementById('open-n').textContent = (d.open || []).length;
+
+    document.getElementById('open-list').innerHTML = (d.open || []).map(p => {
+      const cur = p.cur_price || p.entry_price;
+      const pct = p.entry_price > 0 ? (cur - p.entry_price) / p.entry_price : 0;
+      const cls = pct >= 0 ? 'pos' : 'neg';
+      const modeCls = p.position_mode === 'live' ? 'mode-live' : 'mode-paper';
+      return `<div class="row">
+        <div><span class="mint">${p.mint_address.slice(0,8)}…</span> <span class="${modeCls}">${p.position_mode || 'paper'}</span> <span class="strat">${p.strategy} · ${ago(p.entered_at)}</span></div>
+        <div class="pnl ${cls}">${fmtPct(pct)}</div>
+      </div>`;
+    }).join('') || '<div class="row stale">no open positions</div>';
+
+    document.getElementById('closed-list').innerHTML = (d.closed || []).map(p => {
+      const cls = (p.realized_pnl_sol || 0) >= 0 ? 'pos' : 'neg';
+      const modeCls = p.position_mode === 'live' ? 'mode-live' : 'mode-paper';
+      return `<div class="row">
+        <div><span class="mint">${p.mint_address.slice(0,8)}…</span> <span class="${modeCls}">${p.position_mode || 'paper'}</span> <span class="strat">${p.strategy} · ${ago(p.exited_at)}</span> <span class="reason">${p.exit_reason || ''}</span></div>
+        <div class="pnl ${cls}">${fmt(p.realized_pnl_sol || 0)} <span class="strat">(${fmtPct(p.realized_pnl_pct || 0)})</span></div>
+      </div>`;
+    }).join('') || '<div class="row stale">no closes yet</div>';
+
+    document.getElementById('stamp').textContent = 'updated ' + new Date(d.t).toLocaleTimeString();
+  } catch {}
+}
+tick();
+setInterval(tick, 2000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+</script>
+</body>
+</html>
