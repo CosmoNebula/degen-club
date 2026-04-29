@@ -2,11 +2,12 @@ import { db } from '../db/index.js';
 import { fetchMetadata } from './metadata.js';
 import { labelTrade, checkFlags } from '../scoring/flags.js';
 import { checkCopySignal } from '../scoring/traders.js';
-import { onSmartTrade } from '../trading/strategies.js';
+import { onSmartTrade, onCoinVelocity } from '../trading/strategies.js';
 import { checkPositionsForMint } from '../trading/paper.js';
 import { config } from '../config.js';
 import { checkCashbackFlag } from './helius.js';
 import { onTrade as kingOnTrade } from '../trading/king-tracker.js';
+import { trackBuyer, checkPreKingProfile, markFired } from '../scoring/coin-velocity.js';
 
 const cashbackInflight = new Set();
 export function ensureCashback(mintAddress, bondingCurveKey, currentValue) {
@@ -182,6 +183,19 @@ function onTrade(e) {
     );
 
     try { kingOnTrade({ wallet, mint: e.mint, is_buy: isBuy ? 1 : 0, sol_amount: solAmount, timestamp: now }); } catch (err) { console.error('[king-tracker]', err.message); }
+
+    if (isBuy) {
+      try { trackBuyer(e.mint, wallet, now); } catch (err) { console.error('[velocity]', err.message); }
+      if (config.strategies?.preKing?.defaults?.enabled !== undefined) {
+        try {
+          const profile = checkPreKingProfile(e.mint, now);
+          if (profile?.pass) {
+            markFired(e.mint, now);
+            onCoinVelocity(e.mint, profile.metrics);
+          }
+        } catch (err) { console.error('[preKing]', err.message); }
+      }
+    }
 
     if (isBuy && label === 'SMART') {
       try { checkCopySignal(e.mint); } catch (err) { console.error('[copy-signal]', err.message); }

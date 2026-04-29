@@ -1,7 +1,7 @@
 import { db } from '../db/index.js';
 import { config } from '../config.js';
 import { isLiveMode } from './wallet.js';
-import { shouldForceExit as kingShouldForceExit } from './king-tracker.js';
+import { shouldForceExit as kingShouldForceExit, kingHasBoughtSince } from './king-tracker.js';
 
 const _pendingSells = new Set();
 const _pendingPaperSells = new Set();
@@ -459,6 +459,13 @@ function checkPosition(p) {
     if (kingExit) {
       console.log(`[king-exit] ${p.mint_address.slice(0,8)}… ${kingExit.wallet.slice(0,6)}… dumped ${(kingExit.sellRatio*100).toFixed(0)}% of bag (${kingExit.sellCount} sells, ${kingExit.soldSol.toFixed(2)}/${kingExit.boughtSol.toFixed(2)} SOL) — exiting`);
       exitReason = 'KING_DUMPED';
+    }
+  }
+  if (p.strategy === 'preKing') {
+    const kingBuy = kingHasBoughtSince(p.mint_address, p.entered_at);
+    if (kingBuy) {
+      console.log(`[preKing] 👑 ${kingBuy.wallet.slice(0,6)}… bought ${p.mint_address.slice(0,8)}… (we entered ${((kingBuy.kingBuyAt - p.entered_at)/1000).toFixed(1)}s earlier) — front-run hit, exiting into pump`);
+      exitReason = 'KING_BOUGHT';
     }
   }
   if (exitReason) { /* king-dump already set — skip the rest */ }

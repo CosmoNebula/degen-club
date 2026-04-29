@@ -31,6 +31,17 @@ export function onTrade(trade) {
   entry.lastUpdate = trade.timestamp;
 }
 
+export function kingHasBoughtSince(mintAddress, ourEntryTimestamp) {
+  for (const wallet of kingWalletSet()) {
+    const entry = _kingActivity.get(`${wallet}:${mintAddress}`);
+    if (!entry || !entry.firstBuyAt) continue;
+    if (entry.firstBuyAt > ourEntryTimestamp) {
+      return { wallet, kingBuyAt: entry.firstBuyAt, boughtSol: entry.totalBoughtSol };
+    }
+  }
+  return null;
+}
+
 export function shouldForceExit(mintAddress, ourEntryTimestamp) {
   const threshold = config.strategies.kingFollow?.kingSellExitThreshold ?? 0.5;
   for (const wallet of kingWalletSet()) {

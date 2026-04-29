@@ -5,7 +5,7 @@ import { isLiveMode } from './wallet.js';
 import { passesHolderDiversity } from '../scoring/holders.js';
 import { applyDynamicSizing } from './sizing.js';
 
-const KEYS = ['trackedWalletFollow', 'quickFlip15', 'kingFollow'];
+const KEYS = ['trackedWalletFollow', 'quickFlip15', 'kingFollow', 'preKing'];
 const SETTABLE = [
   'entry_sol', 'sl_pct', 'max_hold_min',
   'tier1_trigger_pct', 'tier1_sell_pct',
@@ -349,6 +349,25 @@ export function onSmartTrade(trade, mint) {
       tryFire(name, mint, details, dynamicSize, score);
     }
   } catch (err) { console.error('[strategy] onSmartTrade', err.message); }
+}
+
+export function onCoinVelocity(mintAddress, metrics) {
+  try {
+    const mint = S().getMint.get(mintAddress);
+    if (!mint || !passesGlobalGuards(mint, 'coin_velocity')) return;
+    const holding = S().holdingMint.get(mintAddress, 'preKing');
+    if (holding) return;
+    const details = {
+      type: 'PRE_KING',
+      mc: metrics.mc,
+      buyersWindow: metrics.buyersFullWindow,
+      buyersHalf: metrics.buyersRecentHalf,
+      velocity: metrics.velocityRatio,
+      ageSec: metrics.ageSec,
+    };
+    console.log(`[preKing] ⚡ ${mintAddress.slice(0,8)}… age ${metrics.ageSec.toFixed(1)}s · mc ${metrics.mc.toFixed(1)} · ${metrics.buyersFullWindow} buyers (${metrics.buyersRecentHalf} recent · vel ${metrics.velocityRatio.toFixed(2)}) — firing`);
+    for (const name of strategiesForTrigger('coin_velocity')) tryFire(name, mint, details);
+  } catch (err) { console.error('[strategy] onCoinVelocity', err.message); }
 }
 
 export function onRunnerScore(mintAddress, scoreInfo) {
