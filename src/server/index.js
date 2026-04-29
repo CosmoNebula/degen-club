@@ -61,7 +61,7 @@ export function startServer(getIngestionStatus) {
         WHERE status = 'open' ORDER BY entered_at DESC LIMIT 30`).all();
       const closed = d.prepare(`SELECT id, mint_address, strategy, position_mode, entry_sol, realized_pnl_sol, realized_pnl_pct, exit_reason, exited_at
         FROM paper_positions WHERE status = 'closed' ORDER BY exited_at DESC LIMIT 30`).all();
-      const wallet = d.prepare('SELECT * FROM paper_wallet WHERE id = 1').get() || {};
+      const paperWallet = d.prepare('SELECT * FROM paper_wallet WHERE id = 1').get() || {};
       const totals = d.prepare(`SELECT
           COALESCE(SUM(CASE WHEN position_mode='paper' THEN realized_pnl_sol ELSE 0 END),0) AS paperPnl,
           COALESCE(SUM(CASE WHEN position_mode='live'  THEN realized_pnl_sol ELSE 0 END),0) AS livePnl,
