@@ -3,6 +3,28 @@ import { config } from '../config.js';
 
 const _recentFires = new Map();
 const _mintBuyerWindow = new Map();
+const _rejectionCounts = new Map();
+let _passCount = 0;
+let _evalCount = 0;
+let _statsResetAt = Date.now();
+
+function bumpReject(reason) {
+  const tag = String(reason || 'UNKNOWN').split(':')[0];
+  _rejectionCounts.set(tag, (_rejectionCounts.get(tag) || 0) + 1);
+}
+
+export function getProfileStats() {
+  const out = { evaluated: _evalCount, passed: _passCount, sinceMs: Date.now() - _statsResetAt, rejections: {} };
+  for (const [k, v] of _rejectionCounts) out.rejections[k] = v;
+  return out;
+}
+
+export function resetProfileStats() {
+  _rejectionCounts.clear();
+  _passCount = 0;
+  _evalCount = 0;
+  _statsResetAt = Date.now();
+}
 
 export function trackBuyer(mintAddress, wallet, ts) {
   let window = _mintBuyerWindow.get(mintAddress);
@@ -20,13 +42,11 @@ export function clearOnExit(mintAddress) {
 }
 
 function uniqueBuyersInWindow(mintAddress, sinceTs, untilTs) {
-  const window = _mintBuyerWindow.get(mintAddress);
-  if (!window) return 0;
-  const seen = new Set();
-  for (const e of window) {
-    if (e.ts >= sinceTs && e.ts <= untilTs) seen.add(e.wallet);
-  }
-  return seen.size;
+  const row = db().prepare(`
+    SELECT COUNT(DISTINCT wallet) AS n FROM trades
+    WHERE mint_address = ? AND is_buy = 1 AND timestamp >= ? AND timestamp <= ?
+  `).get(mintAddress, sinceTs, untilTs);
+  return row?.n || 0;
 }
 
 export function getMintMetrics(mintAddress) {
@@ -41,20 +61,22 @@ export function getMintMetrics(mintAddress) {
 export function checkPreKingProfile(mintAddress, now) {
   const cfg = config.strategies?.preKing;
   if (!cfg) return null;
+  _evalCount++;
 
   const m = getMintMetrics(mintAddress);
-  if (!m) return { pass: false, reason: 'NO_MINT' };
-  if (m.migrated || m.rugged) return { pass: false, reason: 'MIGRATED_OR_RUGGED' };
+  if (!m) { bumpReject('NO_MINT'); return { pass: false, reason: 'NO_MINT' }; }
+  if (m.migrated || m.rugged) { bumpReject('MIGRATED_OR_RUGGED'); return { pass: false, reason: 'MIGRATED_OR_RUGGED' }; }
 
   const ageSec = (now - (m.created_at || now)) / 1000;
-  if (ageSec < cfg.ageMinSec) return { pass: false, reason: `AGE_TOO_NEW:${ageSec.toFixed(1)}s` };
-  if (ageSec > cfg.ageMaxSec) return { pass: false, reason: `AGE_TOO_OLD:${ageSec.toFixed(1)}s` };
+  if (ageSec < cfg.ageMinSec) { bumpReject('AGE_TOO_NEW'); return { pass: false, reason: `AGE_TOO_NEW:${ageSec.toFixed(1)}s` }; }
+  if (ageSec > cfg.ageMaxSec) { bumpReject('AGE_TOO_OLD'); return { pass: false, reason: `AGE_TOO_OLD:${ageSec.toFixed(1)}s` }; }
 
   const mc = m.current_market_cap_sol || 0;
-  if (mc < cfg.mcMinSol) return { pass: false, reason: `MC_TOO_LOW:${mc.toFixed(1)}` };
-  if (mc > cfg.mcMaxSol) return { pass: false, reason: `MC_TOO_HIGH:${mc.toFixed(1)}` };
+  if (mc < cfg.mcMinSol) { bumpReject('MC_TOO_LOW'); return { pass: false, reason: `MC_TOO_LOW:${mc.toFixed(1)}` }; }
+  if (mc > cfg.mcMaxSol) { bumpReject('MC_TOO_HIGH'); return { pass: false, reason: `MC_TOO_HIGH:${mc.toFixed(1)}` }; }
 
   if ((m.bundle_buyer_count || 0) > cfg.maxBundleBuyers) {
+    bumpReject('BUNDLED');
     return { pass: false, reason: `BUNDLED:${m.bundle_buyer_count}` };
   }
 
@@ -63,6 +85,7 @@ export function checkPreKingProfile(mintAddress, now) {
     WHERE mint_address = ? AND is_buy = 1 AND is_first_block = 1
   `).get(mintAddress).n;
   if (sniperCount > cfg.maxFirstBlockSnipers) {
+    bumpReject('SNIPER_HEAVY');
     return { pass: false, reason: `SNIPER_HEAVY:${sniperCount}` };
   }
 
@@ -70,19 +93,23 @@ export function checkPreKingProfile(mintAddress, now) {
   const halfMs = windowMs / 2;
   const buyersFullWindow = uniqueBuyersInWindow(mintAddress, now - windowMs, now);
   if (buyersFullWindow < cfg.minBuyersInWindow) {
+    bumpReject('LOW_VELOCITY');
     return { pass: false, reason: `LOW_VELOCITY:${buyersFullWindow}<${cfg.minBuyersInWindow}` };
   }
   const buyersRecentHalf = uniqueBuyersInWindow(mintAddress, now - halfMs, now);
   const velocityRatio = buyersFullWindow > 0 ? buyersRecentHalf / buyersFullWindow : 0;
   if (velocityRatio < cfg.minVelocityRatio) {
+    bumpReject('DECELERATING');
     return { pass: false, reason: `DECELERATING:${velocityRatio.toFixed(2)}` };
   }
 
   const lastFire = _recentFires.get(mintAddress) || 0;
   if (now - lastFire < cfg.mintCooldownSec * 1000) {
+    bumpReject('RECENT_FIRE');
     return { pass: false, reason: 'RECENT_FIRE' };
   }
 
+  _passCount++;
   return {
     pass: true,
     metrics: {

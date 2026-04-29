@@ -999,6 +999,32 @@ export function startServer(getIngestionStatus) {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
+  app.get('/api/preking/stats', async (req, res) => {
+    try {
+      const cv = await import('../scoring/coin-velocity.js');
+      const stats = cv.getProfileStats();
+      const passRate = stats.evaluated > 0 ? stats.passed / stats.evaluated : 0;
+      const sortedRej = Object.entries(stats.rejections).sort((a, b) => b[1] - a[1]);
+      res.json({
+        sinceMs: stats.sinceMs,
+        sinceMin: +(stats.sinceMs / 60000).toFixed(1),
+        evaluated: stats.evaluated,
+        passed: stats.passed,
+        passRate: +(passRate * 100).toFixed(2),
+        rejections: Object.fromEntries(sortedRej),
+        topReason: sortedRej[0]?.[0] || null,
+      });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post('/api/preking/stats/reset', async (req, res) => {
+    try {
+      const cv = await import('../scoring/coin-velocity.js');
+      cv.resetProfileStats();
+      res.json({ ok: true, resetAt: Date.now() });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
   app.get('/api/limits', (req, res) => {
     res.json({
       maxPerTradeSol: config.safety?.maxPerTradeSol || 0,
