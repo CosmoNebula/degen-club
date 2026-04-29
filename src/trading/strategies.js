@@ -358,8 +358,6 @@ export function onCoinVelocity(mintAddress, metrics) {
   try {
     const mint = S().getMint.get(mintAddress);
     if (!mint || !passesGlobalGuards(mint, 'coin_velocity', { skipHolderGate: true })) return;
-    const holding = S().holdingMint.get(mintAddress, 'preKing');
-    if (holding) return;
     const details = {
       type: 'PRE_KING',
       mc: metrics.mc,
@@ -387,7 +385,7 @@ export function onVolumeSurge(mintAddress, surgeDetails) {
     const mint = S().getMint.get(mintAddress);
     if (!mint || !passesGlobalGuards(mint, 'volume_surge')) return;
     const details = { type: 'VOLUME_SURGE', ...surgeDetails };
-    const holding = S().holdingMint.get(mintAddress, 'volumeSurgeRunner');
+    const holding = S().holdingMint.get(mintAddress, 'volumeSurgeRunner', 'paper');
     if (holding) {
       console.log(`[strategy] volumeSurgeRunner skip ${mintAddress.slice(0,8)}… already held`);
       return;
