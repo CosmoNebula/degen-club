@@ -4,8 +4,9 @@ import { openPaperPosition } from './paper.js';
 import { isLiveMode } from './wallet.js';
 import { passesHolderDiversity } from '../scoring/holders.js';
 import { applyDynamicSizing } from './sizing.js';
+import { strategyNames } from '../strategies/index.js';
 
-const KEYS = ['trackedWalletFollow', 'quickFlip15', 'kingFollow', 'preKing'];
+const KEYS = strategyNames;
 const SETTABLE = [
   'entry_sol', 'sl_pct', 'max_hold_min',
   'tier1_trigger_pct', 'tier1_sell_pct',
