@@ -144,8 +144,10 @@ function evaluateGuards(mint, opts = {}) {
   for (const skip of g.skipFlags) if (flags.includes(skip)) return { pass: false, reason: `FLAG_${skip}` };
   if (S().countOpen.get().n >= g.maxOpenPositions) return { pass: false, reason: 'MAX_POSITIONS', detail: `${g.maxOpenPositions}` };
   if (S().sumOpenSol.get().s >= g.maxSolExposure) return { pass: false, reason: 'MAX_EXPOSURE', detail: `${g.maxSolExposure}` };
-  const holder = passesHolderDiversity(mint.mint_address, opts);
-  if (!holder.pass) return { pass: false, reason: 'HOLDER_GATE', detail: holder.reason };
+  if (!opts.skipHolderGate) {
+    const holder = passesHolderDiversity(mint.mint_address, opts);
+    if (!holder.pass) return { pass: false, reason: 'HOLDER_GATE', detail: holder.reason };
+  }
   return { pass: true };
 }
 
@@ -355,7 +357,7 @@ export function onSmartTrade(trade, mint) {
 export function onCoinVelocity(mintAddress, metrics) {
   try {
     const mint = S().getMint.get(mintAddress);
-    if (!mint || !passesGlobalGuards(mint, 'coin_velocity')) return;
+    if (!mint || !passesGlobalGuards(mint, 'coin_velocity', { skipHolderGate: true })) return;
     const holding = S().holdingMint.get(mintAddress, 'preKing');
     if (holding) return;
     const details = {
