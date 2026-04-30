@@ -283,9 +283,11 @@ export function onSmartTrade(trade, mint) {
     const w = S().walletInfo.get(trade.wallet);
     if (!w || !w.tracked) return;
     const walletBoosted = (w.auto_boost_mult || 1.0) > 1.0;
-    if ((w.bundle_cluster_id || w.category === 'BUNDLE') && !walletBoosted) return;
-    if (!w.copy_friendly && !walletBoosted) return;
-    if (w.auto_blocked) {
+    const kingWhitelist = new Set(config.strategies?.kingFollow?.kingWallets || []);
+    const isWhitelistedKing = kingWhitelist.has(trade.wallet);
+    if ((w.bundle_cluster_id || w.category === 'BUNDLE') && !walletBoosted && !isWhitelistedKing) return;
+    if (!w.copy_friendly && !walletBoosted && !isWhitelistedKing) return;
+    if (w.auto_blocked && !isWhitelistedKing) {
       console.log(`[blocked] auto-blocked wallet ${trade.wallet.slice(0,6)}… (follow WR=${(w.follow_wr*100).toFixed(0)}%, net=${(w.follow_net_sol||0).toFixed(3)} SOL)`);
       return;
     }
