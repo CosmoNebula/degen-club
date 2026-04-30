@@ -69,6 +69,7 @@
     <button class="tab" data-tab="system">⚙️ <span>SYSTEM</span></button>
     <button class="tab" data-tab="lab">🔬 <span>COIN LAB</span></button>
     <button class="tab" data-tab="ticker">⚡ <span>TICKER</span></button>
+    <button class="tab" data-tab="builder">🛠 <span>BUILD</span></button>
   </nav>
 
   <main class="tab-content">
@@ -653,6 +654,126 @@
         <div><h2 style="font-size:11px;color:var(--muted);margin:0 0 6px;letter-spacing:2px;">RECENT CLOSES</h2><div id="ticker-closed-list"></div></div>
       </div>
       <div style="color:var(--muted);font-size:10px;text-align:right;margin-top:8px;" id="ticker-stamp">—</div>
+    </section>
+
+    <section class="tab-pane" data-pane="builder">
+      <div class="pane-header">
+        <h1>🛠 STRATEGY BUILDER</h1>
+        <p>Build new trading strategies with all the knobs. Hit CREATE → writes to <code>src/strategies/</code> → restart picks it up. EDIT existing or DELETE to remove.</p>
+      </div>
+
+      <div style="display:grid;grid-template-columns:280px 1fr;gap:18px;">
+        <div>
+          <h2 style="font-size:11px;color:var(--muted);margin:0 0 8px;letter-spacing:2px;">EXISTING STRATEGIES</h2>
+          <div id="builder-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+          <button id="builder-new-btn" class="footer-btn" style="margin-top:12px;width:100%;">＋ NEW STRATEGY</button>
+          <button id="builder-restart-btn" class="footer-btn" style="margin-top:6px;width:100%;background:var(--pink);color:#000;">↻ RESTART TO APPLY</button>
+        </div>
+
+        <div id="builder-form" style="background:#0a0a18;border:1px solid var(--border);border-radius:8px;padding:18px;display:none;">
+          <h2 id="builder-form-title" style="margin:0 0 14px;font-size:14px;color:var(--cyan);">NEW STRATEGY</h2>
+
+          <details open style="margin-bottom:10px;"><summary style="cursor:pointer;color:var(--cyan);font-size:11px;letter-spacing:1px;">▾ IDENTITY</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">
+              <label>Name (camelCase, no spaces)<input id="b-name" type="text" placeholder="myStrategy" /></label>
+              <label>Label (display)<input id="b-label" type="text" placeholder="M · My Strategy" /></label>
+              <label style="grid-column:1/-1;">Description<input id="b-description" type="text" placeholder="What this does..." /></label>
+              <label>Trigger
+                <select id="b-trigger">
+                  <option value="smart_trade">smart_trade (tracked-wallet buy)</option>
+                  <option value="coin_velocity">coin_velocity (preKing-style profile)</option>
+                  <option value="cluster">cluster (multi-wallet)</option>
+                  <option value="runner_score">runner_score</option>
+                  <option value="volume_surge">volume_surge</option>
+                </select>
+              </label>
+              <label>Enabled at start<select id="b-enabled"><option value="0">No (test first)</option><option value="1">Yes</option></select></label>
+            </div>
+          </details>
+
+          <details open style="margin-bottom:10px;"><summary style="cursor:pointer;color:var(--cyan);font-size:11px;letter-spacing:1px;">▾ SOURCE FILTER</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">
+              <label>Wallet whitelist (comma-separated, leave blank for none)<input id="b-whitelist" type="text" placeholder="addr1,addr2,..." /></label>
+              <label>Wallet categories (KOL, BOT, SCALPER, BUNDLE, NOT_SURE)<input id="b-categories" type="text" placeholder="KOL,BOT" /></label>
+              <label>Categories under MC (e.g. BOT:70 means BOT only when mc&lt;70)<input id="b-cat-under-mc" type="text" placeholder="BOT:70" /></label>
+              <label>Require KOL<select id="b-require-kol"><option value="0">No</option><option value="1">Yes</option></select></label>
+            </div>
+          </details>
+
+          <details open style="margin-bottom:10px;"><summary style="cursor:pointer;color:var(--cyan);font-size:11px;letter-spacing:1px;">▾ MC BOUNDS & SIZING</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:8px;">
+              <label>MC floor (SOL)<input id="b-mc-floor" type="number" step="1" placeholder="0" /></label>
+              <label>MC ceiling (SOL)<input id="b-mc-ceiling" type="number" step="1" placeholder="100" /></label>
+              <label>Entry SOL<input id="b-entry-sol" type="number" step="0.01" value="0.13" /></label>
+              <label>Max hold (min)<input id="b-max-hold" type="number" step="0.5" value="30" /></label>
+              <label>Stop loss %<input id="b-sl-pct" type="number" step="0.01" value="-0.10" /></label>
+            </div>
+          </details>
+
+          <details open style="margin-bottom:10px;"><summary style="cursor:pointer;color:var(--cyan);font-size:11px;letter-spacing:1px;">▾ TIER LADDER (TP)</summary>
+            <table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:13px;">
+              <thead><tr><th></th><th>Trigger %</th><th>Sell %</th><th>Trail %</th></tr></thead>
+              <tbody>
+                <tr><td>T1</td><td><input id="b-t1-trig" type="number" step="0.01" value="0.20" style="width:90px;" /></td><td><input id="b-t1-sell" type="number" step="0.01" value="1.00" style="width:90px;" /></td><td>—</td></tr>
+                <tr><td>T2</td><td><input id="b-t2-trig" type="number" step="0.01" value="99" style="width:90px;" /></td><td><input id="b-t2-sell" type="number" step="0.01" value="0" style="width:90px;" /></td><td>—</td></tr>
+                <tr><td>T3</td><td><input id="b-t3-trig" type="number" step="0.01" value="99" style="width:90px;" /></td><td><input id="b-t3-sell" type="number" step="0.01" value="0" style="width:90px;" /></td><td><input id="b-t3-trail" type="number" step="0.01" value="0" style="width:90px;" /></td></tr>
+              </tbody>
+            </table>
+          </details>
+
+          <details style="margin-bottom:10px;"><summary style="cursor:pointer;color:var(--cyan);font-size:11px;letter-spacing:1px;">▸ PEAK FLOORS (catch fades)</summary>
+            <table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:13px;">
+              <thead><tr><th></th><th>Arm at peak %</th><th>Exit when peak drops below %</th></tr></thead>
+              <tbody>
+                <tr><td>L1</td><td><input id="b-pf1-arm" type="number" step="0.01" value="0.10" style="width:90px;" /></td><td><input id="b-pf1-exit" type="number" step="0.01" value="0.10" style="width:90px;" /></td></tr>
+                <tr><td>L2</td><td><input id="b-pf2-arm" type="number" step="0.01" value="0.20" style="width:90px;" /></td><td><input id="b-pf2-exit" type="number" step="0.01" value="0.20" style="width:90px;" /></td></tr>
+                <tr><td>L3</td><td><input id="b-pf3-arm" type="number" step="0.01" value="0.30" style="width:90px;" /></td><td><input id="b-pf3-exit" type="number" step="0.01" value="0.30" style="width:90px;" /></td></tr>
+              </tbody>
+            </table>
+          </details>
+
+          <details style="margin-bottom:10px;"><summary style="cursor:pointer;color:var(--cyan);font-size:11px;letter-spacing:1px;">▸ BREAKEVEN & TP TRAIL</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:8px;">
+              <label>Breakeven after T1<select id="b-be-after-t1"><option value="0">No</option><option value="1">Yes</option></select></label>
+              <label>BE arm %<input id="b-be-arm" type="number" step="0.01" value="0" /></label>
+              <label>BE floor %<input id="b-be-floor" type="number" step="0.01" value="0" /></label>
+              <label>TP trail %<input id="b-tp-trail" type="number" step="0.01" value="0" /></label>
+              <label>TP trail arm %<input id="b-tp-trail-arm" type="number" step="0.01" value="0" /></label>
+            </div>
+          </details>
+
+          <details style="margin-bottom:10px;"><summary style="cursor:pointer;color:var(--cyan);font-size:11px;letter-spacing:1px;">▸ FAST FAIL / FAKE PUMP / FLAT EXIT</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:8px;">
+              <label>Fast-fail sec<input id="b-ff-sec" type="number" value="0" /></label>
+              <label>Fast-fail min peak %<input id="b-ff-peak" type="number" step="0.01" value="0" /></label>
+              <label>Fast-fail SL %<input id="b-ff-sl" type="number" step="0.01" value="0" /></label>
+              <label>Fakepump sec<input id="b-fp-sec" type="number" value="0" /></label>
+              <label>Fakepump min peak %<input id="b-fp-peak" type="number" step="0.01" value="0" /></label>
+              <label>Fakepump SL %<input id="b-fp-sl" type="number" step="0.01" value="0" /></label>
+              <label>Flat exit min<input id="b-flat-min" type="number" value="0" /></label>
+              <label>Flat exit max peak %<input id="b-flat-peak" type="number" step="0.01" value="0" /></label>
+              <label>Flat exit band %<input id="b-flat-band" type="number" step="0.01" value="0" /></label>
+              <label>Stagnant exit min<input id="b-stag-min" type="number" value="0" /></label>
+              <label>Stagnant loss %<input id="b-stag-loss" type="number" step="0.01" value="0" /></label>
+              <label>Cashback boost ×<input id="b-cashback" type="number" step="0.01" value="1.0" /></label>
+            </div>
+          </details>
+
+          <details style="margin-bottom:10px;"><summary style="cursor:pointer;color:var(--cyan);font-size:11px;letter-spacing:1px;">▸ KING/SELL EXIT (kingFollow-style)</summary>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">
+              <label>King wallets (comma-separated, force-exit when they dump ≥X% of bag)<input id="b-king-wallets" type="text" placeholder="addr1,addr2" /></label>
+              <label>King sell exit threshold (0.5 = exit when 50% bag dumped)<input id="b-king-sell-thresh" type="number" step="0.05" value="0.5" /></label>
+            </div>
+          </details>
+
+          <div style="display:flex;gap:10px;margin-top:18px;">
+            <button id="b-save-btn" class="footer-btn" style="background:var(--green);color:#000;flex:1;">SAVE</button>
+            <button id="b-delete-btn" class="footer-btn" style="background:var(--pink);color:#000;display:none;">DELETE</button>
+            <button id="b-cancel-btn" class="footer-btn" style="flex:1;">CANCEL</button>
+          </div>
+          <div id="b-status" style="margin-top:10px;font-size:12px;color:var(--muted);"></div>
+        </div>
+      </div>
     </section>
 
   </main>

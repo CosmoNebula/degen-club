@@ -1,6 +1,7 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import { exec as childExec } from 'node:child_process';
 import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { getSolUsd, getPriceLastUpdate } from '../price.js';
@@ -996,6 +997,80 @@ export function startServer(getIngestionStatus) {
         };
       }
       res.json({ summary, trades });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.get('/api/strategies/builder/list', (req, res) => {
+    try {
+      const out = [];
+      for (const [name, cfg] of Object.entries(config.strategies)) {
+        if (['monitorIntervalMs', 'global', 'holderGate'].includes(name)) continue;
+        if (typeof cfg !== 'object' || !cfg.defaults) continue;
+        const file = path.join(config.publicDir, '..', 'src', 'strategies', `${name}.js`);
+        out.push({ name, config: cfg, sourceFile: fs.existsSync(file) ? `src/strategies/${name}.js` : null });
+      }
+      res.json({ strategies: out });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post('/api/strategies/builder/create', (req, res) => {
+    try {
+      const { name, label, description, trigger, sourceFilter, mcCeiling, mcFloor, defaults, kingWallets, kingSellExitThreshold } = req.body || {};
+      if (!name || !/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) {
+        return res.status(400).json({ error: 'name must be camelCase identifier' });
+      }
+      const file = path.join(config.publicDir, '..', 'src', 'strategies', `${name}.js`);
+      if (fs.existsSync(file)) return res.status(409).json({ error: `${name} already exists — use PUT to update` });
+      const cfg = { label: label || name, description: description || '', trigger: trigger || 'smart_trade' };
+      if (sourceFilter) cfg.sourceFilter = sourceFilter;
+      if (typeof mcCeiling === 'number') cfg.mcCeiling = mcCeiling;
+      if (typeof mcFloor === 'number') cfg.mcFloor = mcFloor;
+      if (Array.isArray(kingWallets) && kingWallets.length) cfg.kingWallets = kingWallets;
+      if (typeof kingSellExitThreshold === 'number') cfg.kingSellExitThreshold = kingSellExitThreshold;
+      cfg.defaults = defaults || {};
+      const body = `// User-built strategy — generated via Strategy Builder UI\nexport default ${JSON.stringify({ name, config: cfg }, null, 2)};\n`;
+      fs.writeFileSync(file, body);
+      res.json({ ok: true, name, sourceFile: `src/strategies/${name}.js`, restart_required: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.put('/api/strategies/builder/:name', (req, res) => {
+    try {
+      const name = req.params.name;
+      const file = path.join(config.publicDir, '..', 'src', 'strategies', `${name}.js`);
+      if (!fs.existsSync(file)) return res.status(404).json({ error: `${name} not found` });
+      const { label, description, trigger, sourceFilter, mcCeiling, mcFloor, defaults, kingWallets, kingSellExitThreshold } = req.body || {};
+      const cfg = { label: label || name, description: description || '', trigger: trigger || 'smart_trade' };
+      if (sourceFilter) cfg.sourceFilter = sourceFilter;
+      if (typeof mcCeiling === 'number') cfg.mcCeiling = mcCeiling;
+      if (typeof mcFloor === 'number') cfg.mcFloor = mcFloor;
+      if (Array.isArray(kingWallets) && kingWallets.length) cfg.kingWallets = kingWallets;
+      if (typeof kingSellExitThreshold === 'number') cfg.kingSellExitThreshold = kingSellExitThreshold;
+      cfg.defaults = defaults || {};
+      const body = `// User-built strategy — generated via Strategy Builder UI\nexport default ${JSON.stringify({ name, config: cfg }, null, 2)};\n`;
+      fs.writeFileSync(file, body);
+      res.json({ ok: true, name, restart_required: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.delete('/api/strategies/builder/:name', (req, res) => {
+    try {
+      const name = req.params.name;
+      const file = path.join(config.publicDir, '..', 'src', 'strategies', `${name}.js`);
+      if (!fs.existsSync(file)) return res.status(404).json({ error: `${name} not found` });
+      fs.unlinkSync(file);
+      try { db().prepare('DELETE FROM strategy_state WHERE name = ?').run(name); } catch {}
+      res.json({ ok: true, name, restart_required: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post('/api/strategies/builder/restart', (req, res) => {
+    try {
+      const uid = process.getuid();
+      childExec(`launchctl kickstart -k gui/${uid}/com.degen-club`, (err) => {
+        if (err) console.error('[builder] restart failed:', err.message);
+      });
+      res.json({ ok: true, message: 'restart triggered — page may briefly disconnect' });
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 

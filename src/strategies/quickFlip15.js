@@ -9,6 +9,11 @@ export default {
     label: 'Q · Quick Flip +20%',
     description: 'KOL or BOT<70mc smart_trade entries · MC<100 ceiling · sells 100% at +20% · no tiers, no trailing, no breakeven',
     trigger: 'smart_trade',
+    mcCeiling: 100,
+    sourceFilter: {
+      walletCategories: ['KOL'],
+      categoriesUnderMc: { BOT: 70 },
+    },
     defaults: {
       enabled: 1, entry_sol: 0.13, sl_pct: -0.10, max_hold_min: 30,
       tier1_trigger_pct: 0.20, tier1_sell_pct: 1.0,

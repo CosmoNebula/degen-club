@@ -2210,6 +2210,195 @@ setInterval(tick, 3000);
 refreshDbStats();
 setInterval(refreshDbStats, 30000);
 
+(function setupStrategyBuilder() {
+  const listEl = document.getElementById('builder-list');
+  const formEl = document.getElementById('builder-form');
+  const titleEl = document.getElementById('builder-form-title');
+  const newBtn = document.getElementById('builder-new-btn');
+  const restartBtn = document.getElementById('builder-restart-btn');
+  const saveBtn = document.getElementById('b-save-btn');
+  const deleteBtn = document.getElementById('b-delete-btn');
+  const cancelBtn = document.getElementById('b-cancel-btn');
+  const statusEl = document.getElementById('b-status');
+  if (!listEl || !formEl) return;
+  let editingName = null;
+
+  const $ = (id) => document.getElementById(id);
+  const setVal = (id, v) => { const el = $(id); if (el) el.value = (v === undefined || v === null) ? '' : v; };
+  const getVal = (id) => $(id)?.value || '';
+  const getNum = (id) => { const v = parseFloat(getVal(id)); return isFinite(v) ? v : 0; };
+  const getInt = (id) => { const v = parseInt(getVal(id), 10); return isFinite(v) ? v : 0; };
+
+  async function refreshList() {
+    try {
+      const r = await fetchJson('/api/strategies/builder/list');
+      listEl.innerHTML = (r.strategies || []).map(s => {
+        const editable = !!s.sourceFile;
+        return `<div class="builder-row" data-name="${s.name}" style="padding:8px 10px;border:1px solid var(--border);border-radius:4px;cursor:pointer;background:#0d0d1a;">
+          <div style="font-size:12px;color:var(--cyan);font-weight:bold;">${s.config.label || s.name}</div>
+          <div style="font-size:10px;color:var(--muted);">${s.name} · ${s.config.trigger || 'smart_trade'} ${editable ? '' : '(built-in)'}</div>
+        </div>`;
+      }).join('');
+      listEl.querySelectorAll('.builder-row').forEach(row => {
+        row.addEventListener('click', () => loadForEdit(row.dataset.name));
+      });
+    } catch (e) { listEl.innerHTML = `<div class="muted">load failed: ${e.message}</div>`; }
+  }
+
+  function clearForm() {
+    ['b-name','b-label','b-description','b-whitelist','b-categories','b-cat-under-mc','b-mc-floor','b-mc-ceiling','b-king-wallets'].forEach(id => setVal(id, ''));
+    setVal('b-trigger', 'smart_trade'); setVal('b-enabled', '0'); setVal('b-require-kol', '0');
+    setVal('b-entry-sol', 0.13); setVal('b-max-hold', 30); setVal('b-sl-pct', -0.10);
+    setVal('b-t1-trig', 0.20); setVal('b-t1-sell', 1.00);
+    setVal('b-t2-trig', 99); setVal('b-t2-sell', 0);
+    setVal('b-t3-trig', 99); setVal('b-t3-sell', 0); setVal('b-t3-trail', 0);
+    setVal('b-pf1-arm', 0.10); setVal('b-pf1-exit', 0.10);
+    setVal('b-pf2-arm', 0.20); setVal('b-pf2-exit', 0.20);
+    setVal('b-pf3-arm', 0.30); setVal('b-pf3-exit', 0.30);
+    setVal('b-be-after-t1', '0'); setVal('b-be-arm', 0); setVal('b-be-floor', 0);
+    setVal('b-tp-trail', 0); setVal('b-tp-trail-arm', 0);
+    setVal('b-ff-sec', 0); setVal('b-ff-peak', 0); setVal('b-ff-sl', 0);
+    setVal('b-fp-sec', 0); setVal('b-fp-peak', 0); setVal('b-fp-sl', 0);
+    setVal('b-flat-min', 0); setVal('b-flat-peak', 0); setVal('b-flat-band', 0);
+    setVal('b-stag-min', 0); setVal('b-stag-loss', 0); setVal('b-cashback', 1.0);
+    setVal('b-king-sell-thresh', 0.5);
+  }
+
+  async function loadForEdit(name) {
+    try {
+      const r = await fetchJson('/api/strategies/builder/list');
+      const s = (r.strategies || []).find(x => x.name === name);
+      if (!s) return;
+      const c = s.config; const d = c.defaults || {};
+      clearForm();
+      setVal('b-name', s.name); $('b-name').disabled = true;
+      setVal('b-label', c.label); setVal('b-description', c.description); setVal('b-trigger', c.trigger || 'smart_trade');
+      setVal('b-enabled', d.enabled || 0);
+      const sf = c.sourceFilter || {};
+      setVal('b-whitelist', (sf.walletWhitelist || []).join(','));
+      setVal('b-categories', (sf.walletCategories || []).join(','));
+      setVal('b-cat-under-mc', Object.entries(sf.categoriesUnderMc || {}).map(([k,v]) => `${k}:${v}`).join(','));
+      setVal('b-require-kol', sf.requireKol ? '1' : '0');
+      setVal('b-mc-floor', c.mcFloor); setVal('b-mc-ceiling', c.mcCeiling);
+      setVal('b-entry-sol', d.entry_sol); setVal('b-max-hold', d.max_hold_min); setVal('b-sl-pct', d.sl_pct);
+      setVal('b-t1-trig', d.tier1_trigger_pct); setVal('b-t1-sell', d.tier1_sell_pct);
+      setVal('b-t2-trig', d.tier2_trigger_pct); setVal('b-t2-sell', d.tier2_sell_pct);
+      setVal('b-t3-trig', d.tier3_trigger_pct); setVal('b-t3-sell', d.tier3_sell_pct); setVal('b-t3-trail', d.tier3_trail_pct);
+      setVal('b-pf1-arm', d.peak_floor_arm_pct); setVal('b-pf1-exit', d.peak_floor_exit_pct);
+      setVal('b-pf2-arm', d.peak_floor_arm2_pct); setVal('b-pf2-exit', d.peak_floor_exit2_pct);
+      setVal('b-pf3-arm', d.peak_floor_arm3_pct); setVal('b-pf3-exit', d.peak_floor_exit3_pct);
+      setVal('b-be-after-t1', d.breakeven_after_tier1 || 0); setVal('b-be-arm', d.breakeven_arm_pct); setVal('b-be-floor', d.breakeven_floor_pct);
+      setVal('b-tp-trail', d.tp_trail_pct); setVal('b-tp-trail-arm', d.tp_trail_arm_pct);
+      setVal('b-ff-sec', d.fast_fail_sec); setVal('b-ff-peak', d.fast_fail_min_peak_pct); setVal('b-ff-sl', d.fast_fail_sl_pct);
+      setVal('b-fp-sec', d.fakepump_sec); setVal('b-fp-peak', d.fakepump_min_peak_pct); setVal('b-fp-sl', d.fakepump_sl_pct);
+      setVal('b-flat-min', d.flat_exit_min); setVal('b-flat-peak', d.flat_exit_max_peak_pct); setVal('b-flat-band', d.flat_exit_band_pct);
+      setVal('b-stag-min', d.stagnant_exit_min); setVal('b-stag-loss', d.stagnant_loss_pct); setVal('b-cashback', d.cashback_trigger_boost || 1.0);
+      setVal('b-king-wallets', (c.kingWallets || []).join(','));
+      setVal('b-king-sell-thresh', c.kingSellExitThreshold || 0.5);
+      editingName = s.name;
+      titleEl.textContent = `EDIT: ${s.name}`;
+      deleteBtn.style.display = s.sourceFile ? 'block' : 'none';
+      formEl.style.display = 'block';
+      statusEl.textContent = s.sourceFile ? `editing ${s.sourceFile}` : 'built-in (read-only fields will save as override)';
+    } catch (e) { statusEl.textContent = `load failed: ${e.message}`; }
+  }
+
+  function buildSpec() {
+    const whitelist = getVal('b-whitelist').split(',').map(s => s.trim()).filter(Boolean);
+    const categories = getVal('b-categories').split(',').map(s => s.trim()).filter(Boolean);
+    const catUnderMc = {};
+    getVal('b-cat-under-mc').split(',').map(s => s.trim()).filter(Boolean).forEach(pair => {
+      const [k, v] = pair.split(':'); if (k && v && !isNaN(+v)) catUnderMc[k.toUpperCase().trim()] = +v;
+    });
+    const sourceFilter = {};
+    if (whitelist.length) sourceFilter.walletWhitelist = whitelist;
+    if (categories.length) sourceFilter.walletCategories = categories;
+    if (Object.keys(catUnderMc).length) sourceFilter.categoriesUnderMc = catUnderMc;
+    if (getVal('b-require-kol') === '1') sourceFilter.requireKol = true;
+    const kingWallets = getVal('b-king-wallets').split(',').map(s => s.trim()).filter(Boolean);
+    return {
+      name: getVal('b-name').trim(),
+      label: getVal('b-label').trim() || getVal('b-name').trim(),
+      description: getVal('b-description').trim(),
+      trigger: getVal('b-trigger'),
+      sourceFilter: Object.keys(sourceFilter).length ? sourceFilter : undefined,
+      mcFloor: getVal('b-mc-floor') !== '' ? getNum('b-mc-floor') : undefined,
+      mcCeiling: getVal('b-mc-ceiling') !== '' ? getNum('b-mc-ceiling') : undefined,
+      kingWallets: kingWallets.length ? kingWallets : undefined,
+      kingSellExitThreshold: kingWallets.length ? getNum('b-king-sell-thresh') : undefined,
+      defaults: {
+        enabled: getInt('b-enabled'),
+        entry_sol: getNum('b-entry-sol'), sl_pct: getNum('b-sl-pct'), max_hold_min: getNum('b-max-hold'),
+        tier1_trigger_pct: getNum('b-t1-trig'), tier1_sell_pct: getNum('b-t1-sell'),
+        tier2_trigger_pct: getNum('b-t2-trig'), tier2_sell_pct: getNum('b-t2-sell'),
+        tier3_trigger_pct: getNum('b-t3-trig'), tier3_sell_pct: getNum('b-t3-sell'), tier3_trail_pct: getNum('b-t3-trail'),
+        peak_floor_arm_pct: getNum('b-pf1-arm'), peak_floor_exit_pct: getNum('b-pf1-exit'),
+        peak_floor_arm2_pct: getNum('b-pf2-arm'), peak_floor_exit2_pct: getNum('b-pf2-exit'),
+        peak_floor_arm3_pct: getNum('b-pf3-arm'), peak_floor_exit3_pct: getNum('b-pf3-exit'),
+        breakeven_after_tier1: getInt('b-be-after-t1'), breakeven_arm_pct: getNum('b-be-arm'), breakeven_floor_pct: getNum('b-be-floor'),
+        tp_trail_pct: getNum('b-tp-trail'), tp_trail_arm_pct: getNum('b-tp-trail-arm'),
+        fast_fail_sec: getInt('b-ff-sec'), fast_fail_min_peak_pct: getNum('b-ff-peak'), fast_fail_sl_pct: getNum('b-ff-sl'),
+        fakepump_sec: getInt('b-fp-sec'), fakepump_min_peak_pct: getNum('b-fp-peak'), fakepump_sl_pct: getNum('b-fp-sl'),
+        flat_exit_min: getInt('b-flat-min'), flat_exit_max_peak_pct: getNum('b-flat-peak'), flat_exit_band_pct: getNum('b-flat-band'),
+        stagnant_exit_min: getInt('b-stag-min'), stagnant_loss_pct: getNum('b-stag-loss'),
+        cashback_trigger_boost: getNum('b-cashback'),
+      },
+    };
+  }
+
+  newBtn?.addEventListener('click', () => {
+    editingName = null;
+    clearForm(); $('b-name').disabled = false;
+    titleEl.textContent = 'NEW STRATEGY';
+    deleteBtn.style.display = 'none';
+    formEl.style.display = 'block';
+    statusEl.textContent = 'fill in the form, then SAVE';
+  });
+
+  cancelBtn?.addEventListener('click', () => { formEl.style.display = 'none'; statusEl.textContent = ''; });
+
+  saveBtn?.addEventListener('click', async () => {
+    const spec = buildSpec();
+    if (!spec.name) { statusEl.textContent = 'name required'; return; }
+    statusEl.textContent = 'saving…';
+    try {
+      const url = editingName ? `/api/strategies/builder/${editingName}` : '/api/strategies/builder/create';
+      const method = editingName ? 'PUT' : 'POST';
+      const res = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(spec) });
+      const r = await res.json();
+      if (r.ok) {
+        statusEl.style.color = 'var(--green)';
+        statusEl.textContent = `saved → ${r.sourceFile || spec.name}. click RESTART TO APPLY.`;
+        refreshList();
+      } else { statusEl.style.color = 'var(--pink)'; statusEl.textContent = `error: ${r.error}`; }
+    } catch (e) { statusEl.style.color = 'var(--pink)'; statusEl.textContent = `failed: ${e.message}`; }
+  });
+
+  deleteBtn?.addEventListener('click', async () => {
+    if (!editingName || !confirm(`Delete ${editingName}?`)) return;
+    try {
+      const res = await fetch(`/api/strategies/builder/${editingName}`, { method: 'DELETE' });
+      const r = await res.json();
+      if (r.ok) {
+        statusEl.style.color = 'var(--green)';
+        statusEl.textContent = `deleted. click RESTART TO APPLY.`;
+        formEl.style.display = 'none'; refreshList();
+      } else { statusEl.textContent = `error: ${r.error}`; }
+    } catch (e) { statusEl.textContent = `failed: ${e.message}`; }
+  });
+
+  restartBtn?.addEventListener('click', async () => {
+    if (!confirm('Restart server to apply strategy changes?')) return;
+    try {
+      await fetch('/api/strategies/builder/restart', { method: 'POST' });
+      restartBtn.textContent = '↻ restarting…';
+      setTimeout(() => { restartBtn.textContent = '↻ RESTART TO APPLY'; refreshList(); }, 4000);
+    } catch (e) { console.error(e); }
+  });
+
+  refreshList();
+})();
+
 (function setupLimitInputs() {
   const mptEl = document.getElementById('input-max-per-trade');
   const mxEl = document.getElementById('input-max-exposure');

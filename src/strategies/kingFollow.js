@@ -10,8 +10,11 @@ export default {
     description: 'Solo-follow whitelisted wallet · 0.5 SOL entry · +15% TP · −12% SL · exits when king dumps ≥50% of bag',
     trigger: 'smart_trade',
     kingWallets: ['57stAMFvwctAjkBS76RXGoK4QKyS1QoxbGMbzFFe4DyZ'],
-    kingMaxMcapSol: 150,
     kingSellExitThreshold: 0.5,
+    mcCeiling: 150,
+    sourceFilter: {
+      walletWhitelist: ['57stAMFvwctAjkBS76RXGoK4QKyS1QoxbGMbzFFe4DyZ'],
+    },
     defaults: {
       enabled: 0, entry_sol: 0.5, sl_pct: -0.12, max_hold_min: 1,
       tier1_trigger_pct: 0.15, tier1_sell_pct: 1.0,

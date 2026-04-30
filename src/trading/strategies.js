@@ -103,6 +103,47 @@ function S() {
   return stmts;
 }
 
+function applySourceGate(name, w, trade, mint) {
+  const sCfg = config.strategies[name] || {};
+  const mc = mint.current_market_cap_sol || 0;
+  const short = mint.mint_address.slice(0, 8);
+  if (typeof sCfg.mcCeiling === 'number' && mc >= sCfg.mcCeiling) {
+    return { pass: false, log: `[gate] ${name} ceiling ${short}… mc ${mc.toFixed(1)} ≥ ${sCfg.mcCeiling}` };
+  }
+  if (typeof sCfg.mcFloor === 'number' && mc < sCfg.mcFloor) {
+    return { pass: false, log: `[gate] ${name} floor ${short}… mc ${mc.toFixed(1)} < ${sCfg.mcFloor}` };
+  }
+  const sf = sCfg.sourceFilter;
+  if (sf) {
+    const whitelist = sf.walletWhitelist || [];
+    if (whitelist.length > 0) {
+      if (!whitelist.includes(trade.wallet)) return { pass: false };
+      const fixedDetails = { type: name === 'kingFollow' ? 'KING_FOLLOW' : 'WHITELIST', wallet: trade.wallet };
+      console.log(`[${name}] 👑 ${trade.wallet.slice(0,6)}… buying ${short}… mc ${mc.toFixed(1)} — firing`);
+      return { pass: true, fixedDetails, sizeOverride: sCfg.defaults?.entry_sol };
+    }
+    const isKol = !!w.is_kol;
+    const cats = (sf.walletCategories || []).map(c => c.toUpperCase());
+    if (sf.requireKol && !isKol) {
+      return { pass: false, log: `[gate] ${name}-source ${short}… ${trade.wallet.slice(0,6)}… not KOL` };
+    }
+    if (cats.length > 0) {
+      const wcat = (w.category || '').toUpperCase();
+      const matchesCat = cats.includes(wcat) || (cats.includes('KOL') && isKol);
+      let matchesUnderMc = false;
+      if (sf.categoriesUnderMc) {
+        for (const [cat, mcMax] of Object.entries(sf.categoriesUnderMc)) {
+          if (wcat === cat.toUpperCase() && mc < mcMax) { matchesUnderMc = true; break; }
+        }
+      }
+      if (!matchesCat && !matchesUnderMc) {
+        return { pass: false, log: `[gate] ${name}-source ${short}… ${trade.wallet.slice(0,6)}… cat=${wcat||'?'} kol=${isKol?1:0} mc=${mc.toFixed(1)} — needs ${cats.join('|')}` };
+      }
+    }
+  }
+  return { pass: true };
+}
+
 function strategiesForTrigger(trigger) {
   return KEYS.filter(k => config.strategies[k]?.trigger === trigger);
 }
@@ -320,35 +361,14 @@ export function onSmartTrade(trade, mint) {
     for (const name of strategiesForTrigger('smart_trade')) {
       const strat = getStrategy(name);
       if (!strat) continue;
-      if (name === 'kingFollow') {
-        const cfg = config.strategies.kingFollow || {};
-        const kings = new Set(cfg.kingWallets || []);
-        if (!kings.has(trade.wallet)) continue;
-        const mc = mint.current_market_cap_sol || 0;
-        const ceiling = cfg.kingMaxMcapSol || 150;
-        if (mc >= ceiling) {
-          console.log(`[gate] king-ceiling ${mint.mint_address.slice(0,8)}… mc ${mc.toFixed(1)} ≥ ${ceiling}`);
-          continue;
-        }
-        console.log(`[king] 👑 ${trade.wallet.slice(0,6)}… buying ${mint.mint_address.slice(0,8)}… mc ${mc.toFixed(1)} — firing kingFollow`);
-        const fixedDetails = { ...details, type: 'KING_FOLLOW' };
-        tryFire(name, mint, fixedDetails, strat.entry_sol, { multiplier: 1.0 });
+      const sg = applySourceGate(name, w, trade, mint);
+      if (!sg.pass) {
+        if (sg.log) console.log(sg.log);
         continue;
       }
-      if (name === 'quickFlip15') {
-        const mc = mint.current_market_cap_sol || 0;
-        const isKol = !!w.is_kol;
-        const isBot = w.category === 'BOT';
-        const QF_MC_CEILING = 100;
-        const QF_BOT_MC_MAX = 70;
-        if (mc >= QF_MC_CEILING) {
-          console.log(`[gate] qf-ceiling ${mint.mint_address.slice(0,8)}… mc ${mc.toFixed(1)} ≥ ${QF_MC_CEILING}`);
-          continue;
-        }
-        if (!isKol && !(isBot && mc < QF_BOT_MC_MAX)) {
-          console.log(`[gate] qf-source ${mint.mint_address.slice(0,8)}… ${trade.wallet.slice(0,6)}… cat=${w.category||'?'} kol=${isKol?1:0} mc=${mc.toFixed(1)} — needs KOL or BOT<${QF_BOT_MC_MAX}`);
-          continue;
-        }
+      if (sg.fixedDetails || sg.sizeOverride) {
+        tryFire(name, mint, sg.fixedDetails || details, sg.sizeOverride || strat.entry_sol, { multiplier: 1.0 });
+        continue;
       }
       const dynamicSize = strat.entry_sol * score.multiplier;
       tryFire(name, mint, details, dynamicSize, score);
