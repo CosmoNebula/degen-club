@@ -109,6 +109,21 @@ export function checkPreKingProfile(mintAddress, now) {
     return { pass: false, reason: 'RECENT_FIRE' };
   }
 
+  if (cfg.requireTrackedWalletConfirmation) {
+    const lookbackMs = (cfg.confirmationWindowSec || 30) * 1000;
+    const row = db().prepare(`
+      SELECT COUNT(DISTINCT t.wallet) AS n
+      FROM trades t JOIN wallets w ON w.address = t.wallet
+      WHERE t.mint_address = ? AND t.is_buy = 1
+        AND t.timestamp >= ?
+        AND (w.tracked = 1 OR w.is_kol = 1 OR w.category IN ('BOT','SCALPER','KOL'))
+    `).get(mintAddress, now - lookbackMs);
+    if ((row?.n || 0) < (cfg.minConfirmingWallets || 1)) {
+      bumpReject('NO_CONFIRM');
+      return { pass: false, reason: `NO_CONFIRM:${row?.n || 0}<${cfg.minConfirmingWallets || 1}` };
+    }
+  }
+
   _passCount++;
   return {
     pass: true,

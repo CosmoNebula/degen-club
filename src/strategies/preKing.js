@@ -20,6 +20,9 @@ export default {
     maxBundleBuyers: 0,
     maxFirstBlockSnipers: 5,
     mintCooldownSec: 300,
+    requireTrackedWalletConfirmation: true,
+    confirmationWindowSec: 30,
+    minConfirmingWallets: 1,
     defaults: {
       enabled: 0, entry_sol: 0.13, sl_pct: -0.10, max_hold_min: 1.5,
       tier1_trigger_pct: 0.25, tier1_sell_pct: 1.0,
