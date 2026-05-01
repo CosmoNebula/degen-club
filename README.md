@@ -1,157 +1,223 @@
 # Degen Club :: Monkeys Funhouse
 
-Pump.fun trading bot. Tracks tracked-wallet activity via PumpPortal websocket, scores it against configurable gates, paper-trades or live-executes through Pump's bonding curve. Cyberpunk-themed dashboard, SQLite for state, latency-aware paper sim, friction audit, runtime-tunable limits.
+Pump.fun trading bot focused on hunting **migrators and big runners** instead of sniping new launches. Built around one strategy — `migratorHunter` — that copies wallets with proven history of catching mints that graduate to Raydium / PumpSwap.
+
+PumpPortal websocket for trade ingestion · Helius for cashback flag detection · Dexscreener for post-migration price feeds · SQLite (WAL) for state · cyberpunk-themed dashboard at `localhost:4200`.
 
 ---
 
-## Quickstart
+## Why one strategy
 
-```bash
-git clone https://github.com/CosmoNebula/degen-club.git
-cd degen-club
-npm install
-cp .env.example .env
-# edit .env — see Environment below
-npm start
-```
+A 63-trade postmortem of the previous multi-strategy setup showed:
 
-Open http://localhost:4200 and you're in.
+- The sniper-style `preKing` strategy was responsible for ~75% of trades and ~all of the loss (-33.8 SOL on 4,339 entries, 19.8% WR).
+- Mid-curve entries on coins that *eventually migrated* were +2.5 SOL net at 36% WR.
+- 100% of -30% SL hits later recovered (avg 2.55x from exit price) — the SL was just too tight, not picking bad coins.
+- Wallets with the strongest migrator-finding skill were tagged `BUNDLE` / `BOT` / `SCALPER` by the existing categorizer — the global "no-bundle" filter was cutting off exactly the signal we wanted.
 
-The bot starts in **paper mode** by default. It begins ingesting Pump trades immediately. After a few minutes you'll see mints/trades/wallets accumulating in the topbar. Strategies fire on qualifying signals (paper trades book to SQLite). Toggle live mode via the dashboard once you've validated locally.
+So: kill the snipers, copy the bundles/bots that catch migrators, give the trade room to breathe.
 
 ---
 
-## Environment
+## migratorHunter strategy
 
-`.env` (never commit — see `.gitignore`):
+**Trigger:** an in-memory sliding-window tracker watches every buy. When ≥3 distinct wallets with `migrator_score ≥ 0.55` and `≥5 pre-migration buys` buy the same mint inside 5 minutes, the strategy fires.
 
-```
-HELIUS_API_KEY=<your helius key>     # required for trade execution + post-migration data
-DEGEN_PRIVATE_KEY=<base58 key>       # required ONLY for live mode
-BOT_PUBKEY=<your wallet pubkey>      # optional safety pin
-PORT=4200                            # optional, default 4200
-MODE=paper                           # paper | live (default paper)
-PUBLIC_RPC_URL=                      # optional override for read-only RPC
-```
+**Mint shape gates:**
+- Age 120s – 7200s (filter freshest chop only — wider SL handles the 0-2m bucket)
+- Mcap 30 – 250 SOL (mid-curve)
+- Unique buyers ≥ 150 (diverse activity)
 
-**Helius credit conservation:** the bot routes balance reads to `api.mainnet-beta.solana.com` (free public RPC) and only hits Helius for trade tx submission, post-migration holder snapshots, and the cashback flag check. Pre-migration holder data comes from the PumpPortal trade tape (free).
+**Sizing:** score-weighted entry from 0.05 SOL → 0.30 SOL as the avg hunter score climbs from 0.55 → 0.85.
+
+**Exit ladder** (tuned from postmortem):
+- T1 +50% / sell 30% → arm breakeven floor at -20% from entry (don't choke +59% peaks)
+- T2 +150% / sell 30%
+- T3 +400% / sell 20% / 40% trail
+- SL -50% (recovery rate on prior -30% SLs was 100%)
+- Peak floor 1: arm at +100% above entry, exit if drops 50% from peak
+- Peak floor 2: arm at +300%, 55% trail
+- Peak floor 3: arm at +700%, 60% trail
+- Stagnant exit: 45min holding -30%+
+- Max hold: 240 min
+- On migration: convert 75% of bag at migration price, ride the remaining 25% as moonbag (target +500%, trail at +20%, 48h max hold)
+
+Strategy file: `src/strategies/migratorHunter.js`. Helper window-tracker: `src/scoring/migrator-hunter.js`.
+
+---
+
+## Wallet scoring (migrator hunters)
+
+`src/scoring/migrator-stats.js` computes per-wallet stats over migrated mints:
+
+- `migrator_buys` — distinct migrated mints the wallet ever bought
+- `migrator_pre_mig_buys` — same, but only buys *before* the mint migrated (the harder skill)
+- `migrator_avg_entry_pct` — mean of `(first_buy_mcap / peak_mcap)` across pre-mig buys (lower = bought earlier)
+- `migrator_realized_sol` — sum of (sells – buys) across all migrated mints
+- `migrator_score` — composite: earliness × sample-weight × realized-norm
+
+**Backfill:** `node bin/migrator-stats.js` runs the full backfill from trade history (~37s on ~50k wallets) and prints the leaderboard.
+
+**Live updates:** when any mint flips `migrated=1`, `processor.onMigrate()` calls `updateMigratorStatsForMint()`, which recomputes scores for every wallet that touched that mint. Scoped to the wallets involved (typically a few hundred), so the update is cheap and stays consistent with the full backfill.
 
 ---
 
 ## Architecture
 
-```
-PumpPortal WS (free)              Public Solana RPC (free)
-        │                                  │
-        ▼                                  ▼
-  ingestion/processor.js  ───►  trades/mints/wallet_holdings tables
-        │
-        ├──► scoring/  (flags, traders, KOL detection, holders, runner-score, post-exit)
-        ├──► trading/king-tracker.js  (per-king-wallet bag tracking)
-        └──► trading/strategies.js  (smart_trade / cluster / runner_score / volume_surge dispatch)
-                  │
-                  ▼
-            trading/paper.js  ──► (paper mode)  applyBuyFriction → tier engine → applySellFriction
-                  │
-                  └──► trading/executor.js  ──► (live mode)  pumpportal-client → on-chain tx
-                              │
-                              └──► safety.js (halts, daily loss cap, stale-quote failsafe)
-```
+### Main thread
+- **PumpPortal websocket** ingestion (`src/ingestion/processor.js`)
+- Per-trade hot path: trade insert → labelTrade → flag check → trackBuyer → migrator-hunter window check → forward to worker
+- HTTP server + dashboard (`src/server/index.js`)
+- Strategy auto-loader (`src/strategies/index.js`) — drop-in `*.js` files in `src/strategies/` are auto-registered
 
-**Data:** all in `data/degen.db` (SQLite WAL mode, 1h-quiet trade pruning, vacuum on demand). Schema in `src/db/schema.sql`. The bot creates the DB on first run.
+### Worker threads (off main event loop)
 
-**Logs:** `logs/server-YYYY-MM-DD.log`, daily rotation.
+**Position monitor worker** (`src/trading/position-monitor-worker.js`)
+- Owns the 250ms `monitorPositions` sweep — checks open positions, fires tier exits / SL / peak floors
+- Handles per-trade `checkMint` requests from main thread via `postMessage`
+- Has its own better-sqlite3 connection sharing the WAL file
+- Auto-respawns on crash
 
----
+**Traders worker** (`src/trading/traders-worker.js`)
+- Recomputes active wallets every 2 min (skips boot-time full classification)
+- Hourly **stale wallet cleanup**: deletes wallets where ALL of:
+  - `last_activity_at < now - 24h`
+  - `manually_tracked = 0` AND `is_kol = 0` AND `tracked = 0` AND `migrator_score = 0`
+- Resurrects automatically: deleted wallets are recreated by `processor.upsertWallet` on next trade
 
-## Strategies
+### Maintenance (`src/maintenance.js`)
 
-All three live in `src/config.js` under `strategies.*`. Toggle on/off and tune from the dashboard's Positions panel.
+Runs every 30 min:
+- **`pruneTrades`**: drops trades on rugged/quiet mints, old rug flags
+- **`pruneAuxData`**:
+  - Orphan `wallet_holdings` rows (where wallet was deleted)
+  - Stale mints (not migrated, no trade in >24h, no open paper position)
+  - `copy_signals` and `volume_signals` older than 6h
 
-### `quickFlip15` — Q · Quick Flip +20%
-Broad-net high-volume scalp. Fires on any tracked-wallet smart_trade where the signaling wallet is a KOL OR a BOT-under-70mc. Hard MC ceiling at 100 SOL. Sells 100% at +20%, peak-floor armed at 10/20/30%, −10% SL. Backtested 80%+ WR over 100+ trades on the gate spec.
-
-### `kingFollow` — K · King Follow
-Solo-follows a whitelisted "king" wallet (default: `57stAMFv…`). 0.5 SOL nominal entry (4× QF), MC ceiling 150, +15% TP, −12% SL, 1-min hard time stop. **Smart exit:** when the king dumps ≥50% of their bag SOL-wise, force-closes the position regardless of price (`KING_DUMPED` exit reason).
-
-Whitelist is editable in `src/config.js → strategies.kingFollow.kingWallets`.
-
-### `trackedWalletFollow`
-4-tier ladder strategy with breakeven SL after T1 hit, post-T1 trailing stop, peak-floor protection, fast-fail / fakepump / flat-exit / stagnant-exit logic. Off by default; enable from dashboard if you want a wider net than Quick Flip.
+**Hard-protected from any cleanup:**
+- Migrated mints (forever — scoring depends on them)
+- Trades on migrated mints
+- Mints with open paper positions
+- Wallets that are KOL / tracked / manually_tracked / migrator-scored
 
 ---
 
-## Dashboard
+## Live vs paper
 
-Top bar tiles + four runtime-editable inputs:
+- `MODE=paper` (default): every signal opens a paper position. No live execution.
+- `MODE=live`: every signal opens **only** a live position. No paper shadow doubling work.
+- Mode flips at startup via the `MODE` env var (or via `setMode()` from the dashboard).
 
-- **⚙ Max/Trade ◎** — clamps any single strategy entry (e.g., 0.13)
-- **⚙ Max Exposure ◎** — total SOL across all open positions (e.g., 0.40)
-- **⚙ Max Entry Slip %** — pre-flight stale-quote abort (e.g., 0.10 = 10%)
-- **⚙ Paper Lag ms** — paper-mode latency simulator (0 = instant, 750 = realistic live)
-
-Persisted to `data/runtime-limits.json` so they survive restarts.
-
-Tabs: Mints, Devs, Traders, Positions, System, Coin Lab, Ticker. Coin Lab includes the post-exit analysis ("did we exit too early?").
+`paperLatencyMs` (`config.paper.latencyMs`, runtime-tunable from `data/runtime-limits.json`) simulates fill latency for paper trades only — purely a realism knob, doesn't touch live execution.
 
 ---
 
-## Safety
-
-- **Halt switch:** click the LIVE/PAPER mode tile to halt all trading. New entries refused, open positions still monitored.
-- **Daily loss cap:** `safety.dailyMaxLossSol` in config.
-- **Min wallet floor:** won't open a live trade if it would drop wallet below `safety.minWalletSolFloor`.
-- **Stale-quote failsafe:** on live buys, before tx submit, the executor reads the latest on-chain price and aborts if the coin has drifted upward more than `safety.maxEntrySlippagePct` since the trigger trade. Logs as `STALE_QUOTE`. Saves you from filling on coins that already ripped past your target.
-- **Per-trade size cap & total exposure cap:** see dashboard inputs above.
-- **On-chain slippage tolerance:** `photon.slippageBps = 1500` (15%) — the Pump program will reject your tx if the curve has moved more than 15% by the time it lands.
-
----
-
-## Useful API endpoints
+## File layout
 
 ```
-GET  /api/stats                      → topbar tiles (live-mode aware)
-GET  /api/strategies                 → strategy state
-POST /api/strategies/:name/toggle    → on/off
-PUT  /api/strategies/:name/settings  → tune entry/sl/tier/etc
-GET  /api/limits                     → runtime safety limits
-POST /api/limits                     → update limits
-GET  /api/exits/analysis             → post-exit outcomes (early/left-money/correct)
-GET  /api/friction-audit             → live vs paper-modeled fill comparison (live trades only)
-GET  /api/live-sim?latencyMs=750&windowHours=4
-                                     → replay paper trades against on-chain tape with simulated lag
-POST /api/wallet/sim/reset           → reset paper wallet to fresh starting balance
-POST /api/safety/halt                → emergency halt
-POST /api/mode                       → switch paper ↔ live (live requires confirm: "LIVE")
+src/
+  index.js                      # boot
+  config.js                     # all knobs
+  db/
+    index.js                    # SQLite open + migrations (idempotent)
+    schema.sql
+  ingestion/
+    processor.js                # WS trade ingestion hot path
+    metadata.js                 # IPFS metadata fetch
+    helius.js                   # cashback flag check
+    dexscreener.js              # post-migration price feeds
+  scoring/
+    traders.js                  # wallet classification + stale cleanup
+    migrator-stats.js           # migrator-score backfill + per-mint update
+    migrator-hunter.js          # in-memory window tracker for the strategy
+    coin-velocity.js            # buyer-window helpers (dormant; preKing legacy)
+    bundle.js                   # bundle cluster detection
+    devs.js                     # creator classification
+    flags.js                    # mint flag rules (BUNDLE, ABANDONED, DEAD)
+    holders.js                  # holder diversity gate
+    runner-score.js             # peak-mcap predictor
+    post-exit.js                # post-exit outcome classification
+    volume.js                   # volume surge sweeper (dormant)
+    wallet-grader.js            # auto-block / auto-boost grading
+  strategies/
+    index.js                    # auto-loader
+    migratorHunter.js           # the only active strategy
+  trading/
+    paper.js                    # position open/exit logic
+    strategies.js               # signal dispatchers (onSmartTrade, onMigratorHunter, etc)
+    position-monitor-worker.js  # worker: 250ms position sweep + per-trade checks
+    traders-worker.js           # worker: 2min wallet sweep + hourly stale cleanup
+    executor.js                 # live PumpPortal/Photon execution
+    wallet.js                   # mode + balance
+    sizing.js                   # dynamic position sizing
+    backtest.js                 # signal replay engine
+  server/
+    index.js                    # Express + dashboard JSON API
+  maintenance.js                # trade/aux pruning
+  price.js                      # SOL/USD feed
+bin/
+  migrator-stats.js             # full backfill + leaderboard CLI
+data/
+  degen.db                      # SQLite (WAL mode)
+  runtime-limits.json           # runtime-tunable safety limits
+public/                         # cyberpunk dashboard (vanilla JS)
+logs/
+  server-YYYY-MM-DD.log         # daily-rotated app log
+  launchd-stdout.log            # launchd-managed
+  launchd-stderr.log
 ```
 
 ---
 
-## Going live
+## Operational notes
 
-1. Fund wallet with at least 0.5 SOL (test small first)
-2. Set `DEGEN_PRIVATE_KEY` in `.env`
-3. Restart the bot
-4. Verify live wallet balance shows on the dashboard topbar
-5. Set `Max/Trade ◎` to your starting bet size (recommend 0.13 — friction floor)
-6. Set `Max Exposure ◎` low for first session (recommend 0.30 = max 2-3 concurrent)
-7. Click **SWITCH → LIVE**, confirm
-8. Watch the first 5-10 closed trades closely
-9. Run `/api/friction-audit` to compare actual fills vs paper-modeled
-
-If first session goes sideways, click the LIVE tile to halt, audit, tune.
+- **Auto-restart on file change:** the launch agent runs `node --watch --watch-path=src src/index.js`. Save a `src/` file, server reloads in ~1s. Watch picks up file content changes, not `touch`.
+- **Manual restart:** if the watch flag itself stops triggering, `launchctl unload && load` from `~/Library/LaunchAgents/com.degen-club.plist`.
+- **Big Sur / cloudflared:** binary at `~/bin/cloudflared` pinned to `2023.7.3` (newer builds need macOS 15+). Don't overwrite.
+- **Boot storm:** the trade-prune + creator-classification on first boot can briefly spike CPU. Dashboard responds within 30-60s. The expensive trader-recompute moved to a worker so it no longer blocks HTTP.
+- **Strategy Builder UI caveat:** saving a strategy through the dashboard's Strategy Builder UI overwrites the source file with a generic template, dropping any custom fields like `trigger`, `minHunters`, `sizing`, etc. that aren't in its form schema. **Edit strategy files directly, not through the UI.**
 
 ---
 
-## Performance notes from real sessions
+## Quick queries
 
-- Quick Flip +20% spec (KOL-gated, MC<100): ~83% paper WR over 119 closed trades, ~+12.7% ROI per turn.
-- Same-coin pairs of QF + KF show QF wins ~2/3 when coins keep running past +15%; KF wins ~1/3 when it locks the +15% before fade.
-- Sub-5s hold times are the norm for QF — these are scalping the post-trigger continuation, not riding multi-minute moves.
-- Live-vs-paper friction modeled at 2.5% slippage + 0.0008 SOL priority fee per side. Real friction varies — that's why `/api/friction-audit` exists.
+```sql
+-- Current run performance
+SELECT exit_reason, COUNT(*) n,
+  ROUND(AVG(realized_pnl_pct)*100, 1) avg_pct,
+  ROUND(SUM(realized_pnl_sol), 3) net_sol
+FROM paper_positions
+WHERE entered_at >= (SELECT started_at FROM paper_wallet WHERE id=1)
+  AND status = 'closed'
+GROUP BY exit_reason ORDER BY n DESC;
+
+-- Top migrator hunters
+SELECT substr(address, 1, 8) wallet, ROUND(migrator_score, 3) score,
+       migrator_pre_mig_buys n, ROUND(migrator_realized_sol, 2) sol
+FROM wallets WHERE migrator_score > 0.6
+ORDER BY migrator_score DESC LIMIT 20;
+
+-- Mints we held that migrated
+SELECT substr(p.mint_address, 1, 8) mint, p.exit_reason,
+  ROUND(p.realized_pnl_pct*100, 1) pnl_pct,
+  ROUND(m.peak_market_cap_sol / p.entry_mcap_sol, 1) peak_x
+FROM paper_positions p JOIN mints m ON m.mint_address = p.mint_address
+WHERE p.strategy = 'migratorHunter' AND m.migrated = 1
+ORDER BY p.entered_at DESC;
+```
 
 ---
 
-## License / use
+## Reset for a fresh test session
 
-Personal trading bot. Use at your own risk — it can lose real SOL fast. Backtest, paper, audit, then size up gradually.
+```sql
+DELETE FROM paper_positions;
+DELETE FROM gate_rejections;
+UPDATE paper_wallet SET starting_balance_sol = 1.0,
+  started_at = CAST(strftime('%s','now')*1000 AS INTEGER),
+  peak_total_value = 1.0, peak_at = NULL,
+  reset_count = reset_count + 1 WHERE id = 1;
+UPDATE strategy_state SET positions_opened = 0, wins = 0, losses = 0, total_pnl_sol = 0;
+```
+
+Wallets, mints, trades, scoring, and creator history all preserved.

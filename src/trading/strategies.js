@@ -305,8 +305,11 @@ function tryFire(strategyName, mint, signalDetails, sizeOverride, scoreInfo) {
     signalDetails,
     entryScore: scoreInfo ? scoreInfo.multiplier : 1.0,
   };
-  if (!paperHolding) openPaperPosition({ ...baseArgs, positionMode: 'paper' });
-  if (isLiveMode() && !liveHolding) openPaperPosition({ ...baseArgs, positionMode: 'live' });
+  if (isLiveMode()) {
+    if (!liveHolding) openPaperPosition({ ...baseArgs, positionMode: 'live' });
+  } else if (!paperHolding) {
+    openPaperPosition({ ...baseArgs, positionMode: 'paper' });
+  }
 }
 
 export function onCopySignal(mintAddress, walletCount) {
@@ -323,11 +326,8 @@ export function onSmartTrade(trade, mint) {
     if (!trade.is_buy) return;
     const w = S().walletInfo.get(trade.wallet);
     if (!w || !w.tracked) return;
-    const walletBoosted = (w.auto_boost_mult || 1.0) > 1.0;
     const kingWhitelist = new Set(config.strategies?.kingFollow?.kingWallets || []);
     const isWhitelistedKing = kingWhitelist.has(trade.wallet);
-    if ((w.bundle_cluster_id || w.category === 'BUNDLE') && !walletBoosted && !isWhitelistedKing) return;
-    if (!w.copy_friendly && !walletBoosted && !isWhitelistedKing) return;
     if (w.auto_blocked && !isWhitelistedKing) {
       console.log(`[blocked] auto-blocked wallet ${trade.wallet.slice(0,6)}… (follow WR=${(w.follow_wr*100).toFixed(0)}%, net=${(w.follow_net_sol||0).toFixed(3)} SOL)`);
       return;
@@ -374,6 +374,34 @@ export function onSmartTrade(trade, mint) {
       tryFire(name, mint, details, dynamicSize, score);
     }
   } catch (err) { console.error('[strategy] onSmartTrade', err.message); }
+}
+
+export function onMigratorHunter(mintAddress, hunterDetails) {
+  try {
+    const mint = S().getMint.get(mintAddress);
+    if (!mint || !passesGlobalGuards(mint, 'migrator_hunter')) return;
+    const details = { type: 'MIGRATOR_HUNTER', ...hunterDetails };
+    console.log(
+      `[migrator] 🎯 ${mintAddress.slice(0, 8)}… ${hunterDetails.hunterCount} hunters ` +
+      `(avg score ${hunterDetails.avgScore}) · age ${hunterDetails.ageSec}s · mc ${hunterDetails.mcap} — firing`
+    );
+    for (const name of strategiesForTrigger('migrator_hunter')) {
+      const strat = getStrategy(name);
+      if (!strat || !strat.enabled) continue;
+      const sCfg = config.strategies[name] || {};
+      const sz = sCfg.sizing || {};
+      const start = sz.scoreScaleStart ?? 0.55;
+      const max = sz.scoreScaleMax ?? 0.85;
+      const span = Math.max(0.0001, max - start);
+      const ramp = Math.min(1, Math.max(0, (hunterDetails.avgScore - start) / span));
+      const mult = 1 + ramp * ((sz.maxMult ?? 3.0) - 1);
+      const base = sz.baseEntrySol ?? strat.entry_sol;
+      let entrySol = base * mult;
+      if (sz.minEntrySol) entrySol = Math.max(sz.minEntrySol, entrySol);
+      if (sz.maxEntrySol) entrySol = Math.min(sz.maxEntrySol, entrySol);
+      tryFire(name, mint, details, entrySol, { multiplier: +mult.toFixed(2), walletScore: hunterDetails.avgScore, isKol: false });
+    }
+  } catch (err) { console.error('[strategy] onMigratorHunter', err.message); }
 }
 
 export function onCoinVelocity(mintAddress, metrics) {
@@ -434,8 +462,11 @@ export function onVolumeSurge(mintAddress, surgeDetails) {
       };
       const paperHeld = S().holdingMint.get(mintAddress, name, 'paper');
       const liveHeld = S().holdingMint.get(mintAddress, name, 'live');
-      if (!paperHeld) openPaperPosition({ ...args, positionMode: 'paper' });
-      if (isLiveMode() && !liveHeld) openPaperPosition({ ...args, positionMode: 'live' });
+      if (isLiveMode()) {
+        if (!liveHeld) openPaperPosition({ ...args, positionMode: 'live' });
+      } else if (!paperHeld) {
+        openPaperPosition({ ...args, positionMode: 'paper' });
+      }
     }
   } catch (err) { console.error('[strategy] onVolumeSurge', err.message); }
 }

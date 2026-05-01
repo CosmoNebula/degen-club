@@ -2,12 +2,13 @@ import { db } from '../db/index.js';
 import { fetchMetadata } from './metadata.js';
 import { labelTrade, checkFlags } from '../scoring/flags.js';
 import { checkCopySignal } from '../scoring/traders.js';
-import { onSmartTrade, onCoinVelocity } from '../trading/strategies.js';
-import { checkPositionsForMint } from '../trading/paper.js';
+import { onSmartTrade, onCoinVelocity, onMigratorHunter } from '../trading/strategies.js';
+import { trackHunterBuy } from '../scoring/migrator-hunter.js';
+import { notifyTradeForMint } from '../trading/paper.js';
 import { config } from '../config.js';
 import { checkCashbackFlag } from './helius.js';
-import { onTrade as kingOnTrade } from '../trading/king-tracker.js';
 import { trackBuyer, checkPreKingProfile, markFired } from '../scoring/coin-velocity.js';
+import { updateMigratorStatsForMint } from '../scoring/migrator-stats.js';
 
 const cashbackInflight = new Set();
 export function ensureCashback(mintAddress, bondingCurveKey, currentValue) {
@@ -182,10 +183,12 @@ function onTrade(e) {
       isBuy, isBuy ? 0 : 1, isSniper, isFirstBlock
     );
 
-    try { kingOnTrade({ wallet, mint: e.mint, is_buy: isBuy ? 1 : 0, sol_amount: solAmount, timestamp: now }); } catch (err) { console.error('[king-tracker]', err.message); }
-
     if (isBuy) {
       try { trackBuyer(e.mint, wallet, now); } catch (err) { console.error('[velocity]', err.message); }
+      try {
+        const sig = trackHunterBuy(e.mint, wallet, now);
+        if (sig) onMigratorHunter(e.mint, sig);
+      } catch (err) { console.error('[migrator-hunter]', err.message); }
       if (config.strategies?.preKing?.defaults?.enabled !== undefined) {
         try {
           const profile = checkPreKingProfile(e.mint, now);
@@ -202,7 +205,7 @@ function onTrade(e) {
       try { onSmartTrade({ wallet, is_buy: 1 }, mint); } catch (err) { console.error('[strategy]', err.message); }
     }
 
-    try { checkPositionsForMint(e.mint); } catch (err) { console.error('[paper] trade-trigger', err.message); }
+    try { notifyTradeForMint(e.mint); } catch (err) { console.error('[paper] trade-trigger', err.message); }
   } catch (err) {
     console.error('[processor] trade', err.message);
   }
@@ -216,6 +219,12 @@ function onMigrate(e) {
     s.migrate.run(now, target, target, e.mint);
     const mint = s.getMint.get(e.mint);
     if (mint && mint.creator_wallet) s.bumpMigrated.run(mint.creator_wallet);
+    try {
+      const r = updateMigratorStatsForMint(e.mint);
+      if (r.updated > 0) console.log(`[migrator-stats] ${e.mint.slice(0,8)}… migrated → updated ${r.updated}/${r.wallets} wallets`);
+    } catch (err) {
+      console.error('[migrator-stats] update', err.message);
+    }
   } catch (err) {
     console.error('[processor] migrate', err.message);
   }

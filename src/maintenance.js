@@ -22,8 +22,40 @@ function S() {
       )
     `),
     deleteOldFlags: d.prepare('DELETE FROM rug_flags WHERE fired_at < ?'),
+    deleteOrphanHoldings: d.prepare(`
+      DELETE FROM wallet_holdings
+      WHERE wallet NOT IN (SELECT address FROM wallets)
+    `),
+    deleteStaleMints: d.prepare(`
+      DELETE FROM mints
+      WHERE migrated = 0
+        AND COALESCE(last_trade_at, created_at) < ?
+        AND mint_address NOT IN (SELECT mint_address FROM paper_positions WHERE status = 'open')
+    `),
+    deleteOldCopySignals: d.prepare('DELETE FROM copy_signals WHERE fired_at < ?'),
+    deleteOldVolumeSignals: d.prepare('DELETE FROM volume_signals WHERE fired_at < ?'),
   };
   return stmts;
+}
+
+// Aux cleanup beyond pruneTrades. Runs alongside it on the maintenance schedule.
+// Conservative cuts only — never touches migrated mints or their trades, since
+// those feed migrator-hunter scoring permanently.
+export function pruneAuxData() {
+  const s = S();
+  const now = Date.now();
+
+  const orphanHoldings = s.deleteOrphanHoldings.run().changes;
+  // Drop mints that never migrated AND haven't seen a trade in >24h. Their
+  // trades were already cleared by pruneTrades, so the mint row is just metadata.
+  const staleMintCutoff = now - 24 * 60 * 60 * 1000;
+  const staleMints = s.deleteStaleMints.run(staleMintCutoff).changes;
+  // Old signal log entries — kept only for short dedup windows in code.
+  const oldSignalCutoff = now - 6 * 60 * 60 * 1000;
+  const oldCopySignals = s.deleteOldCopySignals.run(oldSignalCutoff).changes;
+  const oldVolumeSignals = s.deleteOldVolumeSignals.run(oldSignalCutoff).changes;
+
+  return { orphanHoldings, staleMints, oldCopySignals, oldVolumeSignals };
 }
 
 function fileSize(path) {
@@ -99,6 +131,8 @@ export function startMaintenance() {
     try {
       const r = pruneTrades();
       console.log(`[maintenance] startup prune: rugged=${r.ruggedDeleted} quiet=${r.quietDeleted} flags=${r.flagsDeleted} trades ${r.tradesBefore}→${r.tradesAfter}`);
+      const a = pruneAuxData();
+      console.log(`[maintenance] startup aux: orphan_holdings=${a.orphanHoldings} stale_mints=${a.staleMints} copy_signals=${a.oldCopySignals} volume_signals=${a.oldVolumeSignals}`);
     } catch (err) {
       console.error('[maintenance] startup', err.message);
     }
@@ -109,6 +143,11 @@ export function startMaintenance() {
       const r = pruneTrades();
       if (r.ruggedDeleted + r.quietDeleted + r.flagsDeleted > 0) {
         console.log(`[maintenance] sweep: rugged=${r.ruggedDeleted} quiet=${r.quietDeleted} flags=${r.flagsDeleted} trades ${r.tradesBefore}→${r.tradesAfter}`);
+      }
+      const a = pruneAuxData();
+      const auxTotal = a.orphanHoldings + a.staleMints + a.oldCopySignals + a.oldVolumeSignals;
+      if (auxTotal > 0) {
+        console.log(`[maintenance] aux: orphan_holdings=${a.orphanHoldings} stale_mints=${a.staleMints} copy_signals=${a.oldCopySignals} volume_signals=${a.oldVolumeSignals}`);
       }
     } catch (err) {
       console.error('[maintenance]', err.message);

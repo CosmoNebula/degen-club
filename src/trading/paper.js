@@ -1,7 +1,9 @@
 import { db } from '../db/index.js';
 import { config } from '../config.js';
 import { isLiveMode } from './wallet.js';
-import { shouldForceExit as kingShouldForceExit, kingHasBoughtSince } from './king-tracker.js';
+import { Worker, isMainThread } from 'node:worker_threads';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 const _pendingSells = new Set();
 const _pendingPaperSells = new Set();
@@ -454,22 +456,7 @@ function checkPosition(p) {
   const peakFloorActive = !!armedLevel;
   const peakFloorExit = armedLevel ? armedLevel.exit : 0;
 
-  if (p.strategy === 'kingFollow') {
-    const kingExit = kingShouldForceExit(p.mint_address, p.entered_at);
-    if (kingExit) {
-      console.log(`[king-exit] ${p.mint_address.slice(0,8)}… ${kingExit.wallet.slice(0,6)}… dumped ${(kingExit.sellRatio*100).toFixed(0)}% of bag (${kingExit.sellCount} sells, ${kingExit.soldSol.toFixed(2)}/${kingExit.boughtSol.toFixed(2)} SOL) — exiting`);
-      exitReason = 'KING_DUMPED';
-    }
-  }
-  if (p.strategy === 'preKing') {
-    const kingBuy = kingHasBoughtSince(p.mint_address, p.entered_at);
-    if (kingBuy) {
-      console.log(`[preKing] 👑 ${kingBuy.wallet.slice(0,6)}… bought ${p.mint_address.slice(0,8)}… (we entered ${((kingBuy.kingBuyAt - p.entered_at)/1000).toFixed(1)}s earlier) — front-run hit, exiting into pump`);
-      exitReason = 'KING_BOUGHT';
-    }
-  }
-  if (exitReason) { /* king-dump already set — skip the rest */ }
-  else if (m.rugged) exitReason = 'RUGGED';
+  if (m.rugged) exitReason = 'RUGGED';
   else if (m.migrated) exitReason = 'MIGRATED';
   else if ((p.tokens_remaining || 0) <= 0) exitReason = 'TIERED_FULL';
   else if (t3Armed && peakPctRaw <= tier3TrailFloor) exitReason = 'TP_TRAIL';
@@ -516,6 +503,39 @@ export function checkPositionsForMint(mintAddress) {
   }
 }
 
+let _monitorWorker = null;
+
 export function startPositionMonitor() {
-  setInterval(monitorPositions, config.strategies.monitorIntervalMs);
+  if (!isMainThread) return; // worker imports this module too — never re-spawn from inside the worker
+  spawnMonitorWorker();
+}
+
+function spawnMonitorWorker() {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const workerPath = path.join(here, 'position-monitor-worker.js');
+  try {
+    _monitorWorker = new Worker(workerPath);
+  } catch (err) {
+    console.error('[monitor-worker] spawn failed:', err.message);
+    return;
+  }
+  _monitorWorker.on('error', (err) => console.error('[monitor-worker] error', err.stack || err.message));
+  _monitorWorker.on('exit', (code) => {
+    _monitorWorker = null;
+    if (code !== 0) {
+      console.error(`[monitor-worker] exited code=${code} — restarting in 1s`);
+      setTimeout(spawnMonitorWorker, 1000);
+    }
+  });
+}
+
+// Main thread → worker: ask the worker to re-check open positions for a mint
+// that just had a trade. Worker handles it off the main event loop.
+export function notifyTradeForMint(mintAddress) {
+  if (!_monitorWorker) {
+    // Fallback: if the worker isn't up yet (early boot), do it inline.
+    try { checkPositionsForMint(mintAddress); } catch {}
+    return;
+  }
+  _monitorWorker.postMessage({ type: 'checkMint', mint: mintAddress });
 }

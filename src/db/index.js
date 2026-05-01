@@ -54,6 +54,17 @@ function runMigrations(d) {
   ensureCol(d, 'wallets', 'follow_wr', `REAL DEFAULT 0`);
   ensureCol(d, 'wallets', 'follow_net_sol', `REAL DEFAULT 0`);
 
+  // Migrator-hunter stats: per-wallet behavior on mints that graduated to Raydium.
+  // entry_pct = entry mcap / peak mcap (lower = bought earlier on the curve).
+  // realized_sol = sum of sells - buys across migrated mints (proxy for actual exit quality).
+  ensureCol(d, 'wallets', 'migrator_buys', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'wallets', 'migrator_pre_mig_buys', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'wallets', 'migrator_avg_entry_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'wallets', 'migrator_realized_sol', `REAL DEFAULT 0`);
+  ensureCol(d, 'wallets', 'migrator_score', `REAL DEFAULT 0`);
+  ensureCol(d, 'wallets', 'migrator_stats_updated_at', `INTEGER`);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_wallets_migrator_score ON wallets(migrator_score DESC) WHERE migrator_score > 0`);
+
   d.exec(`CREATE TABLE IF NOT EXISTS paper_wallet (
     id INTEGER PRIMARY KEY,
     starting_balance_sol REAL NOT NULL DEFAULT 1.0,
@@ -189,7 +200,11 @@ function runMigrations(d) {
   ensureCol(d, 'paper_positions', 'breakeven_armed', `INTEGER DEFAULT 0`);
 
   d.exec(`UPDATE paper_positions SET tokens_remaining = token_amount WHERE tokens_remaining IS NULL OR tokens_remaining = 0`);
-  d.exec(`DELETE FROM strategy_state WHERE name NOT IN ('trackedWalletFollow', 'trackedFollowTrojan', 'trackedFollowHybrid', 'trackedFollowScalper', 'runnerScore', 'volumeSurgeRunner', 'coBuyerCluster')`);
+  // Removed: hardcoded-whitelist DELETE that wiped any strategy not in a stale list.
+  // It nuked migratorHunter/kingFollow/preKing/quickFlip15 every time init() ran
+  // (e.g. when the monitor worker thread opens its own DB connection). Stale rows
+  // from removed strategies are harmless — they just sit unused. Remove explicitly
+  // via SQL if needed.
 
   d.exec(`CREATE TABLE IF NOT EXISTS volume_signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

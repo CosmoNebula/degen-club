@@ -236,24 +236,32 @@ export function recomputeEveryWallet() {
   return all.length;
 }
 
-export function startTraderSweep() {
-  setTimeout(() => {
-    try {
-      const n = recomputeEveryWallet();
-      console.log(`[traders] initial classification: ${n} wallets`);
-    } catch (err) {
-      console.error('[traders] initial sweep', err.message);
-    }
-  }, 5000);
+// Stale wallet cleanup — keeps DB lean by deleting wallets we have no reason
+// to track. "Reasons to keep" (any one): manually tracked, KOL, qualified
+// tracked, has migrator_score signal, or trade activity within `maxIdleMs`.
+// If a deleted wallet ever trades again, the processor's upsertWallet recreates
+// the row with a fresh classification on its next sweep — no permanent loss.
+export function cleanupStaleWallets({ maxIdleMs = 24 * 60 * 60 * 1000 } = {}) {
+  const d = db();
+  const cutoff = Date.now() - maxIdleMs;
+  const info = d.prepare(`
+    DELETE FROM wallets
+    WHERE COALESCE(last_activity_at, 0) < ?
+      AND COALESCE(manually_tracked, 0) = 0
+      AND COALESCE(is_kol, 0) = 0
+      AND COALESCE(tracked, 0) = 0
+      AND COALESCE(migrator_score, 0) = 0
+  `).run(cutoff);
+  return info.changes;
+}
 
-  setInterval(() => {
-    try {
-      const n = recomputeAllWallets();
-      if (n > 0) console.log(`[traders] recomputed ${n} active wallets`);
-    } catch (err) {
-      console.error('[traders] sweep', err.message);
-    }
-  }, config.traders.recomputeIntervalMs);
+export function startTraderSweep() {
+  // Spawned in main thread but actual work runs in traders-worker.js to keep
+  // the main event loop free for trade ingestion + signal evaluation.
+  // Lazy import keeps this file usable from inside the worker (which would otherwise
+  // create a self-spawning loop if it called startTraderSweep on init).
+  import('../trading/traders-worker.js').then(m => m.startTradersWorker())
+    .catch(err => console.error('[traders] worker start', err.message));
 }
 
 export function checkCopySignal(mintAddress) {
