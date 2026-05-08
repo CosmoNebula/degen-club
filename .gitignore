@@ -26,3 +26,17 @@ dist/
 build/
 .cache/
 *.log
+
+# ML — virtualenv, model artifacts, regeneratable data
+ml/.venv/
+ml/models/*.pkl
+ml/models/*.json
+ml/data/training.csv
+ml/data/training_smoke.csv
+ml/data/features_*.csv
+ml/data/.last_train_meta.json
+ml/data/metrics_history.jsonl
+ml/logs/
+
+# Temp test files
+test-*.mjs

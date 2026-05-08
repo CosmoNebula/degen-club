@@ -187,14 +187,8 @@ export function passesHolderDiversity(mintAddress, opts = {}) {
   if (stats.holderCount < cfg.minHolderCount) {
     return { pass: false, reason: `THIN_HOLDERS(${stats.holderCount}<${cfg.minHolderCount})` };
   }
-  if (!opts.skipWhale && stats.whalePct > cfg.maxWhalePct) {
-    return { pass: false, reason: `WHALE_TOO_BIG(${(stats.whalePct*100).toFixed(0)}%>${(cfg.maxWhalePct*100).toFixed(0)}%)` };
-  }
   if (stats.bundlePct > cfg.maxBundlePct) {
     return { pass: false, reason: `BUNDLE_TOO_HIGH(${(stats.bundlePct*100).toFixed(0)}%>${(cfg.maxBundlePct*100).toFixed(0)}%)` };
-  }
-  if (stats.creatorPct > cfg.maxCreatorPct) {
-    return { pass: false, reason: `DEV_TOO_HIGH(${(stats.creatorPct*100).toFixed(0)}%>${(cfg.maxCreatorPct*100).toFixed(0)}%)` };
   }
   return { pass: true };
 }

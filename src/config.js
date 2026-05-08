@@ -161,8 +161,10 @@ volumeSurge: {
 
   maintenance: {
     intervalMs: 30 * 60 * 1000,
-    ruggedRetentionHours: 12,
-    quietRetentionMinutes: 60,
+    // ML-collection mode: keep trades long enough for labels to resolve (6h)
+    // plus a comfortable buffer for training set assembly. Was 12h rugged.
+    ruggedRetentionHours: 7 * 24,        // 7 days
+    quietRetentionMinutes: 30 * 24 * 60,  // 30 days for active trades
     startupDelayMs: 60 * 1000,
   },
 
@@ -231,7 +233,7 @@ volumeSurge: {
     monitorIntervalMs: 250,
     ...strategyConfigs,
     global: {
-      maxOpenPositions: 20,
+      maxOpenPositions: 200,
       maxSolExposure: 0.75,
       minMintAgeSec: 0,
       maxMintAgeMinutes: 999999,
@@ -245,8 +247,17 @@ volumeSurge: {
     holderGate: {
       enabled: true,
       maxWhalePct: 0.80,
-      maxBundlePct: 0.70,
-      maxCreatorPct: 0.25,
+      // Bundle gate disabled — pump.fun mints commonly start with sniper-bot
+      // sweeps that briefly hold ~100% of supply, then dilute as the run
+      // continues. In session data, BUNDLE_TOO_HIGH rejected 50 mints with
+      // 71% (37 of 50) going on to be wins (avg 2.45x peak from rejection).
+      // Setting to 1.01 makes it impossible to trip; keep the field for fast
+      // re-enable if a future pattern justifies it.
+      maxBundlePct: 1.01,
+      // Dev cap loosened from 25% → 60% — top missed runners (44x, 43x, etc.)
+      // were rejected by DEV_TOO_HIGH. Pump.fun dev concentration normalizes
+      // as the run continues; rejecting at 25% kills future runners.
+      maxCreatorPct: 0.60,
       minHolderCount: 0,
       cacheTtlMs: 5000,
     },

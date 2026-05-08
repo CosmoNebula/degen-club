@@ -22,6 +22,10 @@ const SETTABLE = [
   'peak_floor_arm_pct', 'peak_floor_exit_pct',
   'peak_floor_arm2_pct', 'peak_floor_exit2_pct',
   'peak_floor_arm3_pct', 'peak_floor_exit3_pct',
+  'dead_bag_age_min', 'dead_bag_max_peak_pct', 'dead_bag_loss_pct',
+  'fade_exit_peak_min', 'fade_exit_peak_max', 'fade_exit_loss_pct',
+  'mid_fade_peak_min', 'mid_fade_peak_max', 'mid_fade_loss_pct',
+  'lazy_exit_age_min', 'lazy_exit_max_peak_pct', 'lazy_exit_band_pct',
 ];
 
 export function initStrategies() {
@@ -76,6 +80,36 @@ export function initStrategies() {
           d_.peak_floor_arm3_pct || 0, d_.peak_floor_exit3_pct || 0,
           key);
     }
+    const dbg = d.prepare('SELECT dead_bag_age_min, dead_bag_max_peak_pct, dead_bag_loss_pct FROM strategy_state WHERE name = ?').get(key);
+    if (dbg && dbg.dead_bag_age_min === 0 && dbg.dead_bag_max_peak_pct === 0 && dbg.dead_bag_loss_pct === 0) {
+      d.prepare(`UPDATE strategy_state SET
+        dead_bag_age_min = ?, dead_bag_max_peak_pct = ?, dead_bag_loss_pct = ?
+        WHERE name = ?`).run(
+          d_.dead_bag_age_min || 0,
+          d_.dead_bag_max_peak_pct || 0,
+          d_.dead_bag_loss_pct || 0,
+          key);
+    }
+    const fade = d.prepare('SELECT fade_exit_peak_min, mid_fade_peak_min FROM strategy_state WHERE name = ?').get(key);
+    if (fade && fade.fade_exit_peak_min === 0 && fade.mid_fade_peak_min === 0) {
+      d.prepare(`UPDATE strategy_state SET
+        fade_exit_peak_min = ?, fade_exit_peak_max = ?, fade_exit_loss_pct = ?,
+        mid_fade_peak_min = ?, mid_fade_peak_max = ?, mid_fade_loss_pct = ?
+        WHERE name = ?`).run(
+          d_.fade_exit_peak_min || 0, d_.fade_exit_peak_max || 0, d_.fade_exit_loss_pct || 0,
+          d_.mid_fade_peak_min || 0, d_.mid_fade_peak_max || 0, d_.mid_fade_loss_pct || 0,
+          key);
+    }
+    const lazy = d.prepare('SELECT lazy_exit_age_min FROM strategy_state WHERE name = ?').get(key);
+    if (lazy && lazy.lazy_exit_age_min === 0) {
+      d.prepare(`UPDATE strategy_state SET
+        lazy_exit_age_min = ?, lazy_exit_max_peak_pct = ?, lazy_exit_band_pct = ?
+        WHERE name = ?`).run(
+          d_.lazy_exit_age_min || 0,
+          d_.lazy_exit_max_peak_pct || 0,
+          d_.lazy_exit_band_pct || 0,
+          key);
+    }
   }
 }
 
@@ -88,7 +122,12 @@ function S() {
     listStrategies: d.prepare('SELECT * FROM strategy_state ORDER BY name'),
     toggleStrategy: d.prepare('UPDATE strategy_state SET enabled = 1 - enabled, updated_at = ? WHERE name = ?'),
     countOpen: d.prepare("SELECT COUNT(*) AS n FROM paper_positions WHERE status = 'open'"),
-    sumOpenSol: d.prepare("SELECT COALESCE(SUM(entry_sol), 0) AS s FROM paper_positions WHERE status = 'open'"),
+    // Exposure = at-risk capital only. Once a position has realized enough
+    // through tier sells to cover its cost basis, it's house money and no
+    // longer counts toward maxSolExposure — the remaining bag is pure
+    // upside, no downside risk to original capital.
+    sumOpenSol: d.prepare(`SELECT COALESCE(SUM(MAX(0, entry_sol - COALESCE(sol_realized_so_far, 0))), 0) AS s
+                           FROM paper_positions WHERE status = 'open'`),
     holdingMint: d.prepare("SELECT strategy FROM paper_positions WHERE mint_address = ? AND strategy = ? AND status = 'open' AND COALESCE(position_mode,'paper') = ? LIMIT 1"),
     recentClose: d.prepare(`SELECT strategy, exited_at, realized_pnl_sol FROM paper_positions
       WHERE mint_address = ? AND status = 'closed' AND exited_at > ?
@@ -270,22 +309,65 @@ function inCooldown(mintAddress) {
   return null;
 }
 
+function passesStrategyShape(strategyName, mint) {
+  const sCfg = config.strategies?.[strategyName];
+  if (!sCfg) return { pass: true };
+  const mc = mint.current_market_cap_sol || 0;
+  const buyers = mint.unique_buyer_count || 0;
+  const score = mint.runner_score == null ? -1 : mint.runner_score;
+  const ageSec = mint.created_at ? Math.round((Date.now() - mint.created_at) / 1000) : 0;
+  if (typeof sCfg.mcFloor === 'number' && mc < sCfg.mcFloor) return { pass: false, reason: 'STRAT_MC_FLOOR', detail: `${mc.toFixed(0)}<${sCfg.mcFloor}` };
+  if (typeof sCfg.mcCeiling === 'number' && mc >= sCfg.mcCeiling) return { pass: false, reason: 'STRAT_MC_CEIL', detail: `${mc.toFixed(0)}>=${sCfg.mcCeiling}` };
+  if (typeof sCfg.minBuyers === 'number' && buyers < sCfg.minBuyers) return { pass: false, reason: 'STRAT_MIN_BUYERS', detail: `${buyers}<${sCfg.minBuyers}` };
+  if (typeof sCfg.maxBuyers === 'number' && buyers >= sCfg.maxBuyers) return { pass: false, reason: 'STRAT_MAX_BUYERS', detail: `${buyers}>=${sCfg.maxBuyers}` };
+  if (typeof sCfg.minRunnerScore === 'number' && score < sCfg.minRunnerScore) return { pass: false, reason: 'STRAT_MIN_SCORE', detail: `${score}<${sCfg.minRunnerScore}` };
+  if (typeof sCfg.minAgeSec === 'number' && ageSec < sCfg.minAgeSec) return { pass: false, reason: 'STRAT_MIN_AGE', detail: `${ageSec}s<${sCfg.minAgeSec}s` };
+  if (typeof sCfg.maxAgeSec === 'number' && ageSec >= sCfg.maxAgeSec) return { pass: false, reason: 'STRAT_MAX_AGE', detail: `${ageSec}s>=${sCfg.maxAgeSec}s` };
+  return { pass: true };
+}
+
 function tryFire(strategyName, mint, signalDetails, sizeOverride, scoreInfo) {
   const strat = getStrategy(strategyName);
   if (!strat || !strat.enabled) return;
+  const shape = passesStrategyShape(strategyName, mint);
+  if (!shape.pass) {
+    console.log(`[strat-shape] ${strategyName} skip ${mint.mint_address.slice(0,8)}… ${shape.reason}(${shape.detail})`);
+    return;
+  }
   const paperHolding = S().holdingMint.get(mint.mint_address, strategyName, 'paper');
   const liveHolding = S().holdingMint.get(mint.mint_address, strategyName, 'live');
   if (paperHolding && (!isLiveMode() || liveHolding)) {
     console.log(`[strategy] ${strategyName} skip ${mint.mint_address.slice(0,8)}… already held`);
     return;
   }
-  const cd = inCooldown(mint.mint_address);
-  if (cd) {
-    const minsAgo = ((Date.now() - cd.exited_at) / 60000).toFixed(1);
-    console.log(`[strategy] ${strategyName} skip ${mint.mint_address.slice(0,8)}… cooldown (closed ${minsAgo}m ago, ${cd.realized_pnl_sol >= 0 ? '+' : ''}${cd.realized_pnl_sol.toFixed(4)} SOL)`);
-    return;
+  // SL bounce re-entry: check watchlist BEFORE cooldown. If this mint+strategy
+  // recently SL'd AND current mcap implies price ≥80% of original entry, allow
+  // re-entry at half size and consume the watchlist row.
+  let isReentry = false;
+  let reentryMult = 1.0;
+  try {
+    const w = db().prepare(`SELECT * FROM sl_watchlist WHERE mint_address = ? AND original_strategy = ? AND consumed = 0 AND expires_at > ?`).get(mint.mint_address, strategyName, Date.now());
+    if (w) {
+      const curPrice = mint.last_price_sol || 0;
+      const recoveredRatio = w.original_entry_price > 0 ? curPrice / w.original_entry_price : 0;
+      if (curPrice > 0 && recoveredRatio >= 0.80) {
+        isReentry = true;
+        reentryMult = 0.5;
+        db().prepare(`UPDATE sl_watchlist SET consumed = 1 WHERE mint_address = ? AND original_strategy = ?`).run(mint.mint_address, strategyName);
+        console.log(`[reentry] ${strategyName} bounce on ${mint.mint_address.slice(0,8)}… recovered ${(recoveredRatio*100).toFixed(0)}% of orig entry → re-enter at ${(reentryMult*100).toFixed(0)}% size`);
+      }
+    }
+  } catch (err) { console.error('[reentry] watchlist check failed:', err.message); }
+
+  if (!isReentry) {
+    const cd = inCooldown(mint.mint_address);
+    if (cd) {
+      const minsAgo = ((Date.now() - cd.exited_at) / 60000).toFixed(1);
+      console.log(`[strategy] ${strategyName} skip ${mint.mint_address.slice(0,8)}… cooldown (closed ${minsAgo}m ago, ${cd.realized_pnl_sol >= 0 ? '+' : ''}${cd.realized_pnl_sol.toFixed(4)} SOL)`);
+      return;
+    }
   }
-  const baseSize = sizeOverride && sizeOverride > 0 ? sizeOverride : strat.entry_sol;
+  const baseSize = (sizeOverride && sizeOverride > 0 ? sizeOverride : strat.entry_sol) * reentryMult;
   const sized = applyDynamicSizing(baseSize, 1.0);
   const entrySol = typeof sized === 'object' ? sized.sol : sized;
   if (scoreInfo) {
@@ -302,7 +384,7 @@ function tryFire(strategyName, mint, signalDetails, sizeOverride, scoreInfo) {
     entryPrice: mint.last_price_sol || 0,
     entrySol,
     entryMcap: mint.current_market_cap_sol || 0,
-    signalDetails,
+    signalDetails: isReentry ? { ...signalDetails, _reentry: true } : signalDetails,
     entryScore: scoreInfo ? scoreInfo.multiplier : 1.0,
   };
   if (isLiveMode()) {
@@ -344,7 +426,18 @@ export function onSmartTrade(trade, mint) {
     }
     if (!passesGlobalGuards(mint, 'smart_trade')) return;
     w._wallet_addr = trade.wallet;
-    if (w.is_kol) console.log(`[kol] 👑 ${trade.wallet.slice(0, 8)}… buying ${mint.mint_address.slice(0, 8)}…`);
+    if (w.is_kol) {
+      console.log(`[kol] 👑 ${trade.wallet.slice(0, 8)}… buying ${mint.mint_address.slice(0, 8)}…`);
+      // Enroll for KOL-dip A/B watcher (kolCoattailsDip fires later when first
+      // dip lands). Idempotent — first KOL signal per mint wins.
+      try {
+        const sigPrice = mint.last_price_sol || 0;
+        if (sigPrice > 0) {
+          db().prepare(`INSERT OR IGNORE INTO kol_watch (mint_address, kol_wallet, signal_price, signal_at, peak_price, peak_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+            .run(mint.mint_address, trade.wallet, sigPrice, Date.now(), sigPrice, Date.now(), Date.now() + 10 * 60 * 1000);
+        }
+      } catch {}
+    }
 
     const clusterCount = S().otherTrackedBuyers.get(
       mint.mint_address, Date.now() - config.cluster.windowSeconds * 1000, trade.wallet
@@ -469,4 +562,38 @@ export function onVolumeSurge(mintAddress, surgeDetails) {
       }
     }
   } catch (err) { console.error('[strategy] onVolumeSurge', err.message); }
+}
+
+export function onWhaleSpawn(mintAddress, details) {
+  try {
+    const mint = S().getMint.get(mintAddress);
+    if (!mint || !passesGlobalGuards(mint, 'whale_spawn')) return;
+    const sigDetails = { type: 'WHALE_SPAWN', ...details };
+    for (const name of strategiesForTrigger('whale_spawn')) {
+      const strat = getStrategy(name);
+      if (!strat || !strat.enabled) continue;
+      // Size scaling by initial_buy_sol — higher conviction at bigger dev-buy
+      const sCfg = config.strategies[name] || {};
+      const sz = sCfg.sizing || {};
+      const ib = details.initial_buy_sol || 0;
+      let mult = 1.0;
+      if (ib >= 25) mult = 2.0;
+      else if (ib >= 15) mult = 1.5;
+      const base = sz.baseEntrySol ?? strat.entry_sol;
+      let entrySol = base * mult;
+      if (sz.minEntrySol) entrySol = Math.max(sz.minEntrySol, entrySol);
+      if (sz.maxEntrySol) entrySol = Math.min(sz.maxEntrySol, entrySol);
+      tryFire(name, mint, sigDetails, entrySol, { multiplier: +mult.toFixed(2), walletScore: 0, isKol: false });
+    }
+  } catch (err) { console.error('[strategy] onWhaleSpawn', err.message); }
+}
+
+
+export function onKolDip(mintAddress, details) {
+  try {
+    const mint = S().getMint.get(mintAddress);
+    if (!mint || !passesGlobalGuards(mint, 'kol_dip')) return;
+    const sigDetails = { type: 'KOL_DIP', ...details };
+    for (const name of strategiesForTrigger('kol_dip')) tryFire(name, mint, sigDetails);
+  } catch (err) { console.error('[strategy] onKolDip', err.message); }
 }

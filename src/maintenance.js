@@ -46,12 +46,14 @@ export function pruneAuxData() {
   const now = Date.now();
 
   const orphanHoldings = s.deleteOrphanHoldings.run().changes;
-  // Drop mints that never migrated AND haven't seen a trade in >24h. Their
-  // trades were already cleared by pruneTrades, so the mint row is just metadata.
-  const staleMintCutoff = now - 24 * 60 * 60 * 1000;
+  // Sweep expired SL re-entry watchlist rows (keep table small).
+  try { db().prepare(`DELETE FROM sl_watchlist WHERE expires_at < ? OR consumed = 1`).run(now - 60 * 60 * 1000); } catch {}
+  // ML-collection mode: extended retention so labels can resolve and we have
+  // enough negative-class data for training. Mints kept 7 days (was 24h),
+  // signals kept 7 days (was 6h).
+  const staleMintCutoff = now - 7 * 24 * 60 * 60 * 1000;
   const staleMints = s.deleteStaleMints.run(staleMintCutoff).changes;
-  // Old signal log entries — kept only for short dedup windows in code.
-  const oldSignalCutoff = now - 6 * 60 * 60 * 1000;
+  const oldSignalCutoff = now - 7 * 24 * 60 * 60 * 1000;
   const oldCopySignals = s.deleteOldCopySignals.run(oldSignalCutoff).changes;
   const oldVolumeSignals = s.deleteOldVolumeSignals.run(oldSignalCutoff).changes;
 

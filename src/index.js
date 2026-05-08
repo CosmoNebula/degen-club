@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { init } from './db/index.js';
-import { startServer } from './server/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOG_DIR = path.resolve(__dirname, '..', 'logs');
@@ -29,6 +29,18 @@ import { startProcessor, startSweeper } from './ingestion/processor.js';
 import { startTraderSweep } from './scoring/traders.js';
 import { startWalletGrader } from './scoring/wallet-grader.js';
 import { startRunnerScoreSweep } from './scoring/runner-score.js';
+import { startWhaleSpawnSweep } from './scoring/whale-spawn.js';
+import { startKolDipSweep } from './scoring/kol-dip.js';
+import { startLiveConditionsMonitor } from './scoring/live-conditions.js';
+import { startMicrostructureSweep } from './scoring/mint-microstructure.js';
+import { startSnapshotSweeper } from './ml/snapshot-sweeper.js';
+import { startLabelResolver } from './ml/label-resolver.js';
+import { startDiskMonitor } from './ml/disk-monitor.js';
+import { startMlClient } from './ml/ml-client.js';
+import { startScoringSweeper } from './ml/scoring-sweeper.js';
+import { startAutoRetrain } from './ml/auto-retrain.js';
+import { startAgent } from './ml/agent.js';
+import { startServeWatchdog } from './ml/serve-watchdog.js';
 import { startSessionLogger } from './scoring/session-logger.js';
 import { startBundleSweep } from './scoring/bundle.js';
 import { startDevSweep } from './scoring/devs.js';
@@ -36,31 +48,80 @@ import { startVolumeSurgeSweep } from './scoring/volume.js';
 import { startMaintenance } from './maintenance.js';
 import { startPostExitSweep } from './scoring/post-exit.js';
 import { initStrategies } from './trading/strategies.js';
-import { startPositionMonitor } from './trading/paper.js';
+import { startPositionMonitor, recoverLivePositions } from './trading/paper.js';
 import { startMoonbagPriceFeed, startOpenPositionPriceFeed } from './ingestion/dexscreener.js';
+import { startOnchainPriceFeed } from './ingestion/onchain-price.js';
+import { startHeliusWebhookSync } from './ingestion/helius-webhooks.js';
 import { heliusWS } from './ingestion/helius.js';
+import { onchainPumpTrades } from './ingestion/onchain-pump-trades.js';
 import { startPriceService } from './price.js';
+import { startHealthHeartbeat } from './health.js';
+import { pollRuntimeLimits } from './runtime-limits.js';
 
 init();
+pollRuntimeLimits(3000); // pick up dashboard-edited limits within 3s
 initStrategies();
 startPriceService();
-startPositionMonitor();
+recoverLivePositions()
+  .catch(err => console.error('[recover] startup failed:', err.message))
+  .finally(() => startPositionMonitor());
 heliusWS.start();
 startMoonbagPriceFeed();
 startOpenPositionPriceFeed();
+startOnchainPriceFeed();
+startHeliusWebhookSync();
 startPostExitSweep();
 
 const pp = new PumpPortalClient();
 startProcessor(pp);
+// Per-mint trade firehose moved off PumpPortal (paid as of 2026-05-01).
+// We now decode TradeEvents directly from Pump.fun program logs.
+startProcessor(onchainPumpTrades);
+onchainPumpTrades.start();
 startSweeper();
 startTraderSweep();
 startWalletGrader();
 startRunnerScoreSweep();
+startWhaleSpawnSweep();
+startKolDipSweep();
+startLiveConditionsMonitor();
+startMicrostructureSweep();
+startDiskMonitor();
+startSnapshotSweeper();
+startLabelResolver();
+startMlClient();
+startScoringSweeper();
+startAutoRetrain();
+startAgent();
+startServeWatchdog();
 startSessionLogger();
 startBundleSweep();
 startDevSweep();
 startVolumeSurgeSweep();
 startMaintenance();
 pp.start();
+startHealthHeartbeat({ pp, onchainTrades: onchainPumpTrades });
 
-startServer(() => pp.status());
+// Dashboard runs in a separate Node process so its SQL load can't block the
+// trade pipeline (Helius firehose → signal eval → trade fire all run on this
+// thread). Communication is via the shared SQLite DB. Auto-restart on crash.
+let _dashboardProc = null;
+function spawnDashboard() {
+  const dashboardPath = path.resolve(__dirname, 'dashboard.js');
+  console.log(`[bot] spawning dashboard: ${dashboardPath}`);
+  _dashboardProc = spawn(process.execPath, [dashboardPath], {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    env: process.env,
+  });
+  _dashboardProc.on('exit', (code, sig) => {
+    console.error(`[dashboard-proc] exited code=${code} sig=${sig} — restarting in 2s`);
+    _dashboardProc = null;
+    setTimeout(spawnDashboard, 2000);
+  });
+}
+spawnDashboard();
+// Make sure the dashboard child dies with the bot — otherwise restarts leak processes.
+const killChild = () => { try { _dashboardProc?.kill('SIGTERM'); } catch {} };
+process.on('exit', killChild);
+process.on('SIGTERM', () => { killChild(); process.exit(0); });
+process.on('SIGINT', () => { killChild(); process.exit(0); });

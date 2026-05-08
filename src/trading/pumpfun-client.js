@@ -47,25 +47,35 @@ export async function sell({ mint, tokenAmount, slippageBps = 1500 }) {
   const kp = getKeypair();
   const mintPk = new PublicKey(mint);
   const amount = BigInt(Math.floor(tokenAmount));
-  try {
-    const result = await sdk().sell(
-      kp,
-      mintPk,
-      amount,
-      BigInt(slippageBps),
-      { unitLimit: 250000, unitPrice: PRIORITY_MICRO_LAMPORTS },
-    );
-    const elapsed = Date.now() - start;
-    if (!result.success) {
-      return { success: false, error: result.error?.message || 'unknown', elapsedMs: elapsed };
+  const MAX_ATTEMPTS = 3;
+  let lastErr = 'unknown';
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await sdk().sell(
+        kp,
+        mintPk,
+        amount,
+        BigInt(slippageBps),
+        { unitLimit: 250000, unitPrice: PRIORITY_MICRO_LAMPORTS },
+      );
+      if (!result.success) {
+        lastErr = result.error?.message || 'unknown';
+      } else {
+        const txSig = result.signature;
+        const post = await getConnection().getParsedTransaction(txSig, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+        const fill = parseTradeResult(post, mintPk, kp.publicKey, false);
+        return { success: true, txSig, elapsedMs: Date.now() - start, attempts: attempt, ...fill };
+      }
+    } catch (err) {
+      lastErr = err.message;
     }
-    const txSig = result.signature;
-    const post = await getConnection().getParsedTransaction(txSig, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
-    const fill = parseTradeResult(post, mintPk, kp.publicKey, false);
-    return { success: true, txSig, elapsedMs: elapsed, ...fill };
-  } catch (err) {
-    return { success: false, error: err.message, elapsedMs: Date.now() - start };
+    if (attempt < MAX_ATTEMPTS) {
+      const delay = 1000 * Math.pow(3, attempt - 1); // 1s, 3s
+      console.log(`[live] SELL RETRY ${attempt}/${MAX_ATTEMPTS} ${mint.slice(0,8)}… err="${lastErr}" backoff=${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+    }
   }
+  return { success: false, error: lastErr, elapsedMs: Date.now() - start, attempts: MAX_ATTEMPTS };
 }
 
 function parseTradeResult(parsedTx, mintPk, owner, isBuy) {

@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🧠 ML Lab · degen-club</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="ml.css">
+</head>
+<body>
+<div class="ml-lab">
+  <header class="ml-header">
+    <a href="/" class="ml-back">← Dashboard</a>
+    <h1>🧠 ML Training Lab</h1>
+    <div class="ml-asof">last update: <span id="ml-asof">—</span></div>
+  </header>
+
+  <!-- Section 1: Overall Health -->
+  <section class="ml-section">
+    <h2>Overall Health</h2>
+    <div class="ml-grade-row">
+      <div class="ml-grade-card" id="ml-grade">
+        <div class="ml-grade-label">Quality Grade</div>
+        <div class="ml-grade-val" id="ml-grade-val">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Snapshots Total</div>
+        <div class="ml-stat-val" id="ml-total">—</div>
+        <div class="ml-stat-sub" id="ml-collection-days">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Labeled / Pending</div>
+        <div class="ml-stat-val" id="ml-resolved">—</div>
+        <div class="ml-stat-sub" id="ml-resolved-pct">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Snapshots / hr (now)</div>
+        <div class="ml-stat-val" id="ml-rate-now">—</div>
+        <div class="ml-stat-sub" id="ml-rate-avg">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Resolution Lag</div>
+        <div class="ml-stat-val" id="ml-lag">—</div>
+        <div class="ml-stat-sub">avg hr to label</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Active Alerts</div>
+        <div class="ml-stat-val" id="ml-alerts-count">—</div>
+        <div class="ml-stat-sub">click to scroll ↓</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 1b: Alerts -->
+  <section class="ml-section" id="ml-alerts-section">
+    <h2>⚠️ Active Alerts</h2>
+    <div class="ml-alerts-list" id="ml-alerts-list">
+      <div class="ml-alert ml-alert-info">No alerts — system humming</div>
+    </div>
+  </section>
+
+  <!-- Section 2: Snapshot Volume -->
+  <section class="ml-section">
+    <h2>📊 Snapshot Volume</h2>
+    <div class="ml-volume-grid">
+      <div class="ml-chart-card">
+        <h3>Last 24 hours · hourly</h3>
+        <div class="ml-chart" id="ml-hourly-chart"></div>
+        <div class="ml-chart-axis" id="ml-hourly-axis"></div>
+      </div>
+      <div class="ml-chart-card">
+        <h3>Last 7 days · daily</h3>
+        <div class="ml-chart" id="ml-daily-chart"></div>
+        <div class="ml-chart-axis" id="ml-daily-axis"></div>
+      </div>
+      <div class="ml-bucket-card">
+        <h3>By snapshot age</h3>
+        <table class="ml-bucket-table" id="ml-bucket-table">
+          <tbody>
+            <tr><td>60s</td><td id="ml-b-60">—</td></tr>
+            <tr><td>5min</td><td id="ml-b-300">—</td></tr>
+            <tr><td>15min</td><td id="ml-b-900">—</td></tr>
+            <tr><td>60min</td><td id="ml-b-3600">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 3: Label Resolution -->
+  <section class="ml-section">
+    <h2>🏷️ Label Resolution</h2>
+    <div class="ml-grade-row">
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Resolved</div>
+        <div class="ml-stat-val" id="ml-res-count">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Avg Lag (hr)</div>
+        <div class="ml-stat-val" id="ml-res-lag">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Overdue</div>
+        <div class="ml-stat-val" id="ml-res-overdue">—</div>
+        <div class="ml-stat-sub">>12hr unresolved</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Resolved last hr</div>
+        <div class="ml-stat-val" id="ml-res-lasthr">—</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 4: Class Balance & Sanity -->
+  <section class="ml-section">
+    <h2>⚖️ Class Balance & Label Sanity</h2>
+    <div class="ml-volume-grid">
+      <div class="ml-chart-card">
+        <h3>Migration rate · last 7 days</h3>
+        <div class="ml-chart" id="ml-mig-chart"></div>
+        <div class="ml-chart-axis" id="ml-mig-axis"></div>
+        <div class="ml-stat-sub" id="ml-mig-cv">CV: —</div>
+      </div>
+      <div class="ml-stat-grid">
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Mig Rate (overall)</div>
+          <div class="ml-stat-val" id="ml-mig-overall">—</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Peaked +30%</div>
+          <div class="ml-stat-val" id="ml-p30">—</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Peaked +100%</div>
+          <div class="ml-stat-val" id="ml-p100">—</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Peaked +500%</div>
+          <div class="ml-stat-val" id="ml-p500">—</div>
+        </div>
+        <div class="ml-stat-card" title="Median peak — half of mints peaked above this, half below. Robust to outliers.">
+          <div class="ml-stat-label">Median Peak %</div>
+          <div class="ml-stat-val" id="ml-peak-avg">—</div>
+        </div>
+        <div class="ml-stat-card" title="95th percentile peak — only 5% of mints exceeded this. Realistic 'best case' to aim for.">
+          <div class="ml-stat-label">P95 Peak %</div>
+          <div class="ml-stat-val" id="ml-peak-max">—</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 5: Feature Health -->
+  <section class="ml-section">
+    <h2>🔬 Feature Health (per-feature stats)</h2>
+    <table class="ml-feature-table" id="ml-feature-table">
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th>Health</th>
+          <th>Null %</th>
+          <th>Unique</th>
+          <th>Mean</th>
+          <th>Min</th>
+          <th>Max</th>
+        </tr>
+      </thead>
+      <tbody id="ml-feature-tbody">
+        <tr><td colspan="7" class="empty">loading...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Section 6: Coverage -->
+  <section class="ml-section">
+    <h2>🌐 Coverage Diversity</h2>
+    <div class="ml-volume-grid">
+      <div class="ml-stat-grid">
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Unique Mints</div>
+          <div class="ml-stat-val" id="ml-cov-mints">—</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Unique Creators</div>
+          <div class="ml-stat-val" id="ml-cov-creators">—</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Init Buy &lt;0.5◎</div>
+          <div class="ml-stat-val" id="ml-ib-1">—</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Init Buy 0.5-2◎</div>
+          <div class="ml-stat-val" id="ml-ib-2">—</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Init Buy 2-5◎</div>
+          <div class="ml-stat-val" id="ml-ib-3">—</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Init Buy 5-10◎</div>
+          <div class="ml-stat-val" id="ml-ib-4">—</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Init Buy ≥10◎</div>
+          <div class="ml-stat-val" id="ml-ib-5">—</div>
+        </div>
+      </div>
+      <div class="ml-chart-card">
+        <h3>Mints by hour-of-day (UTC)</h3>
+        <div class="ml-chart" id="ml-tod-chart"></div>
+        <div class="ml-chart-axis" id="ml-tod-axis"></div>
+      </div>
+      <div class="ml-chart-card">
+        <h3>Mints by day-of-week</h3>
+        <div class="ml-chart" id="ml-dow-chart"></div>
+        <div class="ml-chart-axis" id="ml-dow-axis"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 6.25: Model Health (drift detection) -->
+  <section class="ml-section">
+    <h2>🩺 Model Health <span style="font-size:11px;color:var(--text-dim);margin-left:8px">drift detection — current vs previous retrain</span></h2>
+    <div id="ml-health-summary" style="margin-bottom: 8px; font-size: 12px; color: var(--text-dim);">—</div>
+    <table class="ml-feature-table" id="ml-health-table">
+      <thead><tr>
+        <th>target</th><th>mode</th><th>headline metric</th><th>Δ vs last</th><th>n_train</th><th>status</th>
+      </tr></thead>
+      <tbody><tr><td colspan="6" class="empty">no retrain history yet</td></tr></tbody>
+    </table>
+    <div class="ml-stat-sub" style="margin-top: 10px;">
+      🟢 stable · 🟡 minor drift (AUC −5pts / R² −0.10) · 🔴 major drift (AUC −10pts / R² −0.20). Compares the most recent retrain against the one before it.
+    </div>
+  </section>
+
+  <!-- Section 6.3: Calibration -->
+  <section class="ml-section">
+    <h2>📐 Model Calibration
+      <span style="font-size:11px;color:var(--text-dim);margin-left:8px">does 50% prediction = 50% actual?</span>
+      <span style="font-size:11px;color:var(--text-dim);margin-left:12px">target:
+        <select id="ml-calib-target-select" style="background:rgba(15,15,30,0.6); color:var(--cyan); border:1px solid rgba(185,133,255,0.3); padding:2px 6px; font-family:inherit;">
+          <option value="peaked_30">+30%</option>
+          <option value="peaked_100">+100%</option>
+          <option value="peaked_300">+300%</option>
+          <option value="migrated">migrated</option>
+          <option value="will_die_fast">die fast</option>
+        </select>
+      </span>
+    </h2>
+    <div class="ml-volume-grid">
+      <div class="ml-chart-card" style="grid-column: span 2;">
+        <h3>Predicted vs Actual rate · per probability bucket</h3>
+        <div id="ml-calib-svg-wrap" style="position: relative; height: 240px;"></div>
+        <div class="ml-stat-sub" style="margin-top: 8px;">
+          Diagonal line = perfect calibration. Points above = model under-confident · below = over-confident
+        </div>
+      </div>
+      <div class="ml-stat-grid">
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Total Predictions</div>
+          <div class="ml-stat-val" id="ml-calib-n">—</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Brier Score</div>
+          <div class="ml-stat-val" id="ml-calib-brier">—</div>
+          <div class="ml-stat-sub">lower = better (0=perfect)</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Calibration Error</div>
+          <div class="ml-stat-val" id="ml-calib-ce">—</div>
+          <div class="ml-stat-sub">avg |predicted − actual|</div>
+        </div>
+        <div class="ml-stat-card">
+          <div class="ml-stat-label">Target</div>
+          <div class="ml-stat-val" id="ml-calib-target">—</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 6.35: Retrain controls -->
+  <section class="ml-section">
+    <h2>♻️ Retrain Pipeline</h2>
+    <div class="ml-grade-row">
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Auto-Retrain</div>
+        <div class="ml-stat-val" style="color:#b985ff">HOURLY</div>
+        <div class="ml-stat-sub">skips if &lt;100 new labeled rows</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Last Train</div>
+        <div class="ml-stat-val" id="ml-last-train">—</div>
+        <div class="ml-stat-sub" id="ml-last-train-rows">—</div>
+      </div>
+      <div class="ml-stat-card clickable" id="ml-retrain-btn" style="cursor:pointer; border-color: #b985ff;">
+        <div class="ml-stat-label">🔄 Retrain Now</div>
+        <div class="ml-stat-val" style="color:#b985ff;font-size:14px;" id="ml-retrain-state">click to trigger</div>
+      </div>
+    </div>
+    <!-- Live progress bar — visible only while a retrain is in flight -->
+    <div id="ml-retrain-progress" class="ml-retrain-progress" style="display:none;">
+      <div class="ml-retrain-progress-row">
+        <span class="ml-retrain-progress-stage" id="ml-retrain-progress-stage">starting…</span>
+        <span class="ml-retrain-progress-elapsed" id="ml-retrain-progress-elapsed">0s</span>
+      </div>
+      <div class="ml-retrain-progress-track">
+        <div class="ml-retrain-progress-fill" id="ml-retrain-progress-fill"></div>
+      </div>
+      <div class="ml-retrain-progress-targets" id="ml-retrain-progress-targets"></div>
+    </div>
+  </section>
+
+  <!-- Section 6.35: Autonomous Agent -->
+  <section class="ml-section" id="ml-agent-section">
+    <h2>🤖 Autonomous Agent
+      <span style="font-size:11px;color:var(--text-dim);margin-left:8px">decides its own strategies based on the data it's learned</span>
+    </h2>
+    <div class="ml-stat-grid" style="margin-bottom: 14px;">
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Status</div>
+        <div class="ml-stat-val" id="ml-agent-status" style="color:#b985ff">—</div>
+        <div class="ml-stat-sub" id="ml-agent-thought">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Live Strategies</div>
+        <div class="ml-stat-val" id="ml-agent-live-count">0</div>
+        <div class="ml-stat-sub" id="ml-agent-live-sub">none yet</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Consults Today</div>
+        <div class="ml-stat-val" id="ml-agent-consults">0</div>
+        <div class="ml-stat-sub">claude API calls (subscription)</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Last Cycle</div>
+        <div class="ml-stat-val" id="ml-agent-last-cycle">—</div>
+        <div class="ml-stat-sub">runs every 30min</div>
+      </div>
+    </div>
+
+    <h3 style="margin-top: 16px;">readiness checks</h3>
+    <div id="ml-agent-readiness" class="ml-stat-grid"></div>
+
+    <h3 style="margin-top: 16px;">active strategies</h3>
+    <div id="ml-agent-strategies">
+      <div class="ml-stat-sub" style="padding: 12px 0;">no strategies yet — agent will create them when ready</div>
+    </div>
+
+    <h3 style="margin-top: 16px;">thoughts feed (last 30)</h3>
+    <div id="ml-agent-log" class="ml-feed-card" style="max-height: 320px; overflow-y: auto;">
+      <div class="ml-stat-sub" style="padding: 12px;">no log entries yet</div>
+    </div>
+  </section>
+
+  <!-- Section 6.4: Top Picks (model's highest-prob mints right now) -->
+  <section class="ml-section">
+    <h2>🎯 Top Picks · last 30min · all targets
+      <span style="font-size:11px;color:var(--text-dim);margin-left:8px">sort by:
+        <select id="ml-picks-sort" style="background:rgba(15,15,30,0.6); color:var(--cyan); border:1px solid rgba(185,133,255,0.3); padding:2px 6px;">
+          <option value="peaked_30">+30%</option>
+          <option value="peaked_100">+100%</option>
+          <option value="peaked_300">+300%</option>
+          <option value="migrated">migrated</option>
+          <option value="will_die_fast">will_die_fast</option>
+        </select>
+      </span>
+    </h2>
+    <table class="ml-feature-table" id="ml-picks-table">
+      <thead>
+        <tr>
+          <th>#</th><th>Mint</th><th>Symbol</th>
+          <th>+30%</th><th>+100%</th><th>+300%</th><th>Mig</th><th>Die Fast</th>
+          <th>MCap</th><th>Buyers</th><th>Scored</th>
+        </tr>
+      </thead>
+      <tbody id="ml-picks-tbody">
+        <tr><td colspan="11" class="empty">no scored mints yet — sweeper warming up</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Section 6.5: Inference Bridge -->
+  <section class="ml-section">
+    <h2>🔌 Inference Bridge (Node ↔ Python)</h2>
+    <div class="ml-grade-row">
+      <div class="ml-grade-card" id="ml-svc">
+        <div class="ml-grade-label">Python Service</div>
+        <div class="ml-grade-val" id="ml-svc-val">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Model Loaded</div>
+        <div class="ml-stat-val" id="ml-svc-model">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Predictions (1h)</div>
+        <div class="ml-stat-val" id="ml-pred-total">—</div>
+        <div class="ml-stat-sub" id="ml-pred-errors">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Cache Hit Rate</div>
+        <div class="ml-stat-val" id="ml-pred-hitrate">—</div>
+        <div class="ml-stat-sub" id="ml-pred-cachesize">—</div>
+      </div>
+      <div class="ml-stat-card">
+        <div class="ml-stat-label">Avg Latency</div>
+        <div class="ml-stat-val" id="ml-pred-lat">—</div>
+        <div class="ml-stat-sub">Node→Python→Node</div>
+      </div>
+      <div class="ml-stat-card" title="Average peaked_30 probability across the last hour of predictions. Other targets aren't averaged because they have different scales (regression targets in seconds or peak %).">
+        <div class="ml-stat-label">Avg +30% Prob (1h)</div>
+        <div class="ml-stat-val" id="ml-pred-avgprob">—</div>
+        <div class="ml-stat-sub">peaked_30 only</div>
+      </div>
+    </div>
+    <div style="margin-top: 12px;">
+      <h3>Recent predictions</h3>
+      <table class="ml-feed-table" id="ml-pred-recent"></table>
+    </div>
+  </section>
+
+  <!-- Section 7: Live Activity -->
+  <section class="ml-section">
+    <h2>🔴 Live Activity Feed</h2>
+    <div class="ml-volume-grid">
+      <div class="ml-feed-card">
+        <h3>Recent Snapshots</h3>
+        <table class="ml-feed-table" id="ml-recent-snaps"></table>
+      </div>
+      <div class="ml-feed-card">
+        <h3>Recent Resolutions (with labels)</h3>
+        <table class="ml-feed-table" id="ml-recent-res"></table>
+      </div>
+    </div>
+  </section>
+
+  <footer class="ml-footer">
+    Auto-refreshes every 30s · <a href="/">back to main dashboard</a>
+  </footer>
+</div>
+
+<script src="ml.js"></script>
+</body>
+</html>

@@ -1,12 +1,24 @@
 import { db } from '../db/index.js';
 import { config } from '../config.js';
 import { isLiveMode } from './wallet.js';
+import { getLatencyEstimate, getPriorityFeeSol } from '../scoring/live-conditions.js';
+import { estimateBuyFriction, estimateSellFriction } from '../scoring/mint-microstructure.js';
 import { Worker, isMainThread } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const _pendingSells = new Set();
 const _pendingPaperSells = new Set();
+
+// Effective paper latency. Defaults to live-measured Helius p90 — replaces the
+// old static config.paper.latencyMs guess. If the dashboard explicitly sets
+// config.paper.latencyMs > 0, that override wins (manual control). Otherwise
+// the bot uses whatever the network is doing right now.
+function effectiveLatencyMs() {
+  const override = config.paper?.latencyMs;
+  if (override != null && override > 0) return Math.round(override);
+  return Math.max(0, Math.round(getLatencyEstimate('helius')));
+}
 
 function appendSellEvent(positionId, event) {
   try {
@@ -63,35 +75,166 @@ function S() {
   return cached;
 }
 
-function applyBuyFriction(solIn, price) {
+// Dynamic friction model — when mintAddress is provided, compute per-mint
+// per-network friction from microstructure + live conditions. Fall back to
+// static config.friction otherwise (preserves existing behavior for callers
+// that don't have mint context).
+//
+// Components when dynamic:
+//   - slippage: exact bonding-curve math (bondingCurveSlippageBuy/Sell)
+//   - volatility drift: mint volatility × √(network latency seconds)
+//   - sandwich surcharge: 0-4% based on detected MEV pressure
+//   - priority fee: live p90 from getPriorityFeeSol()
+//   - fee pct: still from config (~1% pump.fun fee, deterministic)
+
+// `ctx` may be a string (legacy: just the mint address) or an object with
+// { mintAddress, positionId, strategy } — when positionId is provided, we log
+// the friction event to the friction_log table for Phase 1D analysis.
+function _normalizeCtx(ctx) {
+  if (!ctx) return {};
+  if (typeof ctx === 'string') return { mintAddress: ctx };
+  return ctx;
+}
+
+let _logStmt = null;
+function _logFriction(row) {
+  try {
+    if (!_logStmt) {
+      _logStmt = db().prepare(`INSERT INTO friction_log
+        (timestamp, position_id, mint_address, strategy, side, trade_size_sol,
+         total_slippage_pct, curve_slip_pct, vol_drift_pct, sandwich_pct,
+         priority_fee_sol, latency_ms, v_sol_in_curve, was_dynamic)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    }
+    _logStmt.run(
+      row.timestamp, row.positionId || null, row.mintAddress || null, row.strategy || null,
+      row.side, row.tradeSizeSol || 0,
+      row.totalSlippagePct || 0, row.curveSlipPct || 0, row.volDriftPct || 0, row.sandwichPct || 0,
+      row.priorityFeeSol || 0, row.latencyMs || 0, row.vSolInCurve || 0, row.wasDynamic ? 1 : 0
+    );
+  } catch (err) { /* never throw from friction logging */ }
+}
+
+function applyBuyFriction(solIn, price, ctx = null) {
+  const c = _normalizeCtx(ctx);
+  const mintAddress = c.mintAddress;
   const f = config.friction || {};
-  const priority = f.priorityFeeSol || 0;
   const fee = f.feePct || 0;
-  const slip = f.slippagePct || 0;
+  let priority, slip, components = null, latencyMs = 0, dynamic = false;
+  if (mintAddress) {
+    latencyMs = getLatencyEstimate('helius');
+    const friction = estimateBuyFriction(mintAddress, solIn, latencyMs);
+    slip = friction.totalSlippagePct;
+    components = friction.components;
+    priority = getPriorityFeeSol();
+    dynamic = true;
+  } else {
+    priority = f.priorityFeeSol || 0;
+    slip = f.slippagePct || 0;
+  }
   const effectiveSol = Math.max(0, solIn - priority);
   const effectivePrice = price * (1 + slip);
   const tokens = (effectiveSol * (1 - fee)) / effectivePrice;
+  if (mintAddress) {
+    _logFriction({
+      timestamp: Date.now(),
+      positionId: c.positionId || null,
+      mintAddress,
+      strategy: c.strategy,
+      side: 'buy',
+      tradeSizeSol: solIn,
+      totalSlippagePct: slip,
+      curveSlipPct: components?.curve || 0,
+      volDriftPct: components?.volatilityDrift || 0,
+      sandwichPct: components?.sandwich || 0,
+      priorityFeeSol: priority,
+      latencyMs,
+      vSolInCurve: components?.vSol || 0,
+      wasDynamic: dynamic,
+    });
+  }
   return { tokens, costSol: solIn };
 }
 
-function applySellFriction(tokens, price) {
+function applySellFriction(tokens, price, ctx = null) {
+  const c = _normalizeCtx(ctx);
+  const mintAddress = c.mintAddress;
   const f = config.friction || {};
-  const priority = f.priorityFeeSol || 0;
   const fee = f.feePct || 0;
-  const slip = f.slippagePct || 0;
+  let priority, slip, components = null, latencyMs = 0, dynamic = false;
+  if (mintAddress) {
+    latencyMs = getLatencyEstimate('helius');
+    const friction = estimateSellFriction(mintAddress, tokens, latencyMs);
+    slip = friction.totalSlippagePct;
+    components = friction.components;
+    priority = getPriorityFeeSol();
+    dynamic = true;
+  } else {
+    priority = f.priorityFeeSol || 0;
+    slip = f.slippagePct || 0;
+  }
   const effectivePrice = price * (1 - slip);
   const gross = tokens * effectivePrice;
-  return Math.max(0, gross * (1 - fee) - priority);
+  const sol = Math.max(0, gross * (1 - fee) - priority);
+  if (mintAddress) {
+    const tradeSizeSolApprox = gross; // sell SOL pre-fee, useful for aggregation
+    _logFriction({
+      timestamp: Date.now(),
+      positionId: c.positionId,
+      mintAddress,
+      strategy: c.strategy,
+      side: 'sell',
+      tradeSizeSol: tradeSizeSolApprox,
+      totalSlippagePct: slip,
+      curveSlipPct: components?.curve || 0,
+      volDriftPct: components?.volatilityDrift || 0,
+      sandwichPct: components?.sandwich || 0,
+      priorityFeeSol: priority,
+      latencyMs,
+      vSolInCurve: components?.vSol || 0,
+      wasDynamic: dynamic,
+    });
+  }
+  return sol;
 }
 
 export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol, entryMcap, signalDetails, entryScore, positionMode = 'paper' }) {
   if (!entryPrice || entryPrice <= 0) return null;
-  const maxPerTrade = config.safety?.maxPerTradeSol || 0.5;
-  if (entrySol > maxPerTrade) {
-    console.log(`[size-cap] ${strategy} on ${mintAddress.slice(0,8)}… clamped ${entrySol.toFixed(4)} → ${maxPerTrade.toFixed(4)} SOL (maxPerTradeSol)`);
-    entrySol = maxPerTrade;
+  // Agent strategies (`agent_*`) bypass the dashboard "Max / Trade" cap — the
+  // agent gets full creative latitude on sizing. Available paper cash is the
+  // only real constraint; the agent's executor checks that before calling here.
+  const isAgent = typeof strategy === 'string' && strategy.startsWith('agent_');
+  if (!isAgent) {
+    const maxPerTrade = config.safety?.maxPerTradeSol || 0.5;
+    if (entrySol > maxPerTrade) {
+      console.log(`[size-cap] ${strategy} on ${mintAddress.slice(0,8)}… clamped ${entrySol.toFixed(4)} → ${maxPerTrade.toFixed(4)} SOL (maxPerTradeSol)`);
+      entrySol = maxPerTrade;
+    }
   }
   const s = S();
+  // Snapshot mint state at entry for post-hoc analysis. Stored inside
+  // signalDetails so all downstream JSON.stringify call sites capture it.
+  try {
+    const mintRow = s.getMint.get(mintAddress);
+    if (mintRow) {
+      const ageSec = mintRow.created_at ? Math.round((Date.now() - mintRow.created_at) / 1000) : null;
+      const concurrentOpen = db().prepare(`SELECT COUNT(*) AS n FROM paper_positions WHERE status='open'`).get().n;
+      signalDetails = {
+        ...(signalDetails || {}),
+        _entry_state: {
+          age_sec: ageSec,
+          mcap_sol: mintRow.current_market_cap_sol || null,
+          peak_mcap_sol: mintRow.peak_market_cap_sol || null,
+          v_sol_in_curve: mintRow.v_sol_in_curve || null,
+          unique_buyers: mintRow.unique_buyer_count || 0,
+          trade_count: mintRow.trade_count || 0,
+          bundle_buyers: mintRow.bundle_buyer_count || 0,
+          runner_score: mintRow.runner_score == null ? null : mintRow.runner_score,
+          concurrent_open: concurrentOpen,
+        },
+      };
+    }
+  } catch {}
   let tokenAmount, finalEntryPrice = entryPrice, finalEntrySol = entrySol;
 
   if (positionMode === 'live') {
@@ -137,7 +280,7 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
     return positionId;
   }
 
-  const paperLatencyMs = Math.max(0, config.paper?.latencyMs || 0);
+  const paperLatencyMs = effectiveLatencyMs();
   if (paperLatencyMs > 0) {
     const now = Date.now();
     const insertResult = s.insertPosition.run(
@@ -163,7 +306,7 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
           console.log(`[paper-lat] BUY ABORT ${strategy} on ${mintAddress.slice(0,8)}… STALE_QUOTE drift ${(drift*100).toFixed(1)}% > ${(maxDrift*100).toFixed(1)}%`);
           return;
         }
-        const { tokens } = applyBuyFriction(entrySol, fillPrice);
+        const { tokens } = applyBuyFriction(entrySol, fillPrice, { mintAddress, positionId, strategy });
         if (tokens <= 0) {
           const updNow = Date.now();
           db().prepare(`UPDATE paper_positions SET status = 'closed', exit_reason = 'BAD_FILL', exited_at = ?, updated_at = ?, pending_fill = 0 WHERE id = ?`).run(updNow, updNow, positionId);
@@ -187,7 +330,7 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
     return positionId;
   }
 
-  ({ tokens: tokenAmount } = applyBuyFriction(entrySol, entryPrice));
+  ({ tokens: tokenAmount } = applyBuyFriction(entrySol, entryPrice, { mintAddress, strategy }));
   if (tokenAmount <= 0) return null;
   const now = Date.now();
   const result = s.insertPosition.run(
@@ -227,7 +370,7 @@ function finalizePosition(p, exitPrice, exitMcap, exitReason) {
       .finally(() => _pendingSells.delete(p.id));
     return;
   }
-  finalSol = applySellFriction(p.tokens_remaining || 0, exitPrice);
+  finalSol = applySellFriction(p.tokens_remaining || 0, exitPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
   const totalRealized = (p.sol_realized_so_far || 0) + finalSol;
   const realizedPnlSol = totalRealized - p.entry_sol;
   const realizedPnlPct = realizedPnlSol / p.entry_sol;
@@ -242,6 +385,19 @@ function finalizePosition(p, exitPrice, exitMcap, exitReason) {
   else if (realizedPnlSol < 0) s.bumpLoss.run(realizedPnlSol, p.strategy);
   else s.bumpFlat.run(realizedPnlSol, p.strategy);
   console.log(`[paper] CLOSE ${p.strategy} on ${p.mint_address.slice(0, 8)}… ${exitReason} ${realizedPnlSol >= 0 ? '+' : ''}${realizedPnlSol.toFixed(4)} SOL (${(realizedPnlPct * 100).toFixed(1)}%)`);
+
+  // SL re-entry watchlist: if the position closed via SL_HIT, mark the mint
+  // for a 30-min "bounce" window. tryFire checks this and allows a re-entry
+  // (at half size) when a tracked-wallet buys AND price recovered to ≥80% of
+  // original entry. See backtest evidence: 33% of SL'd mints showed bounce
+  // signals, 85% of those re-entries hit +30% target.
+  if (exitReason === 'SL_HIT') {
+    try {
+      const expires = now + 30 * 60 * 1000;
+      db().prepare(`INSERT OR REPLACE INTO sl_watchlist (mint_address, original_strategy, original_entry_price, sl_at, expires_at, consumed) VALUES (?, ?, ?, ?, ?, 0)`)
+        .run(p.mint_address, p.strategy, p.entry_price, now, expires);
+    } catch (err) { console.error('[reentry] watchlist insert failed:', err.message); }
+  }
 }
 
 function fireTier(p, tierIdx, tierPctSell, currentPrice, currentMcap) {
@@ -273,7 +429,7 @@ function fireTier(p, tierIdx, tierPctSell, currentPrice, currentMcap) {
       .finally(() => _pendingSells.delete(p.id));
     return p;
   }
-  const paperLatencyMs = Math.max(0, config.paper?.latencyMs || 0);
+  const paperLatencyMs = effectiveLatencyMs();
   if (paperLatencyMs > 0 && !_pendingPaperSells.has(p.id)) {
     _pendingPaperSells.add(p.id);
     const triggerPrice = currentPrice;
@@ -288,7 +444,7 @@ function fireTier(p, tierIdx, tierPctSell, currentPrice, currentMcap) {
         const sellNow = Math.min(p.token_amount * triggerPctSell, fresh?.tokens_remaining || 0);
         if (sellNow <= 0) return;
         const drift = (fillPrice - triggerPrice) / Math.max(1e-30, triggerPrice);
-        const sol = applySellFriction(sellNow, fillPrice);
+        const sol = applySellFriction(sellNow, fillPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
         const newRem = Math.max(0, (fresh?.tokens_remaining || 0) - sellNow);
         const newReal = (fresh?.sol_realized_so_far || 0) + sol;
         let tiers = []; try { tiers = JSON.parse(fresh?.tiers_hit || '[]'); } catch {}
@@ -306,7 +462,7 @@ function fireTier(p, tierIdx, tierPctSell, currentPrice, currentMcap) {
     return p;
   }
 
-  solReceived = applySellFriction(sellTokens, currentPrice);
+  solReceived = applySellFriction(sellTokens, currentPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
   const newRemaining = Math.max(0, p.tokens_remaining - sellTokens);
   const newRealized = (p.sol_realized_so_far || 0) + solReceived;
   let tiers = [];
@@ -325,7 +481,7 @@ function convertToMoonbag(p, m) {
   const now = Date.now();
   const sellTokens = (p.tokens_remaining || 0) * cfg.sellPctAtMigration;
   const sellPrice = m.last_price_sol || p.entry_price;
-  const sellSol = applySellFriction(sellTokens, sellPrice);
+  const sellSol = applySellFriction(sellTokens, sellPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
   const newRemaining = (p.tokens_remaining || 0) - sellTokens;
   const newRealized = (p.sol_realized_so_far || 0) + sellSol;
 
@@ -458,7 +614,7 @@ function checkPosition(p) {
 
   if (m.rugged) exitReason = 'RUGGED';
   else if (m.migrated) exitReason = 'MIGRATED';
-  else if ((p.tokens_remaining || 0) <= 0) exitReason = 'TIERED_FULL';
+  else if ((p.tokens_remaining || 0) <= 0) exitReason = ((strat.tier2_sell_pct || 0) > 0) ? 'TIERED_FULL' : 'TARGET_HIT';
   else if (t3Armed && peakPctRaw <= tier3TrailFloor) exitReason = 'TP_TRAIL';
   else if (postT1TrailFloor !== null && peakPctRaw <= postT1TrailFloor) exitReason = 'POST_T1_TRAIL';
   else if (peakFloorActive && peakPctRaw < peakFloorExit) exitReason = 'PEAK_FLOOR';
@@ -472,6 +628,32 @@ function checkPosition(p) {
     minutesSinceLastTrade >= strat.stagnant_exit_min &&
     peakPctRaw <= strat.stagnant_loss_pct
   ) exitReason = 'STAGNATED';
+  else if (
+    (strat.dead_bag_age_min || 0) > 0 &&
+    ageMin >= strat.dead_bag_age_min &&
+    peakFromEntry < (strat.dead_bag_max_peak_pct || 0) &&
+    peakPctRaw <= (strat.dead_bag_loss_pct || 0)
+  ) exitReason = 'DEAD_BAG';
+  else if (
+    (strat.fade_exit_peak_min || 0) > 0 &&
+    peakFromEntry >= strat.fade_exit_peak_min &&
+    peakFromEntry < (strat.fade_exit_peak_max || 999) &&
+    peakPctRaw <= (strat.fade_exit_loss_pct || 0)
+  ) exitReason = 'FADE_EXIT';
+  else if (
+    (strat.mid_fade_peak_min || 0) > 0 &&
+    peakFromEntry >= strat.mid_fade_peak_min &&
+    peakFromEntry < (strat.mid_fade_peak_max || 999) &&
+    peakPctRaw <= (strat.mid_fade_loss_pct || 0)
+  ) exitReason = 'MID_FADE';
+  else if (
+    // LAZY_EXIT — alive but going nowhere. Cycles stuck positions out so the
+    // exposure cap doesn't lock us out of fresh runners.
+    (strat.lazy_exit_age_min || 0) > 0 &&
+    ageMin >= strat.lazy_exit_age_min &&
+    peakFromEntry < (strat.lazy_exit_max_peak_pct || 0) &&
+    Math.abs(peakPctRaw) <= (strat.lazy_exit_band_pct || 0)
+  ) exitReason = 'LAZY_EXIT';
   else if (ageMin >= strat.max_hold_min) exitReason = 'TIME_EXIT';
 
   if (exitReason) {
@@ -538,4 +720,54 @@ export function notifyTradeForMint(mintAddress) {
     return;
   }
   _monitorWorker.postMessage({ type: 'checkMint', mint: mintAddress });
+}
+
+// Reconcile open live positions against on-chain state on startup. Handles
+// crash-during-buy (pending_fill rows) and crash-after-sell (DB says open but
+// wallet has 0 tokens). Paper rows are skipped — no on-chain reality to check.
+export async function recoverLivePositions() {
+  const wallet = await import('./wallet.js');
+  const d = db();
+  const open = d.prepare(`SELECT * FROM paper_positions WHERE status='open' AND position_mode='live'`).all();
+  if (open.length === 0) return { checked: 0 };
+  console.log(`[recover] reconciling ${open.length} live position(s) on startup`);
+  let closed = 0, reconciled = 0, ok = 0;
+  for (const p of open) {
+    const tag = `id=${p.id} ${p.mint_address.slice(0,8)}…`;
+    try {
+      const onChain = await wallet.getTokenBalance(p.mint_address);
+      const now = Date.now();
+      if (p.pending_fill === 1) {
+        if (!onChain || onChain <= 0) {
+          d.prepare(`UPDATE paper_positions SET status='closed', exit_reason='RECOVERED_BUY_LOST', exited_at=?, updated_at=?, realized_pnl_sol=0, realized_pnl_pct=0, pending_fill=0 WHERE id=?`).run(now, now, p.id);
+          console.log(`[recover] ${tag} pending buy never landed → CLOSED RECOVERED_BUY_LOST`);
+          closed++; continue;
+        }
+        d.prepare(`UPDATE paper_positions SET pending_fill=0, tokens_remaining=?, token_amount=?, updated_at=? WHERE id=?`).run(onChain, onChain, now, p.id);
+        console.log(`[recover] ${tag} pending buy resolved · ${onChain} tokens · marked OPEN`);
+        reconciled++; continue;
+      }
+      if (!onChain || onChain <= 0) {
+        const realized = p.sol_realized_so_far || 0;
+        const pnl = realized - p.entry_sol;
+        const pnlPct = p.entry_sol > 0 ? pnl / p.entry_sol : 0;
+        d.prepare(`UPDATE paper_positions SET status='closed', exit_reason='RECOVERED_NO_TOKENS', exited_at=?, updated_at=?, realized_pnl_sol=?, realized_pnl_pct=? WHERE id=?`).run(now, now, pnl, pnlPct, p.id);
+        console.log(`[recover] ${tag} 0 tokens on-chain (DB had ${p.tokens_remaining}) → CLOSED RECOVERED_NO_TOKENS · pnl ${pnl.toFixed(4)} SOL`);
+        closed++; continue;
+      }
+      const dbRem = p.tokens_remaining || 0;
+      const drift = dbRem > 0 ? Math.abs(onChain - dbRem) / dbRem : 0;
+      if (drift > 0.05) {
+        d.prepare(`UPDATE paper_positions SET tokens_remaining=?, updated_at=? WHERE id=?`).run(onChain, now, p.id);
+        console.log(`[recover] ${tag} reconciled tokens_remaining ${dbRem} → ${onChain} (drift ${(drift*100).toFixed(1)}%)`);
+        reconciled++; continue;
+      }
+      console.log(`[recover] ${tag} OK · ${onChain} tokens (DB ${dbRem})`);
+      ok++;
+    } catch (err) {
+      console.error(`[recover] ${tag} reconcile error:`, err.message);
+    }
+  }
+  console.log(`[recover] done: ${ok} ok, ${reconciled} reconciled, ${closed} closed`);
+  return { checked: open.length, ok, reconciled, closed };
 }

@@ -15,9 +15,11 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { db } from '../db/index.js';
 import { recomputeAllWallets, cleanupStaleWallets } from '../scoring/traders.js';
+import { detectRings } from '../scoring/wallet-rings.js';
 
 const STALE_INTERVAL_MS = 60 * 60 * 1000;       // 1 hour
 const STALE_MAX_IDLE_MS = 24 * 60 * 60 * 1000;  // 24 hours
+const RINGS_INTERVAL_MS = 60 * 60 * 1000;       // 1 hour
 
 // ---------- Worker side ----------
 if (!isMainThread) {
@@ -47,7 +49,24 @@ if (!isMainThread) {
     } catch (err) { console.error('[traders-worker] startup cleanup', err.message); }
   }, 30_000);
 
-  console.log(`[traders-worker] started · sweep every ${sweepInterval}ms · stale cleanup every ${STALE_INTERVAL_MS / 60000}min`);
+  // Wallet-ring detection: hourly. Heavy SQL scan (pairwise wallet overlap on
+  // ≥10-mint-buy universe) — expensive, so it lives in this worker.
+  setInterval(() => {
+    try {
+      const r = detectRings({ verbose: true });
+      console.log(`[traders-worker] ring sweep: ${r.rings} rings · ${r.wallets} wallets · ${r.ms}ms`);
+    } catch (err) { console.error('[traders-worker] ring sweep', err.message); }
+  }, RINGS_INTERVAL_MS);
+
+  // Run rings shortly after boot too. Stagger 90s after stale cleanup.
+  setTimeout(() => {
+    try {
+      const r = detectRings({ verbose: true });
+      console.log(`[traders-worker] startup rings: ${r.rings} rings · ${r.wallets} wallets · ${r.ms}ms`);
+    } catch (err) { console.error('[traders-worker] startup rings', err.message); }
+  }, 120_000);
+
+  console.log(`[traders-worker] started · sweep every ${sweepInterval}ms · stale cleanup ${STALE_INTERVAL_MS / 60000}min · ring sweep ${RINGS_INTERVAL_MS / 60000}min`);
 }
 
 // ---------- Main side ----------

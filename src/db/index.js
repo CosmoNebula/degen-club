@@ -15,9 +15,11 @@ export function db() {
 
 export function init() {
   fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
-  _db = new Database(config.dbPath);
+  _db = new Database(config.dbPath, { timeout: 30000 }); // 30s busy_timeout — workers contend on writes
   _db.pragma('journal_mode = WAL');
   _db.pragma('synchronous = NORMAL');
+  _db.pragma('wal_autocheckpoint = 1000'); // keep WAL bounded
+  _db.pragma('mmap_size = 268435456');     // 256MB mmap for large reads
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   _db.exec(schema);
   runMigrations(_db);
@@ -64,6 +66,24 @@ function runMigrations(d) {
   ensureCol(d, 'wallets', 'migrator_score', `REAL DEFAULT 0`);
   ensureCol(d, 'wallets', 'migrator_stats_updated_at', `INTEGER`);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_wallets_migrator_score ON wallets(migrator_score DESC) WHERE migrator_score > 0`);
+
+  // Wallet rings: groups of wallets that buy the same mints together.
+  // Detected by mint co-occurrence; aggregate W/L pulled from paper_positions.
+  ensureCol(d, 'wallets', 'ring_id', `TEXT`);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_wallets_ring ON wallets(ring_id) WHERE ring_id IS NOT NULL`);
+  d.exec(`CREATE TABLE IF NOT EXISTS wallet_rings (
+    id TEXT PRIMARY KEY,
+    size INTEGER NOT NULL,
+    shared_mint_count INTEGER NOT NULL,
+    detected_at INTEGER NOT NULL,
+    updated_at INTEGER,
+    paper_wins INTEGER DEFAULT 0,
+    paper_losses INTEGER DEFAULT 0,
+    paper_net_sol REAL DEFAULT 0,
+    distinct_mints_bought INTEGER DEFAULT 0,
+    label TEXT,
+    notes TEXT
+  )`);
 
   d.exec(`CREATE TABLE IF NOT EXISTS paper_wallet (
     id INTEGER PRIMARY KEY,
@@ -193,6 +213,24 @@ function runMigrations(d) {
   ensureCol(d, 'strategy_state', 'tier3_sell_pct', `REAL DEFAULT 0.2`);
   ensureCol(d, 'strategy_state', 'tier3_trail_pct', `REAL DEFAULT 0.2`);
   ensureCol(d, 'strategy_state', 'breakeven_after_tier1', `INTEGER DEFAULT 1`);
+  ensureCol(d, 'strategy_state', 'peak_floor_arm_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'peak_floor_exit_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'peak_floor_arm2_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'peak_floor_exit2_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'peak_floor_arm3_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'peak_floor_exit3_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'dead_bag_age_min', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'dead_bag_max_peak_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'dead_bag_loss_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'fade_exit_peak_min', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'fade_exit_peak_max', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'fade_exit_loss_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'mid_fade_peak_min', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'mid_fade_peak_max', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'mid_fade_loss_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'lazy_exit_age_min', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'lazy_exit_max_peak_pct', `REAL DEFAULT 0`);
+  ensureCol(d, 'strategy_state', 'lazy_exit_band_pct', `REAL DEFAULT 0`);
 
   ensureCol(d, 'paper_positions', 'tokens_remaining', `REAL DEFAULT 0`);
   ensureCol(d, 'paper_positions', 'sol_realized_so_far', `REAL DEFAULT 0`);

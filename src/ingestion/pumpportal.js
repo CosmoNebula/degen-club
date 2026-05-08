@@ -43,32 +43,11 @@ export class PumpPortalClient extends EventEmitter {
       this.connectedAt = Date.now();
       this.reconnectMs = config.pumpPortal.reconnectMinMs;
       console.log('[pumpportal] connected');
+      // subscribeTokenTrade / subscribeAccountTrade became paid on 2026-05-01.
+      // Trade firehose now comes from on-chain log parsing (onchain-pump-trades.js).
+      // PumpPortal still gives us new-token + migration events for free.
       ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
       ws.send(JSON.stringify({ method: 'subscribeMigration' }));
-
-      try {
-        const cutoff = Date.now() - 2 * 60 * 60 * 1000;
-        const activeMints = db().prepare(`
-          SELECT mint_address FROM mints
-          WHERE migrated = 0 AND rugged = 0
-            AND COALESCE(last_trade_at, created_at) > ?
-          ORDER BY last_trade_at DESC LIMIT 1500
-        `).all(cutoff);
-        for (const m of activeMints) this.mintSubs.add(m.mint_address);
-        if (activeMints.length) {
-          console.log(`[pumpportal] re-subscribing to ${activeMints.length} active mints from DB`);
-        }
-      } catch (err) {
-        console.error('[pumpportal] hydrate subs', err.message);
-      }
-
-      if (this.mintSubs.size) {
-        const keys = [...this.mintSubs];
-        const chunkSize = 200;
-        for (let i = 0; i < keys.length; i += chunkSize) {
-          ws.send(JSON.stringify({ method: 'subscribeTokenTrade', keys: keys.slice(i, i + chunkSize) }));
-        }
-      }
       this.emit('connected');
     });
 
@@ -100,9 +79,8 @@ export class PumpPortalClient extends EventEmitter {
     const t = msg.txType || msg.type;
     if (t === 'create') {
       this.emit('create', msg);
-      this.subscribeTradeFor(msg.mint);
     } else if (t === 'buy' || t === 'sell') {
-      this.emit('trade', msg);
+      // Should not arrive anymore — trade firehose moved on-chain. Drop silently.
     } else if (t === 'migrate' || t === 'migration') {
       this.emit('migrate', msg);
     }

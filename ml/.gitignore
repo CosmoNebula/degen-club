@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+data/*.csv
+data/*.parquet
+data/*.jsonl
+models/*.pkl
+models/*.joblib
+logs/*.log

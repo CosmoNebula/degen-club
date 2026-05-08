@@ -181,15 +181,30 @@ function bindCopyable() {
   });
 }
 
-let currentView = 'mints';
+let currentView = 'positions';
 let systemWindow = '6';
 let labWindow = '6';
 let labFilter = 'all';
 
+// Map each pane to the dropdown group it belongs to (so the parent group
+// trigger can show as active when a sub-tab is selected).
+const TAB_GROUP = {
+  mints: 'research', devs: 'research', traders: 'research', rings: 'research', lab: 'research',
+  system: 'system', ticker: 'system', builder: 'system',
+};
+
 function setActiveTab(name) {
   currentView = name;
+  // Highlight the active sub-tab + clear all others.
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  // If this tab lives in a group, also highlight the parent trigger.
+  const group = TAB_GROUP[name];
+  document.querySelectorAll('.tab-group-trigger').forEach(t => {
+    t.classList.toggle('active', t.dataset.groupTrigger === group);
+  });
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === name));
+  // Close any open dropdowns once a sub-tab is picked.
+  document.querySelectorAll('.tab-dropdown').forEach(d => d.hidden = true);
   if (name === 'ticker') tickerTick();
 }
 
@@ -236,11 +251,48 @@ function showDetail(pane, loader) {
 }
 
 document.querySelectorAll('.tab').forEach(tab => {
+  if (tab.classList.contains('tab-group-trigger')) return; // group triggers handled separately
   tab.addEventListener('click', () => {
     const name = tab.dataset.tab;
+    if (!name) return;
     history.pushState(null, '', `#${name}`);
     setActiveTab(name);
   });
+});
+
+// Single source of truth for which dropdown is open ('research' | 'system' | null).
+let _openGroup = null;
+function setOpenGroup(g) {
+  _openGroup = g;
+  document.querySelectorAll('.tab-group').forEach(grp => {
+    const isOpen = grp.dataset.group === g;
+    grp.classList.toggle('open', isOpen);
+    const dd = grp.querySelector('.tab-dropdown');
+    if (dd) dd.hidden = !isOpen;
+  });
+}
+document.querySelectorAll('.tab-group-trigger').forEach(trigger => {
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const group = trigger.dataset.groupTrigger;
+    setOpenGroup(_openGroup === group ? null : group);
+  });
+});
+// Click anywhere outside any tab-group closes whatever's open.
+document.addEventListener('click', (e) => {
+  if (_openGroup && !e.target.closest('.tab-group')) setOpenGroup(null);
+});
+// Picking a sub-tab also closes the dropdown.
+document.querySelectorAll('.tab-sub').forEach(sub => {
+  sub.addEventListener('click', () => setOpenGroup(null));
+});
+
+// "More stats" toggle — show/hide the secondary research counters row.
+document.getElementById('btn-more-stats')?.addEventListener('click', () => {
+  const row = document.getElementById('stats-secondary');
+  if (!row) return;
+  row.hidden = !row.hidden;
+  document.getElementById('btn-more-stats')?.classList.toggle('active', !row.hidden);
 });
 
 document.getElementById('stat-mode-box')?.addEventListener('click', async () => {
@@ -398,7 +450,7 @@ function handleHash() {
   } else if (document.querySelector(`.tab[data-tab="${h}"]`)) {
     setActiveTab(h);
   } else {
-    setActiveTab('mints');
+    setActiveTab('positions');
   }
 }
 window.addEventListener('hashchange', handleHash);
@@ -612,6 +664,93 @@ function botFlagsBadges(flags) {
   if (!flags || !flags.length) return '';
   return flags.map(f => `<span class="flag bad">${f}</span>`).join(' ');
 }
+
+let ringsSort = 'paper_net_sol';
+let _ringsCache = [];
+
+function renderRingsTable(rows) {
+  _ringsCache = rows;
+  const el = document.getElementById('rings-table');
+  const meta = document.getElementById('rings-meta');
+  if (meta) {
+    if (rows.length) {
+      const totalWallets = rows.reduce((s, r) => s + (r.size || 0), 0);
+      meta.textContent = `${rows.length} rings · ${totalWallets} wallets total`;
+    } else meta.textContent = '';
+  }
+  if (!rows.length) {
+    el.innerHTML = '<tr><td colspan="9" class="empty">No rings detected. Click ↻ RECOMPUTE NOW or wait for the next sweep.</td></tr>';
+    return;
+  }
+  el.innerHTML = rows.map(r => {
+    const wr = r.paper_wr == null ? '–' : `${r.paper_wr}%`;
+    const net = r.paper_net_sol || 0;
+    const netCls = net > 0 ? 'pos' : net < 0 ? 'neg' : 'muted';
+    const detected = r.detected_at ? new Date(r.detected_at).toLocaleString() : '–';
+    return `<tr class="ring-row" data-ring="${r.id}" style="cursor:pointer;">
+      <td><code>${r.id}</code></td>
+      <td class="num">${r.size}</td>
+      <td class="num">${r.shared_mint_count}</td>
+      <td class="num">${r.distinct_mints_bought}</td>
+      <td class="num pos">${r.paper_wins}</td>
+      <td class="num neg">${r.paper_losses}</td>
+      <td class="num">${wr}</td>
+      <td class="num ${netCls}">${net.toFixed(3)}</td>
+      <td class="muted" style="font-size:11px;">${detected}</td>
+    </tr>`;
+  }).join('');
+  el.querySelectorAll('.ring-row').forEach(tr => {
+    tr.addEventListener('click', () => loadRingMembers(tr.dataset.ring));
+  });
+}
+
+async function loadRingMembers(ringId) {
+  const detail = document.getElementById('ring-detail');
+  const meta = document.getElementById('ring-detail-meta');
+  const tbody = document.getElementById('ring-members-table');
+  detail.style.display = '';
+  detail.open = true;
+  tbody.innerHTML = '<tr><td colspan="9" class="empty">Loading…</td></tr>';
+  try {
+    const data = await fetchJson(`/api/wallet-rings/${encodeURIComponent(ringId)}`);
+    const r = data.ring || {};
+    meta.textContent = `${ringId} · size ${r.size} · paper ${r.paper_wins}W/${r.paper_losses}L · net ${(r.paper_net_sol||0).toFixed(3)} SOL`;
+    const members = data.members || [];
+    if (!members.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty">No members.</td></tr>'; return; }
+    tbody.innerHTML = members.map(m => {
+      const pnl = m.pnl_30d || 0;
+      const wr = m.wr_30d == null ? '–' : `${(m.wr_30d * 100).toFixed(0)}%`;
+      const pnlCls = pnl > 0 ? 'pos' : pnl < 0 ? 'neg' : 'muted';
+      return `<tr>
+        <td><code>${m.address.slice(0, 8)}…${m.address.slice(-4)}</code></td>
+        <td>${m.category || '–'}</td>
+        <td class="num ${pnlCls}">${pnl.toFixed(3)}</td>
+        <td class="num">${wr}</td>
+        <td class="num">${m.closed_30d || 0}</td>
+        <td class="num">${m.migrator_score || 0}</td>
+        <td class="num">${m.migrator_pre_mig_buys || 0}</td>
+        <td>${m.is_kol ? '👑' : '–'}</td>
+        <td>${m.tracked ? '✅' : '–'}</td>
+      </tr>`;
+    }).join('');
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">Error: ${err.message}</td></tr>`;
+  }
+}
+
+document.addEventListener('click', (e) => {
+  if (e.target && e.target.id === 'rings-refresh-btn') {
+    const btn = e.target;
+    btn.disabled = true; btn.textContent = '↻ RUNNING…';
+    fetch('/api/wallet-rings/refresh', { method: 'POST' })
+      .then(r => r.json())
+      .then(d => {
+        btn.disabled = false; btn.textContent = '↻ RECOMPUTE NOW';
+        if (d.ok && typeof refresh === 'function') refresh();
+      })
+      .catch(() => { btn.disabled = false; btn.textContent = '↻ RECOMPUTE NOW'; });
+  }
+});
 
 function renderTradersTable(rows) {
   const el = document.getElementById('traders-table');
@@ -877,14 +1016,41 @@ function renderStrategiesPanel(rows) {
           <span class="muted" style="font-size:11px;">exit &lt;</span>
           <input class="strat-input" type="number" step="1" data-strategy="${s.name}" data-key="peak_floor_exit3_pct" value="${((s.peak_floor_exit3_pct || 0) * 100).toFixed(0)}" style="width:50px;" />%
         </div>
+        ${(s.dead_bag_age_min || s.fade_exit_peak_min || s.mid_fade_peak_min) ? `
+        <div class="fade-section-divider"><span>FADE EXITS · catches failed runs by peak band</span></div>
+        <div class="tier-row fade-row">
+          <span class="tier-label fade-dead">DEAD</span>
+          <span class="muted" style="font-size:11px;">age ≥</span>
+          <input class="strat-input" type="number" step="1" data-strategy="${s.name}" data-key="dead_bag_age_min" value="${s.dead_bag_age_min || 0}" style="width:50px;" />m
+          <span class="muted" style="font-size:11px;">peak &lt;</span>
+          <input class="strat-input" type="number" step="1" data-strategy="${s.name}" data-key="dead_bag_max_peak_pct" value="${((s.dead_bag_max_peak_pct || 0) * 100).toFixed(0)}" style="width:50px;" />%
+          <span class="muted" style="font-size:11px;">cur ≤</span>
+          <input class="strat-input" type="number" step="1" data-strategy="${s.name}" data-key="dead_bag_loss_pct" value="${((s.dead_bag_loss_pct || 0) * 100).toFixed(0)}" style="width:50px;" />%
+        </div>
+        <div class="tier-row fade-row">
+          <span class="tier-label fade-mid">FADE</span>
+          <span class="muted" style="font-size:11px;">peak</span>
+          <input class="strat-input" type="number" step="1" data-strategy="${s.name}" data-key="fade_exit_peak_min" value="${((s.fade_exit_peak_min || 0) * 100).toFixed(0)}" style="width:50px;" />%
+          <span class="muted" style="font-size:11px;">to</span>
+          <input class="strat-input" type="number" step="1" data-strategy="${s.name}" data-key="fade_exit_peak_max" value="${((s.fade_exit_peak_max || 0) * 100).toFixed(0)}" style="width:50px;" />%
+          <span class="muted" style="font-size:11px;">cur ≤</span>
+          <input class="strat-input" type="number" step="1" data-strategy="${s.name}" data-key="fade_exit_loss_pct" value="${((s.fade_exit_loss_pct || 0) * 100).toFixed(0)}" style="width:50px;" />%
+        </div>
+        <div class="tier-row fade-row">
+          <span class="tier-label fade-runner">MID</span>
+          <span class="muted" style="font-size:11px;">peak</span>
+          <input class="strat-input" type="number" step="1" data-strategy="${s.name}" data-key="mid_fade_peak_min" value="${((s.mid_fade_peak_min || 0) * 100).toFixed(0)}" style="width:50px;" />%
+          <span class="muted" style="font-size:11px;">to</span>
+          <input class="strat-input" type="number" step="1" data-strategy="${s.name}" data-key="mid_fade_peak_max" value="${((s.mid_fade_peak_max || 0) * 100).toFixed(0)}" style="width:50px;" />%
+          <span class="muted" style="font-size:11px;">cur ≤</span>
+          <input class="strat-input" type="number" step="1" data-strategy="${s.name}" data-key="mid_fade_loss_pct" value="${((s.mid_fade_loss_pct || 0) * 100).toFixed(0)}" style="width:50px;" />%
+        </div>` : ''}
       </div>
 
       <div class="strategy-edit">
         ${editableField(s.name, 'entry_sol', 'Entry', s.entry_sol, 'SOL', '0.001')}
-        ${editableField(s.name, 'sl_pct', 'SL', (s.sl_pct * 100).toFixed(0), '%', '1')}
+        ${editableField(s.name, 'sl_pct', 'Hard SL', (s.sl_pct * 100).toFixed(0), '%', '1')}
         ${editableField(s.name, 'max_hold_min', 'Max Hold', s.max_hold_min, 'min', '1')}
-        ${editableField(s.name, 'stagnant_exit_min', 'Stagnant', s.stagnant_exit_min, 'min', '1')}
-        ${editableField(s.name, 'stagnant_loss_pct', 'Stag Loss', (s.stagnant_loss_pct * 100).toFixed(0), '%', '1')}
       </div>
       <div class="strategy-stats">
         <div><span class="stat-label">Opened</span> ${s.positions_opened || 0}</div>
@@ -1854,6 +2020,17 @@ function updateTopbar(stats) {
     walletEl.textContent = sim.totalValue.toFixed(4) + ' SOL';
     walletEl.style.color = sim.totalValue >= sim.startingBalanceSol ? 'var(--green)' : 'var(--pink)';
 
+    const cashEl = document.getElementById('stat-cash');
+    if (cashEl) {
+      cashEl.textContent = (sim.cashBalance ?? 0).toFixed(4) + ' SOL';
+      cashEl.style.color = (sim.cashBalance ?? 0) < 0 ? 'var(--pink)' : '';
+    }
+
+    const inCoinsEl = document.getElementById('stat-incoins');
+    if (inCoinsEl) {
+      inCoinsEl.textContent = (sim.openMtm ?? 0).toFixed(4) + ' SOL';
+    }
+
     const pctEl = document.getElementById('stat-wallet-pct');
     const pct = (sim.pctChange * 100);
     pctEl.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
@@ -1868,15 +2045,23 @@ function updateTopbar(stats) {
     pnlEl.textContent = fmt.sol(stats.realizedPnlSol);
     pnlEl.style.color = stats.realizedPnlSol > 0 ? 'var(--green)' : stats.realizedPnlSol < 0 ? 'var(--pink)' : '';
   }
-  const lockedSol = (stats.mode === 'live' ? stats.live?.lockedInOpen : stats.sim?.lockedInOpen) || 0;
-  setText('stat-open', `${fmt.int(stats.openPositions)} · ${lockedSol.toFixed(3)}◎`);
+  const sim2 = stats.sim || {};
+  const openMtm = sim2.openMtm || 0;
+  const atRisk = sim2.atRiskExposure || 0;
+  const houseMoney = sim2.houseMoneyCount || 0;
+  const houseMoneyTag = houseMoney > 0 ? ` <span style="color:var(--green);font-size:11px;">·${houseMoney}🏠</span>` : '';
+  const openEl = document.getElementById('stat-open');
+  if (openEl) {
+    openEl.innerHTML = `${fmt.int(stats.openPositions)} · ${openMtm.toFixed(3)}◎${houseMoneyTag}`;
+    openEl.title = `Open positions current MTM value\nAt-risk exposure: ${atRisk.toFixed(3)} SOL\n${houseMoney} house-money positions (cost recouped — pure upside)`;
+  }
   setText('stat-winrate', fmt.pct(stats.winRate));
   setText('stat-mints', fmt.int(stats.totalMints));
   setText('stat-trades', fmt.int(stats.totalTrades));
   setText('stat-wallets', fmt.int(stats.totalWallets));
   setText('stat-tracked', fmt.int(stats.trackedWallets));
   setText('stat-kols', fmt.int(stats.kolWallets));
-  setText('stat-signals', fmt.int(stats.copySignals));
+  setText('stat-hunters', fmt.int(stats.hunterWallets));
   setText('stat-volume-surges', fmt.int(stats.volumeSignals));
   setText('stat-bundles', fmt.int(stats.bundleClusters));
   fetchJson('/api/safety/status').then(s => {
@@ -1962,11 +2147,60 @@ function updateTopbar(stats) {
   const cbEl = document.getElementById('stat-cashback');
   if (cbEl) cbEl.title = `Est. cashback across ${cbPositions} positions in cashback coins · 0.5% × our share × volume during hold (calibrate at live launch)`;
   if (stats.solUsd) solUsd = stats.solUsd;
-  const ing = stats.ingestion;
-  if (ing) {
-    setText('stat-status', ing.connected ? 'LIVE' : 'OFFLINE');
-    document.getElementById('stat-status').style.color = ing.connected ? 'var(--green)' : 'var(--pink)';
+  // ingestion field is null since the dashboard runs in its own process —
+  // health panel below shows the real system state (read from disk heartbeat).
+}
+
+async function tickHealth() {
+  try {
+    const h = await fetchJson('/api/system/health');
+    renderHealthCluster(h);
+  } catch {
+    renderHealthCluster({ status: 'DOWN' });
   }
+}
+
+function healthBox(label, status, detail) {
+  // status: 'ok' | 'warn' | 'bad'
+  return `<div class="hbox h-${status}" title="${detail || ''}">
+    <span class="hbox-label">${label}</span>
+    <span class="hbox-detail">${detail || ''}</span>
+  </div>`;
+}
+
+function renderHealthCluster(h) {
+  const el = document.getElementById('health-cluster');
+  if (!el) return;
+  if (!h || h.status === 'DOWN') {
+    el.innerHTML = healthBox('BOT', 'bad', 'no heartbeat');
+    return;
+  }
+
+  const bot = h.status === 'ALIVE' ? 'ok' : 'warn';
+  const botDetail = `up ${Math.floor((h.bot?.uptime_sec || 0) / 60)}m · ${h.status}`;
+
+  const ot = h.feeds?.onchainTrades || {};
+  const otStatus = !ot.connected ? 'bad' : (ot.last_event_ago_sec > 30 ? 'warn' : 'ok');
+  const otDetail = ot.connected
+    ? `${ot.trades_total} trades · last ${ot.last_event_ago_sec ?? '—'}s ago`
+    : 'disconnected';
+
+  const pp = h.feeds?.pumpportal || {};
+  const ppStatus = !pp.connected ? 'bad' : (pp.last_event_ago_sec > 60 ? 'warn' : 'ok');
+  const ppDetail = pp.connected
+    ? `${pp.event_count} events · last ${pp.last_event_ago_sec ?? '—'}s ago`
+    : 'disconnected';
+
+  const db = h.db || {};
+  const dbAge = db.last_trade_ago_sec;
+  const dbStatus = dbAge == null ? 'warn' : (dbAge > 30 ? 'warn' : 'ok');
+  const dbDetail = `${db.size_mb || 0}MB · ${db.trades || 0} trades · ${db.open_positions || 0} open`;
+
+  el.innerHTML =
+    healthBox('BOT', bot, botDetail) +
+    healthBox('TRADES', otStatus, otDetail) +
+    healthBox('NEW MINTS', ppStatus, ppDetail) +
+    healthBox('DB', dbStatus, dbDetail);
 }
 
 function updateTraderCatCounts(c) {
@@ -2026,6 +2260,9 @@ async function tick() {
       renderTradersTable(traders);
       updateTraderCatCounts(counts);
       renderBoostStatus(grader);
+    } else if (currentView === 'rings') {
+      const data = await fetchJson(`/api/wallet-rings?limit=200&sort=${ringsSort}`);
+      renderRingsTable(data.rings || []);
     } else if (currentView === 'positions') {
       const [positions, strategies, missed, exits] = await Promise.all([
         fetchJson('/api/positions'),
@@ -2207,6 +2444,8 @@ persistSectionState();
 const refresh = tick;
 tick();
 setInterval(tick, 3000);
+setInterval(tickHealth, 5000);
+tickHealth();
 refreshDbStats();
 setInterval(refreshDbStats, 30000);
 
@@ -2403,9 +2642,8 @@ setInterval(refreshDbStats, 30000);
   const mptEl = document.getElementById('input-max-per-trade');
   const mxEl = document.getElementById('input-max-exposure');
   const slipEl = document.getElementById('input-max-entry-slip');
-  const lagEl = document.getElementById('input-paper-latency');
   if (!mptEl || !mxEl) return;
-  let lastSaved = { maxPerTradeSol: null, maxSolExposure: null, maxEntrySlippagePct: null, paperLatencyMs: null };
+  let lastSaved = { maxPerTradeSol: null, maxSolExposure: null, maxEntrySlippagePct: null };
   async function loadLimits() {
     try {
       const r = await fetchJson('/api/limits');
@@ -2413,7 +2651,6 @@ setInterval(refreshDbStats, 30000);
       if (document.activeElement !== mptEl) mptEl.value = r.maxPerTradeSol;
       if (document.activeElement !== mxEl) mxEl.value = r.maxSolExposure;
       if (slipEl && document.activeElement !== slipEl) slipEl.value = r.maxEntrySlippagePct;
-      if (lagEl && document.activeElement !== lagEl) lagEl.value = r.paperLatencyMs;
     } catch {}
   }
   async function saveOne(field, el) {
@@ -2445,7 +2682,203 @@ setInterval(refreshDbStats, 30000);
   mptEl.addEventListener('change', () => saveOne('maxPerTradeSol', mptEl));
   mxEl.addEventListener('change', () => saveOne('maxSolExposure', mxEl));
   if (slipEl) slipEl.addEventListener('change', () => saveOne('maxEntrySlippagePct', slipEl));
-  if (lagEl) lagEl.addEventListener('change', () => saveOne('paperLatencyMs', lagEl));
   loadLimits();
   setInterval(loadLimits, 10000);
+})();
+
+// Live Conditions panel — polls /api/conditions and renders network state
+(function setupLiveConditions() {
+  const statusEl = document.getElementById('cond-status');
+  const statusValEl = document.getElementById('cond-status-val');
+  const heliusEl = document.getElementById('cond-helius');
+  const publicEl = document.getElementById('cond-public');
+  const feeEl = document.getElementById('cond-priority-fee');
+  const slotEl = document.getElementById('cond-slot-time');
+  const paperLagEl = document.getElementById('cond-paper-lag');
+  const paperLagStatEl = document.getElementById('cond-paper-lag-stat');
+  if (!statusEl) return;
+
+  function fmtMs(v) {
+    if (v == null) return '—';
+    const n = Math.round(v);
+    return n >= 1000 ? `${(n/1000).toFixed(1)}s` : `${n}ms`;
+  }
+  function fmtFee(uL) {
+    if (uL == null) return '—';
+    if (uL >= 1_000_000) return `${(uL/1_000_000).toFixed(1)}M µL`;
+    if (uL >= 1000) return `${(uL/1000).toFixed(1)}K µL`;
+    return `${Math.round(uL)} µL`;
+  }
+  function staleness(asOfMs) {
+    if (!asOfMs) return Infinity;
+    return Date.now() - asOfMs;
+  }
+
+  async function loadConditions() {
+    try {
+      const r = await fetchJson('/api/conditions');
+      // Status badge
+      statusEl.setAttribute('data-status', r.status || 'unknown');
+      statusValEl.textContent = (r.status || 'unknown').toUpperCase();
+
+      // Helius latency
+      const h = r.rpc?.helius || {};
+      heliusEl.innerHTML = `${fmtMs(h.p50)} <span style="color:var(--text-dim);font-weight:400">/</span> ${fmtMs(h.p90)}`;
+
+      // Public latency
+      const p = r.rpc?.public || {};
+      publicEl.innerHTML = `${fmtMs(p.p50)} <span style="color:var(--text-dim);font-weight:400">/</span> ${fmtMs(p.p90)}`;
+
+      // Priority fee
+      const fee = r.priorityFee || {};
+      feeEl.innerHTML = `${fmtFee(fee.p50)} <span style="color:var(--text-dim);font-weight:400">/</span> ${fmtFee(fee.p90)}`;
+
+      // Slot time
+      const slot = r.slotTime || {};
+      slotEl.innerHTML = `${fmtMs(slot.mean)} <span style="color:var(--text-dim);font-weight:400">/</span> ${fmtMs(slot.max)}`;
+
+      // Paper Lag (effective)
+      const eff = r.effective || {};
+      const sourceTag = eff.paperLagSource === 'override'
+        ? '<span class="stat-source-tag" style="color:var(--yellow)">OVERRIDE</span>'
+        : '<span class="stat-source-tag">LIVE</span>';
+      paperLagEl.innerHTML = `${fmtMs(eff.paperLagMs)} ${sourceTag}`;
+
+      // Stale styling for Helius — if last sample older than 3 min, dim it
+      const heliusStale = staleness(h.lastSampleAt) > 3 * 60 * 1000;
+      heliusEl.parentElement.classList.toggle('live-stale', heliusStale);
+      const publicStale = staleness(p.lastSampleAt) > 3 * 60 * 1000;
+      publicEl.parentElement.classList.toggle('live-stale', publicStale);
+    } catch {}
+  }
+
+  // Click on Paper Lag opens an override prompt
+  if (paperLagStatEl) {
+    paperLagStatEl.addEventListener('click', async () => {
+      const cur = paperLagEl.textContent.split(' ')[0];
+      const v = prompt(`Override paper-mode lag (ms)?\n\nCurrent: ${cur}\nEnter 0 to use live measurement.\nEnter 1-5000 to force a fixed value.`, '0');
+      if (v == null) return;
+      const n = parseInt(v, 10);
+      if (!isFinite(n) || n < 0 || n > 5000) { alert('Invalid: must be 0-5000'); return; }
+      try {
+        const res = await fetch('/api/limits', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paperLatencyMs: n }),
+        });
+        const r = await res.json();
+        if (r.ok) loadConditions();
+      } catch (e) { alert('Failed: ' + e.message); }
+    });
+  }
+
+  loadConditions();
+  setInterval(loadConditions, 10000);
+})();
+
+// ML Learning panel — training data accumulation (collection mode)
+(function setupMLLearning() {
+  const stateEl = document.getElementById('ml-state');
+  const stateValEl = document.getElementById('ml-state-val');
+  const totalEl = document.getElementById('ml-total');
+  const resolvedEl = document.getElementById('ml-resolved');
+  const bucketsEl = document.getElementById('ml-buckets');
+  const daysEl = document.getElementById('ml-days');
+  const etaEl = document.getElementById('ml-eta');
+  const migRateEl = document.getElementById('ml-mig-rate');
+  if (!stateEl) return;
+
+  function fmtN(n) {
+    if (n == null) return '—';
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  async function loadML() {
+    try {
+      const r = await fetchJson('/api/ml/status');
+      stateEl.setAttribute('data-state', r.state || 'WAITING');
+      stateValEl.textContent = r.state || 'WAITING';
+      totalEl.textContent = fmtN(r.totalSnapshots);
+      resolvedEl.innerHTML = `${fmtN(r.resolvedSnapshots)} <span style="color:var(--text-dim);font-weight:400;font-size:11px">${(r.resolvedPct * 100).toFixed(0)}%</span>`;
+      const b = r.buckets || {};
+      bucketsEl.innerHTML = `${fmtN(b['60'])}/${fmtN(b['300'])}/${fmtN(b['900'])}/${fmtN(b['3600'])}`;
+      daysEl.innerHTML = `${(r.collectionDays || 0).toFixed(1)} <span style="color:var(--text-dim);font-weight:400;font-size:11px">days</span>`;
+      if (r.resolvedSnapshots >= r.targetForFirstTrain) {
+        etaEl.innerHTML = `<span style="color:var(--green)">READY</span>`;
+      } else if (r.etaDaysToTrain != null) {
+        etaEl.innerHTML = `${r.etaDaysToTrain.toFixed(1)}d <span style="color:var(--text-dim);font-weight:400;font-size:11px">${(r.pctToTrain || 0).toFixed(0)}%</span>`;
+      } else {
+        etaEl.textContent = '—';
+      }
+      if (r.resolvedSnapshots > 0) {
+        const pct = (r.migrationRate * 100).toFixed(2);
+        // sanity coloring: 1-5% = green (healthy), outside = warn
+        const ok = r.migrationRate >= 0.005 && r.migrationRate <= 0.10;
+        migRateEl.innerHTML = `<span style="color:${ok ? 'var(--cyan)' : 'var(--yellow)'}">${pct}%</span>`;
+      } else {
+        migRateEl.textContent = '—';
+      }
+    } catch {}
+  }
+  loadML();
+  setInterval(loadML, 30000);
+})();
+
+// Pump.fun Market microstructure panel (Phase 1B aggregates)
+(function setupMarketMicro() {
+  const moodEl = document.getElementById('micro-mood');
+  const moodValEl = document.getElementById('micro-mood-val');
+  const hotEl = document.getElementById('micro-hot');
+  const sandwichEl = document.getElementById('micro-sandwich');
+  const reactionEl = document.getElementById('micro-reaction');
+  const volEl = document.getElementById('micro-vol');
+  const depthEl = document.getElementById('micro-depth');
+  const cleanContEl = document.getElementById('micro-clean-contested');
+  if (!moodEl) return;
+
+  function fmtMs(v) {
+    if (v == null) return '—';
+    const n = Math.round(v);
+    return n >= 1000 ? `${(n/1000).toFixed(1)}s` : `${n}ms`;
+  }
+
+  // Derive market "mood" from aggregated metrics
+  function deriveMood(d) {
+    if (!d || d.hotMintCount === 0) return 'quiet';
+    const sandwich = d.medianSandwichRisk ?? 0;
+    const sniperRatio = d.hotMintCount > 0 ? d.sniperWarCount / d.hotMintCount : 0;
+    if (sandwich >= 0.7 && sniperRatio >= 0.5) return 'warzone';
+    if (sandwich >= 0.5 || sniperRatio >= 0.4) return 'contested';
+    if (sandwich < 0.25 && sniperRatio < 0.2) return 'clean';
+    return 'mixed';
+  }
+
+  async function loadMicro() {
+    try {
+      const r = await fetchJson('/api/microstructure/summary');
+      const mood = deriveMood(r);
+      moodEl.setAttribute('data-mood', mood);
+      moodValEl.textContent = mood.toUpperCase();
+      hotEl.textContent = r.hotMintCount.toString();
+
+      const sandwichVal = r.medianSandwichRisk != null ? r.medianSandwichRisk.toFixed(2) : '—';
+      sandwichEl.innerHTML = `${sandwichVal} <span style="color:var(--text-dim);font-weight:400;font-size:11px">med</span>`;
+
+      reactionEl.innerHTML = r.medianReactionSpeedMs != null
+        ? `${fmtMs(r.medianReactionSpeedMs)} <span style="color:var(--text-dim);font-weight:400;font-size:11px">med</span>`
+        : '—';
+
+      const volVal = r.medianVolatilityPct != null ? `${(r.medianVolatilityPct * 100).toFixed(2)}%` : '—';
+      volEl.innerHTML = `${volVal} <span style="color:var(--text-dim);font-weight:400;font-size:11px">med</span>`;
+
+      depthEl.innerHTML = `${r.avgVSolInCurve.toFixed(0)} ◎ <span style="color:var(--text-dim);font-weight:400;font-size:11px">avg</span>`;
+
+      cleanContEl.innerHTML = `<span style="color:var(--green)">${r.cleanCount}</span> / <span style="color:var(--red)">${r.contestedCount}</span>`;
+    } catch {}
+  }
+
+  loadMicro();
+  setInterval(loadMicro, 30000); // matches sweep cadence
 })();

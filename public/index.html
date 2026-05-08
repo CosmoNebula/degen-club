@@ -15,32 +15,182 @@
       <div class="brand-text">
         <div class="brand-title">DEGEN CLUB</div>
         <div class="brand-sub">:: monkeys funhouse ::</div>
+        <a href="/ml" class="brand-ml-link"
+          data-tip="🧠 ML LAB&#10;&#10;Full training data quality dashboard — feature stats, label resolution, class balance, coverage, live activity feed."
+          data-tip-pos="right">🧠 ML LAB →</a>
       </div>
     </div>
-    <div class="stats-row">
-      <div class="stat sim-wallet"><div class="stat-label">💼 Wallet</div><div class="stat-value" id="stat-wallet">—</div></div>
-      <div class="stat"><div class="stat-label">Wallet %</div><div class="stat-value" id="stat-wallet-pct">—</div></div>
-      <div class="stat"><div class="stat-label">Peak / DD</div><div class="stat-value" id="stat-wallet-peak">—</div></div>
-      <div class="stat"><div class="stat-label">Realized P&L</div><div class="stat-value" id="stat-pnl">—</div></div>
-      <div class="stat"><div class="stat-label">Open Positions</div><div class="stat-value" id="stat-open">—</div></div>
-      <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value" id="stat-winrate">—</div></div>
-      <div class="stat"><div class="stat-label">Mints Seen</div><div class="stat-value" id="stat-mints">—</div></div>
-      <div class="stat"><div class="stat-label">Trades Seen</div><div class="stat-value" id="stat-trades">—</div></div>
-      <div class="stat"><div class="stat-label">Wallets</div><div class="stat-value" id="stat-wallets">—</div></div>
-      <div class="stat"><div class="stat-label">Tracked 🎯</div><div class="stat-value" id="stat-tracked">—</div></div>
-      <div class="stat"><div class="stat-label">KOLs 👑</div><div class="stat-value" id="stat-kols">—</div></div>
-      <div class="stat"><div class="stat-label">Copy Signals</div><div class="stat-value" id="stat-signals">—</div></div>
-      <div class="stat"><div class="stat-label">Vol Surges 🔥</div><div class="stat-value" id="stat-volume-surges">—</div></div>
-      <div class="stat"><div class="stat-label">Bundles 🧬</div><div class="stat-value" id="stat-bundles">—</div></div>
-      <div class="stat"><div class="stat-label">🔥 Incinerate</div><div class="stat-value" id="stat-incinerate" title="Unique mints traded × rent per account">—</div></div>
-      <div class="stat"><div class="stat-label">💸 Cashback</div><div class="stat-value" id="stat-cashback" title="Estimated cashback rebates earned across positions in cashback coins">—</div></div>
-      <div class="stat" title="Max SOL per individual trade — clamps any strategy entry"><div class="stat-label">⚙ Max/Trade ◎</div><input id="input-max-per-trade" type="number" step="0.01" min="0.01" max="50" style="width:80px;background:#0a0a0a;color:var(--cyan);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:14px;font-family:inherit;" /></div>
-      <div class="stat" title="Max total SOL exposed across all open positions"><div class="stat-label">⚙ Max Exposure ◎</div><input id="input-max-exposure" type="number" step="0.05" min="0.05" max="1000" style="width:80px;background:#0a0a0a;color:var(--cyan);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:14px;font-family:inherit;" /></div>
-      <div class="stat" title="Abort live buy if coin price drifted up >X% between trigger and tx submit (stale-quote guard)"><div class="stat-label">⚙ Max Entry Slip %</div><input id="input-max-entry-slip" type="number" step="0.01" min="0" max="1" style="width:70px;background:#0a0a0a;color:var(--cyan);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:14px;font-family:inherit;" /></div>
-      <div class="stat" title="Paper-mode latency simulator: hold buys/sells pending this many ms, then fill at the drifted price. 0 = instant (default). Try 500-1000 to simulate live execution."><div class="stat-label">⚙ Paper Lag ms</div><input id="input-paper-latency" type="number" step="50" min="0" max="5000" style="width:80px;background:#0a0a0a;color:var(--cyan);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:14px;font-family:inherit;" /></div>
-      <div class="stat clickable" id="stat-mode-box" title="Click to halt/resume" style="cursor:pointer;user-select:none;"><div class="stat-label" id="stat-mode-label">Mode · click to halt</div><div class="stat-value" id="stat-mode">—</div></div>
-      <div class="stat clickable" id="stat-mode-switch" title="Switch paper ↔ live" style="cursor:pointer;user-select:none;"><div class="stat-label">🔄 Switch</div><div class="stat-value" id="stat-mode-switch-val">→ LIVE</div></div>
-      <div class="stat pulse"><div class="stat-label">Feed</div><div class="stat-value live" id="stat-status">BOOTING</div></div>
+    <div class="topbar-main">
+      <!-- Row 1: trade-essential KPIs + health pills + More toggle -->
+      <div class="stats-row primary">
+        <div class="stat sim-wallet" title="Total liquidation value: free cash + current MTM of open positions"><div class="stat-label">💼 Total</div><div class="stat-value" id="stat-wallet">—</div></div>
+        <div class="stat" title="Free liquid SOL — what's available to deploy on new entries"><div class="stat-label">💵 Cash</div><div class="stat-value" id="stat-cash">—</div></div>
+        <div class="stat" title="Current MTM value of all open positions (live, not cost basis)"><div class="stat-label">📦 In Coins</div><div class="stat-value" id="stat-incoins">—</div></div>
+        <div class="stat"><div class="stat-label">Wallet %</div><div class="stat-value" id="stat-wallet-pct">—</div></div>
+        <div class="stat"><div class="stat-label">Peak / DD</div><div class="stat-value" id="stat-wallet-peak">—</div></div>
+        <div class="stat"><div class="stat-label">Realized P&L</div><div class="stat-value" id="stat-pnl">—</div></div>
+        <div class="stat"><div class="stat-label">Open</div><div class="stat-value" id="stat-open">—</div></div>
+        <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value" id="stat-winrate">—</div></div>
+        <div class="topbar-spacer"></div>
+        <div class="health-cluster" id="health-cluster" title="System health — bot, feeds, DB"></div>
+        <button class="topbar-btn" id="btn-more-stats" title="Toggle audit/research counters (Mints/KOLs/Signals etc.)">📊 More ▾</button>
+      </div>
+
+      <!-- Row 2: settings inline — bot limits + halt + mode switch -->
+      <div class="stats-row controls">
+        <div class="ctrl-input" title="Max SOL per individual trade — clamps any strategy entry">
+          <label>Max / Trade ◎</label>
+          <input id="input-max-per-trade" type="number" step="0.01" min="0.01" max="50" />
+        </div>
+        <div class="ctrl-input" title="Max total SOL exposed across all open positions">
+          <label>Max Exposure ◎</label>
+          <input id="input-max-exposure" type="number" step="0.05" min="0.05" max="1000" />
+        </div>
+        <div class="ctrl-input" title="Abort live buy if coin price drifted up >X% between trigger and tx submit (stale-quote guard)">
+          <label>Max Slip %</label>
+          <input id="input-max-entry-slip" type="number" step="0.01" min="0" max="1" />
+        </div>
+        <div class="topbar-spacer"></div>
+        <div class="stat" id="stat-mode-box"
+          data-tip="📡 BOT MODE&#10;&#10;Pure data-collection mode. No strategies, no trades, no positions. The bot is silently watching every mint and recording snapshots for the ML model to train on.&#10;&#10;Once we have ≥10K labeled snapshots (~7-14 days), we train the migration probability classifier and re-enable trading via that model."
+          data-tip-pos="left">
+          <div class="stat-label">📡 Mode</div>
+          <div class="stat-value" style="color:#b985ff;text-shadow:0 0 8px rgba(185,133,255,0.5)" id="stat-mode">COLLECTING</div>
+        </div>
+      </div>
+
+      <!-- Live Conditions: real-time network state used by paper friction model -->
+      <div class="stats-row live-conditions" id="live-conditions-row">
+        <div class="stat conditions-status" id="cond-status"
+          data-tip="🛰️ NETWORK STATUS&#10;&#10;Live health of the Solana network as we measure it from this Mac.&#10;&#10;● HEALTHY — Helius RPC p90 < 1s, slots flowing normally. Good to trade.&#10;● DEGRADED — RPC 1-3s or slots 800-1500ms. Tx may land slow.&#10;● DOWN — RPC > 3s or stale samples. Tx unlikely to land. Bot pauses live.&#10;&#10;Updates every 30s.">
+          <div class="stat-label">🛰️ Network</div>
+          <div class="stat-value" id="cond-status-val">—</div>
+        </div>
+        <div class="stat"
+          data-tip="HELIUS RPC LATENCY (p50 / p90)&#10;&#10;Round-trip time for getLatestBlockhash() against Helius — the RPC we'd use for live trading.&#10;&#10;p50 = median (typical request)&#10;p90 = 90th percentile (slowest 10% are worse than this)&#10;&#10;If p90 climbs above ~1.5s your live tx have trouble landing on time.&#10;&#10;Sampled every 90s, 5-min rolling stats.">
+          <div class="stat-label">Helius RPC</div>
+          <div class="stat-value" id="cond-helius">—</div>
+        </div>
+        <div class="stat"
+          data-tip="PUBLIC RPC LATENCY (p50 / p90)&#10;&#10;Same metric as Helius but against the public mainnet-beta RPC. Free but slow.&#10;&#10;Useful as a baseline — if Public is much slower than Helius, the upgrade pays off. Currently ~30% slower on average.&#10;&#10;If you ever want to drop the Helius dependency, this tells you what you'd be giving up.">
+          <div class="stat-label">Public RPC</div>
+          <div class="stat-value" id="cond-public">—</div>
+        </div>
+        <div class="stat"
+          data-tip="PRIORITY FEE (p50 / p90)&#10;&#10;Recent priority fees paid on the network, in microlamports per compute unit.&#10;&#10;1 SOL = 1 billion lamports = 1 trillion microlamports&#10;&#10;Going live, your buy/sell tx need to tip at least the p50 (median) to land timely. Spike to p90 in fast-moving fights.&#10;&#10;Currently 0 = network is calm, no tip needed. Spikes during meme-coin frenzies."
+          data-tip-pos="left">
+          <div class="stat-label">Priority Fee</div>
+          <div class="stat-value" id="cond-priority-fee">—</div>
+        </div>
+        <div class="stat"
+          data-tip="SLOT TIME (mean / max)&#10;&#10;How fast Solana is producing blocks (slots) right now. Target is 400ms.&#10;&#10;Mean — average over last 20 samples&#10;Max — slowest sample in the window&#10;&#10;>800ms means network congestion. >1500ms means real trouble — tx land slow or fail.&#10;&#10;Sampled every 5 min from getRecentPerformanceSamples."
+          data-tip-pos="left">
+          <div class="stat-label">Slot Time</div>
+          <div class="stat-value" id="cond-slot-time">—</div>
+        </div>
+        <div class="stat clickable" id="cond-paper-lag-stat"
+          data-tip="EFFECTIVE PAPER LAG&#10;&#10;How long the paper engine waits before filling a buy/sell — simulating live tx confirmation time.&#10;&#10;LIVE — uses Helius p90 right now (auto-updates as network changes)&#10;OVERRIDE — you set a fixed value via dashboard&#10;&#10;Click this stat to set/clear an override. Enter 0 = auto (live). Enter 1-5000 = force a fixed ms value.&#10;&#10;Higher lag = more drift between trigger and fill = more realistic paper PnL."
+          data-tip-pos="left">
+          <div class="stat-label">Paper Lag</div>
+          <div class="stat-value" id="cond-paper-lag">—</div>
+        </div>
+      </div>
+
+      <!-- ML Learning — training data accumulation (replaces Friction row in collection mode) -->
+      <div class="stats-row ml-learning" id="ml-learning-row">
+        <div class="stat learning-status" id="ml-state"
+          data-tip="🧠 LEARNING STATE&#10;&#10;Bot is in pure data-collection mode. No trading, no strategies — just watching every mint and recording snapshots for the ML model to train on.&#10;&#10;● WAITING — no snapshots yet, just booted&#10;● COLLECTING — actively capturing mint snapshots at 60s/5m/15m/60m ages&#10;● READY — enough labeled data to train a first model&#10;&#10;Updates every 30s.">
+          <div class="stat-label">🧠 Learning</div>
+          <div class="stat-value" id="ml-state-val">—</div>
+        </div>
+        <div class="stat"
+          data-tip="TOTAL SNAPSHOTS&#10;&#10;Number of mint-state snapshots captured so far. Each mint can produce up to 4 snapshots (at age 60s, 5min, 15min, 60min).&#10;&#10;At ~50 mints/min ingestion, expect ~200 snapshots/min when fully populated. Targeting 10,000+ resolved snapshots before first model training.">
+          <div class="stat-label">Snapshots</div>
+          <div class="stat-value" id="ml-total">—</div>
+        </div>
+        <div class="stat"
+          data-tip="LABELED SNAPSHOTS&#10;&#10;Snapshots that have been alive ≥6 hours and have had their labels resolved (migrated, peaked_30, peaked_100, peaked_500, peak_pct_max).&#10;&#10;Only labeled rows can be used for training. We need ≥10K labeled rows for a meaningful first model.">
+          <div class="stat-label">Labeled</div>
+          <div class="stat-value" id="ml-resolved">—</div>
+        </div>
+        <div class="stat"
+          data-tip="SNAPSHOT BREAKDOWN BY MINT AGE&#10;&#10;How many snapshots we've taken at each target age:&#10;&#10;• 60s — early-launch state (sniper phase)&#10;• 5m — post-sniper settling&#10;• 15m — momentum confirmation period&#10;• 60m — pre-migration zone&#10;&#10;All four bins should grow at similar rates as mints age through them.">
+          <div class="stat-label">60s/5m/15m/1h</div>
+          <div class="stat-value" id="ml-buckets">—</div>
+        </div>
+        <div class="stat"
+          data-tip="COLLECTION AGE&#10;&#10;How long we've been gathering training data. Targeting 7-14 days for a robust first model.&#10;&#10;Older data = more diverse market regimes = stronger generalization.">
+          <div class="stat-label">Days</div>
+          <div class="stat-value" id="ml-days">—</div>
+        </div>
+        <div class="stat"
+          data-tip="ETA TO FIRST MODEL TRAIN&#10;&#10;Days until we accumulate 10,000 labeled snapshots — our threshold to train v1 of the migration probability model.&#10;&#10;If 'ready' the model can be trained today.&#10;&#10;Computed from current snapshot rate × remaining count to target."
+          data-tip-pos="left">
+          <div class="stat-label">ETA Train</div>
+          <div class="stat-value" id="ml-eta">—</div>
+        </div>
+        <div class="stat"
+          data-tip="MIGRATION RATE (in resolved snapshots)&#10;&#10;Sanity check on label quality. The pump.fun baseline migration rate is ~1-3%. If our resolved snapshots show that range, labels are working correctly.&#10;&#10;Way too high (>10%) = survivorship bias in collection.&#10;Way too low (<0.5%) = labels not resolving properly."
+          data-tip-pos="left">
+          <div class="stat-label">Mig Rate</div>
+          <div class="stat-value" id="ml-mig-rate">—</div>
+        </div>
+      </div>
+
+      <!-- Pump.fun Market — per-mint microstructure aggregates (Phase 1B) -->
+      <div class="stats-row market-microstructure" id="market-micro-row">
+        <div class="stat market-status" id="micro-mood"
+          data-tip="🪙 MARKET MOOD&#10;&#10;Quick read on whether pump.fun is a friendly or hostile environment to trade right now. Derived from sandwich risk + sniper-war density across all hot mints.&#10;&#10;● CLEAN — low sandwich, few sniper wars. Best firing window.&#10;● MIXED — normal pump.fun chop. Trade as usual.&#10;● CONTESTED — moderate MEV pressure. Be picky with entries.&#10;● WARZONE (pulsing red) — heavy MEV + bot warfare. Skip live trades.&#10;● QUIET — barely any activity, low signal volume.&#10;&#10;Updates every 30s.">
+          <div class="stat-label">🪙 Mkt Mood</div>
+          <div class="stat-value" id="micro-mood-val">—</div>
+        </div>
+        <div class="stat"
+          data-tip="HOT MINTS&#10;&#10;Number of pump.fun mints we're actively tracking microstructure for. A mint is 'hot' if it traded in the last 5 minutes.&#10;&#10;High count (200+) = busy market, lots of signal.&#10;Low count (<30) = quiet, slim pickings.&#10;&#10;The bot only computes per-mint stats for hot mints (saves CPU). Older mints get cached values until they trade again.">
+          <div class="stat-label">Hot Mints</div>
+          <div class="stat-value" id="micro-hot">—</div>
+        </div>
+        <div class="stat"
+          data-tip="SANDWICH RISK (median across hot mints)&#10;&#10;How often we detect MEV-style 'sandwich' patterns — same wallet buying then selling within 5 seconds, suggesting bot manipulation.&#10;&#10;0.0 — pristine, no sandwich behavior&#10;0.2 — typical, occasional flips&#10;0.5 — contested, real MEV activity&#10;1.0 — saturated, heavy sandwich pressure&#10;&#10;On live, these mints would cost an extra 2-5% per trade due to MEV.&#10;Going live in a high-sandwich window kills profits.">
+          <div class="stat-label">Sandwich Risk</div>
+          <div class="stat-value" id="micro-sandwich">—</div>
+        </div>
+        <div class="stat"
+          data-tip="BOT REACTION SPEED (median across hot mints)&#10;&#10;Time from a tracked-wallet (KOL/Hunter) buy to the next non-tracked trade on that mint. Measures how fast competing bots fire on our signals.&#10;&#10;<50ms — pure sniper warfare (we lose every race)&#10;50-200ms — fast bots, we'd be late but tradeable&#10;200-500ms — typical retail-bot mix&#10;>500ms — slow market, we have a real edge&#10;&#10;Currently retail Mac → public RPC has ~1s latency, so anything faster than that means we're outmatched live.">
+          <div class="stat-label">Bot Reaction</div>
+          <div class="stat-value" id="micro-reaction">—</div>
+        </div>
+        <div class="stat"
+          data-tip="VOLATILITY (median across hot mints)&#10;&#10;Standard deviation of consecutive trade % changes — how 'choppy' prices are right now.&#10;&#10;<2% — calm price action, signals reliable&#10;2-5% — normal pump.fun&#10;5-10% — chop city, fade exits get whipsawed&#10;>10% — extreme volatility, paper PnL probably overstated&#10;&#10;During the wait between our trigger and fill, price drifts by ~vol × √(latency_seconds). High vol windows are paper-to-live disaster zones.">
+          <div class="stat-label">Volatility</div>
+          <div class="stat-value" id="micro-vol">—</div>
+        </div>
+        <div class="stat"
+          data-tip="AVG CURVE DEPTH (◎ SOL across hot mints)&#10;&#10;Average bonding-curve liquidity. v_sol_in_curve is one half of the constant-product AMM — more SOL in the curve = less price impact for the same trade.&#10;&#10;<30 ◎ — thin curves, big trades hurt&#10;30-60 ◎ — typical mid-curve&#10;60-85 ◎ — near-migration territory (graduates at 85)&#10;&#10;Slippage on a buy ≈ tradeSize / curveDepth. So 0.10 SOL on a 30-curve = 0.33% slippage; on an 80-curve = 0.13%."
+          data-tip-pos="left">
+          <div class="stat-label">Avg Depth</div>
+          <div class="stat-value" id="micro-depth">—</div>
+        </div>
+        <div class="stat"
+          data-tip="CLEAN / CONTESTED MINTS&#10;&#10;Of the hot mints we're tracking:&#10;&#10;CLEAN (green) — sandwich risk < 0.2. Safe to trade — minimal MEV interference.&#10;CONTESTED (red) — sandwich risk ≥ 0.5. Heavy bot activity — live execution costs much more than paper suggests.&#10;&#10;A high contested ratio means most mints are bot-controlled. Look for the clean ones to fire on, or wait for the warzone to subside."
+          data-tip-pos="right">
+          <div class="stat-label">Clean / Contested</div>
+          <div class="stat-value" id="micro-clean-contested">—</div>
+        </div>
+      </div>
+
+      <!-- Row 3: secondary research counters, collapsed by default (toggled by 📊 More) -->
+      <div class="stats-row secondary" id="stats-secondary" hidden>
+        <div class="stat"><div class="stat-label">Mints Seen</div><div class="stat-value" id="stat-mints">—</div></div>
+        <div class="stat"><div class="stat-label">Trades Seen</div><div class="stat-value" id="stat-trades">—</div></div>
+        <div class="stat"><div class="stat-label">Wallets</div><div class="stat-value" id="stat-wallets">—</div></div>
+        <div class="stat"><div class="stat-label">Tracked 🎯</div><div class="stat-value" id="stat-tracked">—</div></div>
+        <div class="stat"><div class="stat-label">KOLs 👑</div><div class="stat-value" id="stat-kols">—</div></div>
+        <div class="stat" title="Wallets qualifying for migratorHunter signal (score ≥0.55 AND ≥5 pre-migration graduate-mint buys)"><div class="stat-label">Hunters 🎯</div><div class="stat-value" id="stat-hunters">—</div></div>
+        <div class="stat"><div class="stat-label">Vol Surges 🔥</div><div class="stat-value" id="stat-volume-surges">—</div></div>
+        <div class="stat"><div class="stat-label">Bundles 🧬</div><div class="stat-value" id="stat-bundles">—</div></div>
+        <div class="stat"><div class="stat-label">🔥 Incinerate</div><div class="stat-value" id="stat-incinerate" title="Unique mints traded × rent per account">—</div></div>
+        <div class="stat"><div class="stat-label">💸 Cashback</div><div class="stat-value" id="stat-cashback" title="Estimated cashback rebates earned across positions in cashback coins">—</div></div>
+      </div>
     </div>
   </header>
 
@@ -62,14 +212,30 @@
   </div>
 
   <nav class="tabs" role="tablist">
-    <button class="tab active" data-tab="mints">🐒 <span>MINTS</span></button>
-    <button class="tab" data-tab="devs">👑 <span>DEVS</span></button>
-    <button class="tab" data-tab="traders">🎯 <span>TRADERS</span></button>
-    <button class="tab" data-tab="positions">📊 <span>POSITIONS</span></button>
-    <button class="tab" data-tab="system">⚙️ <span>SYSTEM</span></button>
-    <button class="tab" data-tab="lab">🔬 <span>COIN LAB</span></button>
-    <button class="tab" data-tab="ticker">⚡ <span>TICKER</span></button>
-    <button class="tab" data-tab="builder">🛠 <span>BUILD</span></button>
+    <!-- Primary: trading -->
+    <button class="tab" data-tab="positions">📊 <span>TRADE</span></button>
+
+    <!-- Research dropdown — wallet/coin discovery -->
+    <div class="tab-group" data-group="research">
+      <button class="tab tab-group-trigger" data-group-trigger="research">🔬 <span>RESEARCH</span> <span class="caret">▾</span></button>
+      <div class="tab-dropdown" data-dropdown="research" hidden>
+        <button class="tab tab-sub" data-tab="mints">🐒 <span>MINTS</span></button>
+        <button class="tab tab-sub" data-tab="devs">👑 <span>DEVS</span></button>
+        <button class="tab tab-sub" data-tab="traders">🎯 <span>TRADERS</span></button>
+        <button class="tab tab-sub" data-tab="rings">🕸 <span>RINGS</span></button>
+        <button class="tab tab-sub" data-tab="lab">🧪 <span>COIN LAB</span></button>
+      </div>
+    </div>
+
+    <!-- System dropdown — admin / audit -->
+    <div class="tab-group" data-group="system">
+      <button class="tab tab-group-trigger" data-group-trigger="system">⚙ <span>SYSTEM</span> <span class="caret">▾</span></button>
+      <div class="tab-dropdown" data-dropdown="system" hidden>
+        <button class="tab tab-sub" data-tab="system">📈 <span>HEALTH &amp; STATS</span></button>
+        <button class="tab tab-sub" data-tab="ticker">⚡ <span>TICKER</span></button>
+        <button class="tab tab-sub" data-tab="builder">🛠 <span>BUILD</span></button>
+      </div>
+    </div>
   </nav>
 
   <main class="tab-content">
@@ -199,6 +365,56 @@
           <tbody id="traders-table"><tr><td colspan="17" class="empty">No wallets with closed positions yet.</td></tr></tbody>
         </table>
       </div>
+    </section>
+
+    <section class="tab-pane" data-pane="rings">
+      <div class="pane-header">
+        <h1>🕸 WALLET RINGS</h1>
+        <p>Coordinated wallet groups detected by mint co-occurrence. A ring = wallets that bought ≥8 of the same mints together (operator alts, copy-trade groups, bundlers). Click any ring to see members.</p>
+        <div class="toolbar">
+          <button class="pill-btn" id="rings-refresh-btn">↻ RECOMPUTE NOW</button>
+          <span class="muted" id="rings-meta" style="margin-left:12px;font-size:11px;"></span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th>Ring ID</th>
+              <th class="num" data-sort="size">Size</th>
+              <th class="num" data-sort="shared_mint_count">Shared Mints</th>
+              <th class="num" data-sort="distinct_mints_bought">Total Mints</th>
+              <th class="num" data-sort="paper_wins">Paper W</th>
+              <th class="num" data-sort="paper_losses">Paper L</th>
+              <th class="num" data-sort="paper_wr">Paper WR</th>
+              <th class="num" data-sort="paper_net_sol">Paper Net SOL</th>
+              <th>Detected</th>
+            </tr>
+          </thead>
+          <tbody id="rings-table"><tr><td colspan="9" class="empty">No rings detected yet — wait for the first hourly sweep, or click ↻ RECOMPUTE NOW.</td></tr></tbody>
+        </table>
+      </div>
+      <details class="section" id="ring-detail" style="display:none;margin-top:20px;" open>
+        <summary class="section-summary">🧬 RING MEMBERS <span class="muted" id="ring-detail-meta" style="font-size:11px;font-style:italic;margin-left:10px;"></span></summary>
+        <div class="table-wrap">
+          <table class="data">
+            <thead>
+              <tr>
+                <th>Wallet</th>
+                <th>Category</th>
+                <th class="num">PnL 30d</th>
+                <th class="num">WR 30d</th>
+                <th class="num">Closed 30d</th>
+                <th class="num">Migrator Score</th>
+                <th class="num">Mig pre-mig</th>
+                <th>KOL</th>
+                <th>Tracked</th>
+              </tr>
+            </thead>
+            <tbody id="ring-members-table"><tr><td colspan="9" class="empty">Click a ring above.</td></tr></tbody>
+          </table>
+        </div>
+      </details>
     </section>
 
     <section class="tab-pane" data-pane="positions">

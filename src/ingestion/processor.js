@@ -8,6 +8,7 @@ import { notifyTradeForMint } from '../trading/paper.js';
 import { config } from '../config.js';
 import { checkCashbackFlag } from './helius.js';
 import { trackBuyer, checkPreKingProfile, markFired } from '../scoring/coin-velocity.js';
+import { getIngestionPaused } from '../ml/disk-monitor.js';
 import { updateMigratorStatsForMint } from '../scoring/migrator-stats.js';
 
 const cashbackInflight = new Set();
@@ -104,8 +105,33 @@ export function startProcessor(pumpportal) {
   pumpportal.on('migrate', onMigrate);
 }
 
+// Inject an externally-sourced trade (e.g. parsed from a Helius webhook) into the
+// same pipeline PumpPortal trades flow through. Caller supplies our normalized
+// shape: { mint, wallet, is_buy, sol_amount, token_amount, signature, timestamp }.
+// We translate to the PumpPortal-event shape onTrade expects.
+export function ingestExternalTrade(p) {
+  if (!p || !p.mint || !p.wallet) return;
+  // We may not know the live curve state from a webhook payload — onTrade reads
+  // current_market_cap_sol from the mints row (kept fresh by onchain-price.js)
+  // and falls back to 0 if missing. solAmount/tokenAmount come from the parsed
+  // tokenTransfers + nativeTransfers.
+  onTrade({
+    mint: p.mint,
+    txType: p.is_buy ? 'buy' : 'sell',
+    solAmount: p.sol_amount || 0,
+    tokenAmount: p.token_amount || 0,
+    traderPublicKey: p.wallet,
+    signature: p.signature || null,
+    marketCapSol: 0, // unknown from webhook — leave 0, on-chain feed has the truth
+    vSolInBondingCurve: 0,
+    vTokensInBondingCurve: 0,
+  });
+}
+
 function onCreate(e) {
   try {
+    // Disk-pressure pause — skip ingestion when free space is critically low.
+    if (getIngestionPaused()) return;
     const s = S();
     const now = Date.now();
     const creator = e.traderPublicKey || e.creator || '';
@@ -115,6 +141,19 @@ function onCreate(e) {
       e.marketCapSol || 0, e.marketCapSol || 0, e.bondingCurveKey || null, now
     );
     if (creator) s.upsertCreator.run(creator, now, now);
+
+    // Whale-spawn enrollment retained as data signal (not used by strategies
+    // in pure-collection mode but the data is useful for ML feature analysis).
+    const initBuy = Number(e.solAmount || 0);
+    if (initBuy >= 8 && initBuy < 50) {
+      try {
+        const seedPrice = (e.vSolInBondingCurve && e.vTokensInBondingCurve)
+          ? e.vSolInBondingCurve / e.vTokensInBondingCurve : 0;
+        db().prepare(`INSERT OR IGNORE INTO whale_watch (mint_address, initial_buy_sol, seed_price, peak_price, peak_at, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .run(e.mint, initBuy, seedPrice, seedPrice, now, now, now + 10 * 60 * 1000);
+        console.log(`[whale-watch] enrolled ${e.mint.slice(0,8)}… init_buy=${initBuy.toFixed(1)}SOL seed=${seedPrice.toExponential(2)}`);
+      } catch (err) { /* row exists — fine */ }
+    }
 
     if (e.uri) {
       fetchMetadata(e.uri).then((meta) => {
@@ -131,6 +170,7 @@ function onCreate(e) {
 
 function onTrade(e) {
   try {
+    if (getIngestionPaused()) return;
     const s = S();
     const now = Date.now();
     const mint = s.getMint.get(e.mint);

@@ -12,6 +12,11 @@ async function tryFetch(url, extract) {
 
 async function fetchSolUsd() {
   const sources = [
+    // Order matters — try the fastest reliable ones first. Verified live from
+    // this machine: Kraken + KuCoin return in <1s, Coinbase/Coingecko timeout
+    // intermittently, Binance is geo-blocked, Jupiter v6 endpoint dead.
+    ['kraken', 'https://api.kraken.com/0/public/Ticker?pair=SOLUSD', (d) => d?.result?.SOLUSD?.c?.[0]],
+    ['kucoin', 'https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=SOL-USDT', (d) => d?.data?.price],
     ['coinbase', 'https://api.coinbase.com/v2/prices/SOL-USD/spot', (d) => d?.data?.amount],
     ['coingecko', 'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', (d) => d?.solana?.usd],
   ];

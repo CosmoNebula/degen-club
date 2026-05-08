@@ -219,3 +219,85 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 CREATE INDEX IF NOT EXISTS idx_signals_mint ON signals(mint_address);
 CREATE INDEX IF NOT EXISTS idx_signals_fired ON signals(fired_at DESC);
+
+-- ML Trading Agent — autonomous proposer/evaluator that generates and runs
+-- its own trading strategies based on what it has learned. Strategies are
+-- JSON recipes the agent invents via Claude consults; executor evaluates
+-- them against live mints and fires paper trades. Agent monitors PnL and
+-- can self-modify or retire its own strategies.
+
+CREATE TABLE IF NOT EXISTS ml_agent_strategies (
+  id TEXT PRIMARY KEY,                 -- e.g. 'agent_2026-05-08_kol-momentum'
+  name TEXT NOT NULL,                  -- agent's chosen name for this strategy
+  rationale TEXT,                      -- why the agent thinks this works
+  recipe_json TEXT NOT NULL,           -- the full strategy spec
+  status TEXT DEFAULT 'live',          -- live | paused | retired
+  created_at INTEGER NOT NULL,
+  retired_at INTEGER,
+  retired_reason TEXT,
+  -- Lifetime stats
+  n_trades INTEGER DEFAULT 0,
+  n_wins INTEGER DEFAULT 0,
+  n_losses INTEGER DEFAULT 0,
+  realized_pnl_sol REAL DEFAULT 0,
+  best_trade_pct REAL DEFAULT 0,
+  worst_trade_pct REAL DEFAULT 0,
+  last_evaluated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_agent_strategies_status ON ml_agent_strategies(status);
+
+-- Full reasoning trail. Every introspection cycle, every consult, every
+-- proposal/retirement decision lands here so the user can read what the
+-- agent was thinking.
+CREATE TABLE IF NOT EXISTS ml_agent_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp INTEGER NOT NULL,
+  level TEXT,                          -- info | thought | propose | retire | error | trade
+  category TEXT,                       -- introspect | consult | execute | monitor
+  strategy_id TEXT,                    -- nullable — only set if log is about a specific strategy
+  message TEXT,                        -- human-readable summary
+  data_json TEXT                       -- structured payload (whatever's relevant)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_log_ts ON ml_agent_log(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_log_strategy ON ml_agent_log(strategy_id);
+
+-- Single-row table holding agent's overall state — readiness assessment,
+-- last cycle time, why it isn't (or is) ready to act.
+CREATE TABLE IF NOT EXISTS ml_agent_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  status TEXT DEFAULT 'observing',     -- observing | ready | active | error
+  readiness_json TEXT,                 -- per-criterion readiness breakdown
+  last_cycle_at INTEGER,
+  last_consult_at INTEGER,
+  consults_today INTEGER DEFAULT 0,
+  consult_day_key TEXT,                -- 'YYYY-MM-DD' for daily reset
+  current_thought TEXT,                -- short one-liner: what is the agent doing right now
+  updated_at INTEGER
+);
+INSERT OR IGNORE INTO ml_agent_state (id, status, current_thought, updated_at)
+VALUES (1, 'observing', 'agent has not started yet', 0);
+
+-- Shared Claude consult rate limiter. Every subsystem (agent introspection,
+-- post-mortem, daily report, calibration review, mint intel) checks this
+-- before firing a Claude call. Hard caps per subsystem per day prevent runaway
+-- loops or sudden bursts (e.g. 100 closed positions → 100 post-mortems).
+CREATE TABLE IF NOT EXISTS ml_agent_rate_limit (
+  date_key TEXT NOT NULL,             -- YYYY-MM-DD
+  subsystem TEXT NOT NULL,            -- 'agent' | 'post-mortem' | 'daily-report' | 'calib-review' | 'mint-intel'
+  count INTEGER DEFAULT 0,
+  PRIMARY KEY (date_key, subsystem)
+);
+
+-- Mint metadata intel — agent's per-mint scam/winner verdicts. Populated by
+-- the hourly batch in agent-mint-intel.js. Combined heuristic + Claude review.
+CREATE TABLE IF NOT EXISTS ml_mint_intel (
+  mint_address TEXT PRIMARY KEY,
+  analyzed_at INTEGER NOT NULL,
+  source TEXT,                          -- 'heuristic' | 'claude' | 'manual'
+  verdict TEXT,                         -- winner | clean | suspicious | ruggy | junk
+  confidence REAL,
+  signals_json TEXT,                    -- short list of detected patterns
+  rationale TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mint_intel_analyzed ON ml_mint_intel(analyzed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mint_intel_verdict ON ml_mint_intel(verdict);
