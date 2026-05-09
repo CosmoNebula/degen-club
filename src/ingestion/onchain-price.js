@@ -24,6 +24,7 @@ const POST_EXIT_WATCH_MS = 6 * 60 * 60 * 1000; // keep subscribed 6h after exit
 let _ws = null;
 let _running = false;
 let _reconnectMs = RECONNECT_MIN_MS;
+let _lastMsgAt = 0;       // for stale-WS watchdog
 let _nextReqId = 1;
 const _subs = new Map();        // mint_address -> { bondingCurveKey, subId, reqId }
 const _pendingByReqId = new Map(); // reqId -> { mint, kind: 'sub'|'unsub' }
@@ -146,6 +147,7 @@ function connect() {
   });
 
   _ws.on('message', (raw) => {
+    _lastMsgAt = Date.now();
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     // Subscription confirmation: { id, result: <subId> }
@@ -183,7 +185,17 @@ export function startOnchainPriceFeed() {
   _running = true;
   connect();
   setInterval(reconcile, REFRESH_INTERVAL_MS);
-  console.log(`[onchain-price] started · ${RPC_WS} · reconcile every ${REFRESH_INTERVAL_MS / 1000}s`);
+  // Stale-WS watchdog — if no notifications for active subs in 5 min, force
+  // reconnect. Subs to active mints should always have churn; silence = stuck.
+  setInterval(() => {
+    if (!_running) return;
+    const sinceMsg = Date.now() - _lastMsgAt;
+    if (_subs.size > 0 && sinceMsg > 5 * 60 * 1000 && _ws) {
+      console.warn(`[onchain-price] STALE — no messages in ${Math.floor(sinceMsg/1000)}s with ${_subs.size} subs, forcing reconnect`);
+      try { _ws.terminate(); } catch {}
+    }
+  }, 60 * 1000);
+  console.log(`[onchain-price] started · ${RPC_WS} · reconcile every ${REFRESH_INTERVAL_MS / 1000}s · stale-WS watchdog 5min`);
 }
 
 export function stopOnchainPriceFeed() {

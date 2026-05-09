@@ -40,12 +40,25 @@ class OnchainPumpTrades extends EventEmitter {
     this.running = true;
     this.connect();
     this._statsTimer = setInterval(() => this.logStats(), 5 * 60 * 1000);
+    // Stale-event watchdog — if no trades received in 3 min while we think
+    // we're connected, the WS has gone silent (silent disconnect on the
+    // network layer). Force a reconnect to recover.
+    this._staleTimer = setInterval(() => {
+      if (!this.connectedAt) return;
+      const lastAgo = this.lastEventAt ? Date.now() - this.lastEventAt : Date.now() - this.connectedAt;
+      if (lastAgo > 3 * 60 * 1000) {
+        console.warn(`[onchain-trades] STALE — no events in ${Math.floor(lastAgo/1000)}s, force-reconnecting WS`);
+        try { this.ws?.terminate(); } catch {}
+      }
+    }, 60 * 1000);
   }
 
   stop() {
     this.running = false;
     clearInterval(this._statsTimer);
+    clearInterval(this._staleTimer);
     this._statsTimer = null;
+    this._staleTimer = null;
     try { this.ws?.close(); } catch {}
   }
 
