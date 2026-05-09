@@ -115,6 +115,14 @@ function takeSnapshot(mint, target, snapshotTs) {
   const lc = s.latestConditions.get();
   const dt = new Date(mint.created_at);
 
+  // EVENT: trigger agent eval when a mint first becomes scoring-eligible (60s age)
+  // and shows interesting tracked-buyer activity. Async fire-and-forget.
+  if (target === 60 && agg.trackedBuyers >= 1) {
+    import('./agent-executor.js').then(m => {
+      m.evaluateMintNow(mint.mint_address, `60s-age-tracked-${agg.trackedBuyers}`).catch(() => {});
+    }).catch(() => {});
+  }
+
   s.insertSnapshot.run(
     mint.mint_address, target, snapshotTs,
     mint.initial_buy_sol || 0,

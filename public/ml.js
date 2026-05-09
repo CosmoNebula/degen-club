@@ -173,7 +173,9 @@ async function refresh() {
     refreshCalibration();
     refreshBridge();
     refreshModelHealth();
+    refreshLiftProfile();
     refreshAgent();
+    refreshNews();
     refreshTopPicks();
     refreshRetrainStatus();
 
@@ -452,6 +454,126 @@ function startRetrainPolling() {
   _retrainPollTimer = setInterval(pollRetrainStatus, 1000);
 }
 
+async function refreshLiftProfile() {
+  try {
+    const r = await fetchJson('/api/ml/lift-profile');
+    const TARGETS = ['peaked_30', 'peaked_100', 'peaked_300', 'migrated', 'will_die_fast'];
+    const headline = document.getElementById('ml-lift-headline');
+    const tables = document.getElementById('ml-lift-tables');
+    if (!r || !TARGETS.some(t => (r[t]?.n || 0) > 0)) {
+      headline.textContent = 'no lift data yet — predictions need to age past the 6h label window';
+      tables.innerHTML = '';
+      return;
+    }
+    // Headline: per-target top-30% lift summary
+    const summary = TARGETS.filter(t => r[t]?.n > 0).map(t => {
+      const d = r[t];
+      const lift = d.top30_lift != null ? d.top30_lift.toFixed(1) + 'x' : '?';
+      const rate = d.top30_rate != null ? (d.top30_rate * 100).toFixed(0) + '%' : '?';
+      const base = d.baseline != null ? (d.baseline * 100).toFixed(1) + '%' : '?';
+      return `<span style="color:var(--cyan);">${t}</span>: top-30% picks pump <strong>${rate}</strong> vs baseline <strong>${base}</strong> = <strong style="color:#00ff88">${lift} lift</strong> (n=${d.top30_n})`;
+    }).join(' &nbsp;·&nbsp; ');
+    headline.innerHTML = summary;
+
+    // Per-target decile tables (compact side-by-side)
+    tables.innerHTML = `<div class="ml-volume-grid">` + TARGETS.filter(t => r[t]?.n > 0).map(t => {
+      const d = r[t];
+      const rows = d.deciles.filter(b => b.n > 0).map(b => {
+        const liftClr = b.lift != null && b.lift >= 3 ? '#00ff88' : (b.lift >= 1.5 ? '#ffd166' : '#888');
+        const gap = b.predicted != null && b.actual != null ? b.actual - b.predicted : null;
+        const gapStr = gap != null ? `${gap >= 0 ? '+' : ''}${(gap * 100).toFixed(0)}pts` : '';
+        const gapClr = gap != null && Math.abs(gap) > 0.1 ? '#b985ff' : '#666';
+        return `<tr>
+          <td style="color:#888">${(b.low*100).toFixed(0)}-${(b.high*100).toFixed(0)}%</td>
+          <td>${b.n}</td>
+          <td>${b.predicted != null ? (b.predicted * 100).toFixed(0) + '%' : '—'}</td>
+          <td>${b.actual != null ? (b.actual * 100).toFixed(0) + '%' : '—'}</td>
+          <td style="color:${gapClr}">${gapStr}</td>
+          <td style="color:${liftClr}; font-weight: 700;">${b.lift != null ? b.lift.toFixed(1) + 'x' : '—'}</td>
+        </tr>`;
+      }).join('');
+      return `<div class="ml-bucket-card">
+        <h3>${t} <span style="color:#666;font-size:10px;">n=${d.n}</span></h3>
+        <table class="ml-feature-table">
+          <thead><tr><th>bucket</th><th>n</th><th>predicted</th><th>actual</th><th>gap</th><th>lift</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="6" class="empty">no data</td></tr>'}</tbody>
+        </table>
+      </div>`;
+    }).join('') + `</div>`;
+  } catch (e) { /* swallow */ }
+}
+
+async function refreshNews() {
+  try {
+    const [synth, news, flagsRes] = await Promise.all([
+      fetchJson('/api/news/synthesis').catch(() => ({})),
+      fetchJson('/api/news/recent').catch(() => ({ items: [] })),
+      fetchJson('/api/flags').catch(() => ({ flags: [] })),
+    ]);
+    const synthEl = document.getElementById('ml-news-synthesis');
+    const synthAgeEl = document.getElementById('ml-news-synthesis-age');
+    if (synth?.summary) {
+      synthEl.textContent = synth.summary;
+      const ageHr = synth.ts ? ((Date.now() - synth.ts) / 3600000).toFixed(1) : '?';
+      synthAgeEl.textContent = `${ageHr}h ago`;
+    } else {
+      synthEl.textContent = 'no synthesis yet — agent will run first one ~8min after boot';
+    }
+
+    const flags = (flagsRes?.flags || []).filter(f => f.active);
+    const flagsEl = document.getElementById('ml-flags-list');
+    if (flags.length === 0) {
+      flagsEl.textContent = 'no active flags — drop one above to override what the agent sees';
+    } else {
+      flagsEl.innerHTML = flags.map(f => `
+        <div style="display:flex; align-items:center; gap:8px; padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.05); font-size:11px;">
+          <span style="color:#b985ff; flex:1;">🚩 ${f.flag}</span>
+          ${f.note ? `<span style="color:#888;">${f.note}</span>` : ''}
+          <button data-id="${f.id}" class="flag-deactivate" style="background:transparent; color:#ff3860; border:1px solid #ff3860; padding:2px 8px; cursor:pointer; font-size:10px;">×</button>
+        </div>`).join('');
+      // Wire deactivate buttons
+      flagsEl.querySelectorAll('.flag-deactivate').forEach(btn => {
+        btn.onclick = async () => {
+          await fetch(`/api/flags/${btn.dataset.id}/deactivate`, { method: 'POST' });
+          refreshNews();
+        };
+      });
+    }
+
+    const items = news?.items || [];
+    const newsEl = document.getElementById('ml-news-list');
+    if (items.length === 0) {
+      newsEl.textContent = 'no news yet — feeds poll every 30min, first ingestion in ~1min after boot';
+    } else {
+      newsEl.innerHTML = items.slice(0, 30).map(n => {
+        const ageMin = Math.round((Date.now() - n.ts) / 60000);
+        const ageStr = ageMin < 60 ? `${ageMin}m` : `${(ageMin / 60).toFixed(1)}h`;
+        return `<div style="padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.05);">
+          <span style="color:#888;">[${n.source}]</span>
+          <a href="${n.url}" target="_blank" style="color:var(--cyan); text-decoration:none;">${n.title?.slice(0, 130) || '(no title)'}</a>
+          <span style="color:#666; font-size:10px;"> · ${ageStr} ago · score=${(n.relevance_score || 0).toFixed(1)}</span>
+        </div>`;
+      }).join('');
+    }
+  } catch (e) { /* swallow */ }
+}
+
+document.getElementById('ml-flag-submit')?.addEventListener('click', async () => {
+  const input = document.getElementById('ml-flag-input');
+  const flag = input.value.trim();
+  if (!flag) return;
+  await fetch('/api/flags', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ flag, expires_in_hours: 24 }),
+  });
+  input.value = '';
+  refreshNews();
+});
+document.getElementById('ml-flag-input')?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('ml-flag-submit').click();
+});
+
 async function refreshAgent() {
   try {
     const [summary, logRes] = await Promise.all([
@@ -507,6 +629,28 @@ async function refreshAgent() {
         </div>`;
       }).join('');
     }
+
+    // Retired strategies archive
+    try {
+      const arch = await fetchJson('/api/ml/agent/archive');
+      const archEl = document.getElementById('ml-agent-archive');
+      const list = arch?.archived || [];
+      if (archEl) {
+        if (list.length === 0) {
+          archEl.textContent = 'none yet — retired strategies appear here, decluttered from the main dashboard';
+        } else {
+          archEl.innerHTML = list.map(a => {
+            const pnlColor = (a.pnl || 0) >= 0 ? '#00ff88' : '#ff3860';
+            const ageDays = a.retired_at ? ((Date.now() - a.retired_at) / 86400000).toFixed(1) + 'd ago' : '?';
+            return `<div style="padding:6px 0; border-bottom: 1px dashed rgba(255,255,255,0.06);">
+              <div style="color:#888;">🪦 <strong style="color:#b985ff;">${a.id}</strong> · retired ${ageDays}</div>
+              <div style="color:#666; font-size:10px; margin: 2px 0;">${a.retired_reason || 'no reason recorded'}</div>
+              <div style="font-size:10px;">${a.n_trades} trades · realized <strong style="color:${pnlColor}">${(a.pnl || 0).toFixed(3)} SOL</strong></div>
+            </div>`;
+          }).join('');
+        }
+      }
+    } catch {}
 
     // Thoughts feed
     const log = logRes?.entries || [];

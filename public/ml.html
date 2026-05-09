@@ -218,6 +218,18 @@
     </div>
   </section>
 
+  <!-- Section 6.22: Lift Profile (discrimination — does the model rank winners higher?) -->
+  <section class="ml-section" id="ml-lift-section">
+    <h2>📈 Lift Profile
+      <span style="font-size:11px;color:var(--text-dim);margin-left:8px">does the model rank winners higher? (separate from calibration)</span>
+    </h2>
+    <div id="ml-lift-headline" style="margin-bottom: 10px; font-size: 13px;">—</div>
+    <div id="ml-lift-tables">—</div>
+    <div class="ml-stat-sub" style="margin-top: 10px;">
+      Each row = a probability bucket. <strong>actual</strong> is the empirical rate of that label among picks in that bucket. <strong>lift</strong> = actual/baseline. A "20-30%" predicted bucket with actual=80% means the model is under-confident at that range — but rankings are still useful because high prob = real signal.
+    </div>
+  </section>
+
   <!-- Section 6.25: Model Health (drift detection) -->
   <section class="ml-section">
     <h2>🩺 Model Health <span style="font-size:11px;color:var(--text-dim);margin-left:8px">drift detection — current vs previous retrain</span></h2>
@@ -310,6 +322,30 @@
     </div>
   </section>
 
+  <!-- Section 6.30: Cultural Pulse / News -->
+  <section class="ml-section" id="ml-news-section">
+    <h2>📰 Cultural Pulse
+      <span style="font-size:11px;color:var(--text-dim);margin-left:8px">news + trends + Trump + manual flags — feeds the agent</span>
+    </h2>
+
+    <div class="ml-stat-card" style="margin-bottom: 12px; border-color: #b985ff;">
+      <div class="ml-stat-label">Latest Meta Synthesis (Claude every 4h)</div>
+      <div id="ml-news-synthesis" style="font-size: 12px; line-height: 1.6; color: var(--text); margin-top: 6px; white-space: pre-wrap;">no synthesis yet</div>
+      <div class="ml-stat-sub" id="ml-news-synthesis-age" style="margin-top: 6px;">—</div>
+    </div>
+
+    <h3>Manual flags — type your observation, it goes straight into the agent's context</h3>
+    <div style="display: flex; gap: 6px; margin-bottom: 8px;">
+      <input id="ml-flag-input" type="text" placeholder="e.g. 'Trump-themed coins running, AI narrative cooling'"
+        style="flex: 1; background: rgba(15,15,30,0.6); color: var(--text); border: 1px solid rgba(185,133,255,0.3); padding: 6px 10px; font-family: inherit; font-size: 12px;" />
+      <button id="ml-flag-submit" style="background: #b985ff; color: #000; border: 0; padding: 6px 16px; cursor: pointer; font-weight: 700;">FLAG IT</button>
+    </div>
+    <div id="ml-flags-list" class="ml-stat-sub">no active flags</div>
+
+    <h3 style="margin-top: 14px;">Top recent news (24h, relevance-sorted)</h3>
+    <div id="ml-news-list" style="font-size: 11px; max-height: 260px; overflow-y: auto;">—</div>
+  </section>
+
   <!-- Section 6.35: Autonomous Agent -->
   <section class="ml-section" id="ml-agent-section">
     <h2>🤖 Autonomous Agent
@@ -345,6 +381,9 @@
     <div id="ml-agent-strategies">
       <div class="ml-stat-sub" style="padding: 12px 0;">no strategies yet — agent will create them when ready</div>
     </div>
+
+    <h3 style="margin-top: 16px;">retired strategies (graveyard — kept for the agent's training, hidden from main dashboard)</h3>
+    <div id="ml-agent-archive" class="ml-stat-sub" style="font-size: 11px;">none yet</div>
 
     <h3 style="margin-top: 16px;">thoughts feed (last 30)</h3>
     <div id="ml-agent-log" class="ml-feed-card" style="max-height: 320px; overflow-y: auto;">

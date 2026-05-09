@@ -52,6 +52,16 @@ async function refreshMintPrice(mintAddress) {
   if (!data || !data.priceNative || data.priceNative <= 0) return null;
   const solUsd = getSolUsd() || 1;
   const mcapSol = solUsd > 0 ? (data.fdvUsd / solUsd) : 0;
+  // Sanity cap — pump.fun bonding curve physically cannot exceed ~85 SOL
+  // mcap pre-migration. DexScreener occasionally returns data from a fake
+  // clone pool or stale data with a wildly inflated FDV. If the mint isn't
+  // migrated, reject any mcap update >150 SOL (gives some headroom over the
+  // 85 SOL graduation threshold for transient post-migration moments).
+  const mintRow = db().prepare('SELECT migrated FROM mints WHERE mint_address = ?').get(mintAddress);
+  if (mintRow && !mintRow.migrated && mcapSol > 150) {
+    console.log(`[dexscreener] rejected bogus mcap ${mcapSol.toFixed(0)} SOL for non-migrated ${mintAddress.slice(0, 8)}…`);
+    return null;
+  }
   try {
     S().updateMint.run(data.priceNative, mcapSol, mcapSol, Date.now(), mintAddress);
     if (data.poolAddress) {

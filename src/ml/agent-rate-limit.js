@@ -9,10 +9,11 @@ import { db } from '../db/index.js';
 // Hard daily caps per subsystem. Tune here if needed.
 export const DAILY_CAPS = {
   'agent':         12,   // strategy proposals + retirements (combined)
-  'post-mortem':    4,   // 6h batch — 1 analysis covers all trades in the window
+  'post-mortem':    8,   // 3h batch — faster iteration, plenty of headroom
   'daily-report':   1,   // 1 per day
   'calib-review':   1,   // 1 per day
   'mint-intel':    24,   // 1 per hour batch
+  'news-synthesis': 6,   // every 4h synthesis of news/trends/social
 };
 
 // Burst caps — max consults per single tick, prevents fan-out within one cycle
@@ -22,6 +23,7 @@ export const BURST_CAPS = {
   'daily-report':  1,
   'calib-review':  1,
   'mint-intel':    1,
+  'news-synthesis': 1,
 };
 
 let stmts = null;

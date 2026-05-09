@@ -32,6 +32,23 @@ function ensureCol(d, table, name, def) {
 }
 
 function runMigrations(d) {
+  // Strategy lineage (added 2026-05-09)
+  ensureCol(d, 'ml_agent_strategies', 'parent_strategy_id', `TEXT`);
+  ensureCol(d, 'ml_agent_strategies', 'generation', `INTEGER DEFAULT 1`);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_strategies_parent ON ml_agent_strategies(parent_strategy_id)`);
+
+  // Post-migration tracking via DexScreener (PumpSwap data went paid 2026-05)
+  ensureCol(d, 'mints', 'amm_pool_address', `TEXT`);
+  ensureCol(d, 'mints', 'amm_dex', `TEXT`);
+  ensureCol(d, 'mints', 'amm_liquidity_usd', `REAL DEFAULT 0`);
+  ensureCol(d, 'mints', 'amm_volume_h1_usd', `REAL DEFAULT 0`);
+  ensureCol(d, 'mints', 'amm_volume_h24_usd', `REAL DEFAULT 0`);
+  ensureCol(d, 'mints', 'amm_buys_h24', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'mints', 'amm_sells_h24', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'mints', 'amm_price_change_h1', `REAL DEFAULT 0`);
+  ensureCol(d, 'mints', 'amm_price_change_h24', `REAL DEFAULT 0`);
+  ensureCol(d, 'mints', 'last_amm_refresh_at', `INTEGER`);
+
   ensureCol(d, 'wallets', 'category', `TEXT DEFAULT 'NOT_SURE'`);
   ensureCol(d, 'wallets', 'bot_flags', `TEXT DEFAULT '[]'`);
   ensureCol(d, 'wallets', 'copy_friendly', `INTEGER DEFAULT 0`);

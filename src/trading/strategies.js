@@ -119,7 +119,15 @@ function S() {
   const d = db();
   stmts = {
     getStrategy: d.prepare('SELECT * FROM strategy_state WHERE name = ?'),
-    listStrategies: d.prepare('SELECT * FROM strategy_state ORDER BY name'),
+    // Hide retired agent strategies from the main dashboard (data preserved in
+     // ml_agent_strategies for future training and post-mortem context).
+     // Non-agent rows are unaffected.
+    listStrategies: d.prepare(`
+      SELECT s.* FROM strategy_state s
+      LEFT JOIN ml_agent_strategies a ON a.id = s.name
+      WHERE s.name NOT LIKE 'agent_%' OR a.status IS NULL OR a.status != 'retired'
+      ORDER BY s.name
+    `),
     toggleStrategy: d.prepare('UPDATE strategy_state SET enabled = 1 - enabled, updated_at = ? WHERE name = ?'),
     countOpen: d.prepare("SELECT COUNT(*) AS n FROM paper_positions WHERE status = 'open'"),
     // Exposure = at-risk capital only. Once a position has realized enough
@@ -157,7 +165,7 @@ function applySourceGate(name, w, trade, mint) {
     const whitelist = sf.walletWhitelist || [];
     if (whitelist.length > 0) {
       if (!whitelist.includes(trade.wallet)) return { pass: false };
-      const fixedDetails = { type: name === 'kingFollow' ? 'KING_FOLLOW' : 'WHITELIST', wallet: trade.wallet };
+      const fixedDetails = { type: 'WHITELIST', wallet: trade.wallet };
       console.log(`[${name}] 👑 ${trade.wallet.slice(0,6)}… buying ${short}… mc ${mc.toFixed(1)} — firing`);
       return { pass: true, fixedDetails, sizeOverride: sCfg.defaults?.entry_sol };
     }
@@ -192,6 +200,16 @@ export function getStrategy(name) { return S().getStrategy.get(name); }
 
 export function toggleStrategy(name) {
   S().toggleStrategy.run(Date.now(), name);
+  // Agent-created strategies have a parallel state machine in ml_agent_strategies
+  // — keep them in sync so the executor sees status='live' when user re-enables.
+  if (typeof name === 'string' && name.startsWith('agent_')) {
+    const cur = db().prepare('SELECT enabled FROM strategy_state WHERE name = ?').get(name);
+    const targetStatus = cur?.enabled ? 'live' : 'paused';
+    db().prepare(`UPDATE ml_agent_strategies SET status = ?,
+       retired_at = CASE WHEN ? = 'live' THEN NULL ELSE retired_at END,
+       retired_reason = CASE WHEN ? = 'live' THEN NULL ELSE retired_reason END
+       WHERE id = ?`).run(targetStatus, targetStatus, targetStatus, name);
+  }
   return getStrategy(name);
 }
 
@@ -408,9 +426,9 @@ export function onSmartTrade(trade, mint) {
     if (!trade.is_buy) return;
     const w = S().walletInfo.get(trade.wallet);
     if (!w || !w.tracked) return;
-    const kingWhitelist = new Set(config.strategies?.kingFollow?.kingWallets || []);
-    const isWhitelistedKing = kingWhitelist.has(trade.wallet);
-    if (w.auto_blocked && !isWhitelistedKing) {
+    const trustedWhitelist = new Set(config.strategies?.trustedWallets?.addresses || []);
+    const isWhitelistedTrusted = trustedWhitelist.has(trade.wallet);
+    if (w.auto_blocked && !isWhitelistedTrusted) {
       console.log(`[blocked] auto-blocked wallet ${trade.wallet.slice(0,6)}… (follow WR=${(w.follow_wr*100).toFixed(0)}%, net=${(w.follow_net_sol||0).toFixed(3)} SOL)`);
       return;
     }
@@ -509,7 +527,7 @@ export function onCoinVelocity(mintAddress, metrics) {
       velocity: metrics.velocityRatio,
       ageSec: metrics.ageSec,
     };
-    console.log(`[preKing] ⚡ ${mintAddress.slice(0,8)}… age ${metrics.ageSec.toFixed(1)}s · mc ${metrics.mc.toFixed(1)} · ${metrics.buyersFullWindow} buyers (${metrics.buyersRecentHalf} recent · vel ${metrics.velocityRatio.toFixed(2)}) — firing`);
+    console.log(`[velocityRunner] ⚡ ${mintAddress.slice(0,8)}… age ${metrics.ageSec.toFixed(1)}s · mc ${metrics.mc.toFixed(1)} · ${metrics.buyersFullWindow} buyers (${metrics.buyersRecentHalf} recent · vel ${metrics.velocityRatio.toFixed(2)}) — firing`);
     for (const name of strategiesForTrigger('coin_velocity')) tryFire(name, mint, details);
   } catch (err) { console.error('[strategy] onCoinVelocity', err.message); }
 }

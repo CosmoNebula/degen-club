@@ -22,6 +22,7 @@ export const STRATEGY_RECIPE_SCHEMA = {
   properties: {
     name: { type: 'string', description: 'short name for this strategy (no spaces, lowercase, e.g. kol-momentum-v1)' },
     rationale: { type: 'string', description: 'why you think this strategy will be profitable, citing specific numbers from the data you saw' },
+    targets_migrated: { type: 'boolean', description: 'set true to target POST-MIGRATION mints (graduated to AMM, in 72h post-mig window). Default (false/undefined) = pre-migration mints only. Two different markets — pre-mig is the bonding-curve pump.fun game, post-mig is the AMM continuation game on PumpSwap/Raydium. Different features matter for each.' },
     entry: {
       type: 'object',
       description: 'conditions that must ALL be true for entry',
@@ -111,20 +112,93 @@ Critical rules:
 - Exits matter as much as entries — most pumps die fast. Plan for it.
 - You are running in PAPER MODE. No real money. Be ambitious.
 
+CALIBRATION WARNING:
+- The classifiers are systematically UNDER-CONFIDENT. When the model says "30% chance of peaking +30%", the real rate is often 60-80%. Look at the lift table in the context.
+- Set your entry thresholds based on the OBSERVED actual rate in that lift table, not face-value predicted probabilities.
+- A threshold of peaked_30 > 0.30 isn't "60% confident" — empirically it's "~80% real pump rate". Treat predictions as ranking signals, not honest probabilities.
+
+CULTURAL PULSE — meme economy fuel:
+- Your context now includes USER MANUAL FLAGS (highest priority — direct human observations), CULTURAL META SYNTHESIS (Claude-written summary every 4h of news/twitter/Trump posts/trends), TOP RECENT NEWS, and TRENDING SIGNALS (aggregated tickers from Reddit/CoinGecko/etc).
+- Memecoins ride cultural moments. A Trump post about crypto = pump.fun rallies in minutes. An AI-agent narrative = AI-themed mints catch fire. A celebrity drama = celebrity-themed coins run.
+- Your strategy proposals SHOULD reference current cultural context when relevant. If $TRUMP is active and a mint matches the meta, that's stronger than a "clean" mint with no theme connection.
+- Don't over-rotate to news — most pumps are still mechanical (KOL buys + ML signals). But news context adjusts your aggression and biases ticker matching.
+- Manual flags from the user are the SHARPEST signal — treat them as ground truth.
+
+MARKET REGIME — calibrate aggression to current state:
+- The MARKET REGIME section in your context labels current day as HOT/WARM/NORMAL/COOL/COLD vs the trailing 7-day median.
+- HOT regime = pump rates and migrations are running well above baseline → be more aggressive, looser thresholds, hunt the meta.
+- COLD regime = ecosystem is dead → tighten thresholds, smaller size, skip mediocre setups. A bad strategy in a cold regime is worse than the same strategy in a hot one.
+- This shifts your aggression DAY-TO-DAY independently of model probabilities. The same predictions mean different things on a 1.5x-pump day vs a 0.5x-pump day.
+
+CROSS-TARGET STACKING IS WHERE THE EDGE LIVES:
+- Single-target thresholds (e.g. just "peaked_30 ≥ 0.30") have moderate lift. STACKING multiple model outputs is where you find the real edge — especially with conditions that filter out conflicting signals.
+- Look at the CROSS-TARGET CORRELATIONS table. "ELITE+ALIVE" (migrated ≥ 0.30 AND will_die_fast < 0.30) typically has 5-10x higher migration rate than baseline.
+- Be wary of CONFLICTED signals — when peaked_30 high AND will_die_fast high, the models disagree and outcomes are usually worse than either signal alone. Fade.
+- A smart entry stacks 3-4 conditions: a high-target (mig or p300), a low-mortality filter (will_die_fast), a structural feature (tracked_buyers), and possibly a meta gate (mint intel verdict).
+
+TIME-OF-DAY MATTERS:
+- Pump rates vary 2x+ by hour. The hourly pump rate table in your context shows real lift across hours of day (UTC).
+- Asian daytime (08-11 UTC) typically has the highest pump rates; late US evening is the weakest. Use this — entry conditions can include 'created_hour_utc' to bias toward strong hours.
+- The current hour and day are highlighted. If we're in a weak hour, you may propose tighter thresholds (be picky); strong hours, you can be more aggressive on entries.
+- This is independent of ML probabilities — the model already uses hour as a feature, but you can stack additional time-window logic.
+
+PER-STRATEGY LIFT — separate entry quality from exit quality:
+- Your context now includes a PER-STRATEGY LIFT table showing what % of mints YOUR strategy actually picked correctly (peaked_30/100/300, migrated) vs the population baseline.
+- "ENTRIES caught" tells you if your selection logic is good — these are TRUE outcomes for the mints your conditions selected.
+- "EXITS captured" shows realized peak during your hold vs the TRUE peak — gap = money left on the table by exit logic.
+- Diagnose: if "ENTRIES caught" is high but realized PnL is low → your exits are bad, not your entries. Tweak SL/trailing/max_hold.
+- If "ENTRIES caught" is low (~baseline) → your entry conditions don't actually pick winners. Rethink the conditions, not the exits.
+
+KOL / TRACKED-WALLET SIGNAL — your strongest non-ML feature:
+- The bot tracks ~104 wallets with proven migrator-catching history (43 of them flagged as KOLs). When tracked wallets buy a mint, it's the loudest possible bullish signal.
+- The cohort lift table in your context shows: 3+ tracked buyers gives ~30x baseline migration rate. That's a brutal edge before you even apply ML.
+- Strongly consider stacking 'tracked_buyers >= 2' (or even >= 1) into your entry conditions. Combined with ML probability filters, this is your sharpest tool.
+- Watch BUNDLE_BUYERS too — heavy bundle activity (6+) is paid promo / coordinated launches, which counter-intuitively pump harder than mints with no bundling.
+
+CULTURAL SIGNAL (read the metadata):
+- Pump.fun is a MEME ECONOMY. Names, narratives, themes, and creator reputations matter as much as numbers. Recent winners share patterns — common keywords (current memes), description style (effort vs slop), social profiles (real Twitter/Telegram presence vs zero), creator history (proven mig'er vs first-timer).
+- The context now includes ACTUAL WINNERS (real ≥+100% pumpers), ACTUAL MIGRATORS, your INTEL VERDICT examples, and CURRENT TOP PICKS — read them. What naming patterns do you see? What themes are running? What's dying?
+- You can incorporate metadata into entries via the 'ml_mint_intel.verdict' field (set to "winner") — already populated by your hourly intel batch. Or extend with new conditions if you spot a specific pattern (e.g. "all winners have Twitter; require has_twitter=1").
+- Don't over-fit to specific names ("only enter $BONK clones") — look for STRUCTURAL patterns: did the creator have a track record? Is there a real description? Multiple socials?
+
 Return your strategy proposal as JSON conforming to the provided schema. Be decisive — this is one strategy, propose it.`;
 
-const RETIRE_SYSTEM_PROMPT = `You are evaluating one of your own active trading strategies. Decide whether to keep it running, modify it, or retire it.
+const RETIRE_SYSTEM_PROMPT = `You are evaluating one of your own active trading strategies. Decide whether to keep it running, MODIFY it (preferred when fixable), or retire it (when fundamentally broken).
 
-Look at the data: how many trades fired, win rate, realized PnL, recent performance vs initial expectations. Be honest with yourself.
+Three options:
+- "keep" — strategy is working or too early to judge, no changes
+- "modify" — strategy has fixable issues. Common fixes: stop_loss_pct too tight (bump 25→40), trailing arm too low, take_profit tiers too aggressive, entry threshold needs raising/lowering. PREFER MODIFY when the issue is parameters not the core thesis.
+- "retire" — the entry thesis itself is broken. Use this only when re-tuning parameters wouldn't help (e.g., the model's signal is contaminated, the recipe selects fundamentally bad mints).
 
-Return JSON: { "decision": "keep" | "retire", "reason": "...", "modifications": null | {...recipe-modifications...} }`;
+Look at the data: trade count, win rate, realized PnL, exit reason breakdown, per-strategy lift table. Be honest.
+
+When choosing "modify", list specific field_path changes:
+  field_path examples: "exit.stop_loss_pct", "exit.take_profit_tiers[0].trigger_pct",
+                        "exit.trailing_stop.trail_pct", "sizing.sol", "exit.max_hold_min",
+                        "entry.conditions[0].value", "entry.max_mint_age_sec"
+Each modification has a reason. Don't change everything at once — tweak 1-3 params with clear hypothesis.
+
+Return JSON conforming to the schema.`;
 
 const RETIRE_DECISION_SCHEMA = {
   type: 'object',
   required: ['decision', 'reason'],
   properties: {
-    decision: { type: 'string', enum: ['keep', 'retire'] },
+    decision: { type: 'string', enum: ['keep', 'retire', 'modify'], description: '"keep" if working, "retire" if broken beyond fixing, "modify" if a small tweak (SL/TP/threshold) would fix it without abandoning the strategy' },
     reason: { type: 'string' },
+    modifications: {
+      type: 'array',
+      description: 'When decision=modify, list the field paths and new values to apply',
+      items: {
+        type: 'object',
+        required: ['field_path', 'new_value', 'reason'],
+        properties: {
+          field_path: { type: 'string', description: 'dot path: "exit.stop_loss_pct" or "sizing.sol" or "entry.conditions[0].value"' },
+          new_value: { description: 'new value (number, string, or object)' },
+          reason: { type: 'string', description: 'one-line why' },
+        },
+      },
+    },
   },
 };
 

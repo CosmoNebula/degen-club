@@ -5,9 +5,10 @@ import { checkCopySignal } from '../scoring/traders.js';
 import { onSmartTrade, onCoinVelocity, onMigratorHunter } from '../trading/strategies.js';
 import { trackHunterBuy } from '../scoring/migrator-hunter.js';
 import { notifyTradeForMint } from '../trading/paper.js';
+import { evaluateMintNow } from '../ml/agent-executor.js';
 import { config } from '../config.js';
 import { checkCashbackFlag } from './helius.js';
-import { trackBuyer, checkPreKingProfile, markFired } from '../scoring/coin-velocity.js';
+import { trackBuyer, checkVelocityRunnerProfile, markFired } from '../scoring/coin-velocity.js';
 import { getIngestionPaused } from '../ml/disk-monitor.js';
 import { updateMigratorStatsForMint } from '../scoring/migrator-stats.js';
 
@@ -196,14 +197,24 @@ function onTrade(e) {
 
     const label = labelTrade({ wallet, creator: mint.creator_wallet, isSniper });
 
+    // Pump.fun tokens have fixed 1B supply. Post-migration the trade event
+    // stops carrying marketCapSol (bonding curve closed). Compute from price ×
+    // supply when missing — otherwise migrated mints show mcap=0 even though
+    // they're still trading on the AMM.
+    const PUMP_FUN_TOTAL_SUPPLY = 1_000_000_000;
+    let mcapSol = e.marketCapSol || 0;
+    if (mcapSol <= 0 && priceSol > 0) {
+      mcapSol = priceSol * PUMP_FUN_TOTAL_SUPPLY;
+    }
+
     s.insertTrade.run(
       e.signature || null, e.mint, wallet, isBuy, solAmount, tokenAmount, priceSol,
-      e.marketCapSol || 0, secondsFromCreation, isSniper, isFirstBlock, buyerRank, label, now
+      mcapSol, secondsFromCreation, isSniper, isFirstBlock, buyerRank, label, now
     );
 
     s.updateMintOnTrade.run(
-      e.marketCapSol || 0, priceSol || 0, e.vSolInBondingCurve || 0, e.vTokensInBondingCurve || 0,
-      now, e.marketCapSol || 0, e.mint
+      mcapSol, priceSol || 0, e.vSolInBondingCurve || 0, e.vTokensInBondingCurve || 0,
+      now, mcapSol, e.mint
     );
 
     if (isBuy) {
@@ -227,22 +238,50 @@ function onTrade(e) {
       try { trackBuyer(e.mint, wallet, now); } catch (err) { console.error('[velocity]', err.message); }
       try {
         const sig = trackHunterBuy(e.mint, wallet, now);
-        if (sig) onMigratorHunter(e.mint, sig);
+        if (sig) {
+          onMigratorHunter(e.mint, sig);
+          // EVENT: migrator-hunter fired (multi-hunter convergence)
+          evaluateMintNow(e.mint, 'migrator-hunter-signal').catch(() => {});
+        }
       } catch (err) { console.error('[migrator-hunter]', err.message); }
-      if (config.strategies?.preKing?.defaults?.enabled !== undefined) {
+      if (config.strategies?.velocityRunner?.defaults?.enabled !== undefined) {
         try {
-          const profile = checkPreKingProfile(e.mint, now);
+          const profile = checkVelocityRunnerProfile(e.mint, now);
           if (profile?.pass) {
             markFired(e.mint, now);
             onCoinVelocity(e.mint, profile.metrics);
+            // EVENT: velocity-runner detected on an AGED mint (>30min old).
+            // Velocity on fresh pump.fun mints is meaningless — every pump
+            // mint has velocity in its first minute. But sustained velocity
+            // 30+ min in is real signal that something's actually catching.
+            const ageSec = (now - mint.created_at) / 1000;
+            if (ageSec >= 1800) {
+              evaluateMintNow(e.mint, `velocity-runner-aged-${Math.round(ageSec/60)}min`).catch(() => {});
+            }
           }
-        } catch (err) { console.error('[preKing]', err.message); }
+        } catch (err) { console.error('[velocityRunner]', err.message); }
       }
     }
 
     if (isBuy && label === 'SMART') {
       try { checkCopySignal(e.mint); } catch (err) { console.error('[copy-signal]', err.message); }
       try { onSmartTrade({ wallet, is_buy: 1 }, mint); } catch (err) { console.error('[strategy]', err.message); }
+      // EVENT: tracked/SMART wallet just bought — strongest possible signal.
+      // Fire agent evaluation immediately, don't wait for the 60s sweep.
+      evaluateMintNow(e.mint, 'tracked-wallet-buy').catch(() => {});
+    }
+
+    // EVENT: whale buy (≥3 SOL in single trade) — real conviction. Retail
+    // routinely fires 0.5-1 SOL on pump.fun; 3+ SOL is whale territory.
+    if (isBuy && solAmount >= 3.0) {
+      evaluateMintNow(e.mint, `whale-buy-${solAmount.toFixed(2)}sol`).catch(() => {});
+    }
+
+    // EVENT: mcap crossing migration-approach zone (40-70 SOL window) — about
+    // to graduate. Fire eval to catch pre-migration runners.
+    const mcap = e.marketCapSol || 0;
+    if (isBuy && mcap >= 40 && mcap <= 70 && (mint.peak_market_cap_sol || 0) < mcap) {
+      evaluateMintNow(e.mint, `pre-migration-${mcap.toFixed(0)}sol`).catch(() => {});
     }
 
     try { notifyTradeForMint(e.mint); } catch (err) { console.error('[paper] trade-trigger', err.message); }

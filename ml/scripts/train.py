@@ -150,23 +150,42 @@ def train_one(X_train, y_train, X_val, y_val, target_name, args):
         print('[train] skipping — need ≥5 of each class')
         return None
 
+    # NO class_weight='balanced' — it distorts probabilities and isotonic can't
+    # fully correct it. With imbalanced data, let the model output its natural
+    # (low) probabilities and let calibration do the lifting.
     base = HistGradientBoostingClassifier(
         max_iter=args.iters,
         learning_rate=args.lr,
         max_depth=args.depth,
         l2_regularization=0.5,
-        class_weight='balanced',  # handles 1% positive rate
         random_state=0,
         early_stopping=True,
         n_iter_no_change=20,
     )
-    # Wrap in CalibratedClassifierCV so output probs are calibrated
-    # (HGB raw probs are well-calibrated already but isotonic scaling improves confidence)
-    cv = min(3, max(2, n_pos // 2))  # need ≥2 positives per fold
-    print(f'[train] training with {cv}-fold isotonic calibration...')
-    t = time.time()
-    model = CalibratedClassifierCV(base, method='isotonic', cv=cv)
-    model.fit(X_train, y_train)
+    # CHRONOLOGICAL calibration holdout — split off the latest 15% of training
+    # data, fit base on the rest, then fit isotonic calibration on the holdout.
+    # Using random CV folds calibrates on temporally-mixed data and produces
+    # systematic under/over-confidence on out-of-time inference. The
+    # most-recent slice is closest to the distribution we'll predict on.
+    holdout_pct = 0.15
+    cutoff = int(len(X_train) * (1 - holdout_pct))
+    X_inner, X_calib = X_train.iloc[:cutoff], X_train.iloc[cutoff:]
+    y_inner, y_calib = y_train.iloc[:cutoff], y_train.iloc[cutoff:]
+    n_pos_calib = int(y_calib.sum())
+    if n_pos_calib < 5:
+        # Not enough positives in the calibration holdout — fall back to CV
+        cv = min(3, max(2, n_pos // 2))
+        print(f'[train] only {n_pos_calib} positives in chronological holdout — falling back to {cv}-fold CV')
+        t = time.time()
+        model = CalibratedClassifierCV(base, method='isotonic', cv=cv)
+        model.fit(X_train, y_train)
+    else:
+        print(f'[train] chronological holdout: train={len(y_inner)} (pos={int(y_inner.sum())}) · calib={len(y_calib)} (pos={n_pos_calib})')
+        t = time.time()
+        base.fit(X_inner, y_inner)
+        from sklearn.frozen import FrozenEstimator
+        model = CalibratedClassifierCV(FrozenEstimator(base), method='isotonic')
+        model.fit(X_calib, y_calib)
     elapsed = time.time() - t
     print(f'[train] training time: {elapsed:.1f}s')
 
@@ -191,8 +210,10 @@ def train_one(X_train, y_train, X_val, y_val, target_name, args):
     # Feature importances (from base model — calibrated wrapper exposes them via .estimator_)
     fi = None
     try:
-        # Use HGB's .feature_importances_ via permutation-based on first calibrated model
-        base_fitted = model.calibrated_classifiers_[0].estimator
+        # Use HGB's .feature_importances_ via permutation on the underlying base.
+        # With FrozenEstimator path, the base is frozen but still accessible.
+        cc0 = model.calibrated_classifiers_[0]
+        base_fitted = getattr(cc0.estimator, 'estimator', cc0.estimator)
         from sklearn.inspection import permutation_importance
         # Use sample to keep it fast
         sample = min(500, len(X_val))
@@ -205,13 +226,19 @@ def train_one(X_train, y_train, X_val, y_val, target_name, args):
     except Exception as e:
         print(f'[train] feature importance unavailable: {e}')
 
+    # Brier on val set — apples-to-apples with the agent's calibration check
+    from sklearn.metrics import brier_score_loss
+    brier = float(brier_score_loss(y_val, y_val_prob))
+    print(f'  Brier score         : {brier:.4f}')
+
     return {
         'model': model,
         'metrics': {
             'auc_pr': auc_pr, 'auc_roc': auc_roc,
             'precision_top10': precision_at_top10,
             'baseline_rate': baseline_rate, 'lift': lift,
-            'confusion_matrix': cm, 'cv_folds': cv,
+            'brier': brier,
+            'confusion_matrix': cm,
         },
         'feature_importances': fi.to_dict() if fi is not None else None,
     }

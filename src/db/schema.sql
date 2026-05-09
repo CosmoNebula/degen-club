@@ -235,6 +235,9 @@ CREATE TABLE IF NOT EXISTS ml_agent_strategies (
   created_at INTEGER NOT NULL,
   retired_at INTEGER,
   retired_reason TEXT,
+  -- Lineage: which strategy this evolved from (NULL = first generation)
+  parent_strategy_id TEXT,
+  generation INTEGER DEFAULT 1,        -- 1 = original, 2 = first child, etc.
   -- Lifetime stats
   n_trades INTEGER DEFAULT 0,
   n_wins INTEGER DEFAULT 0,
@@ -242,8 +245,27 @@ CREATE TABLE IF NOT EXISTS ml_agent_strategies (
   realized_pnl_sol REAL DEFAULT 0,
   best_trade_pct REAL DEFAULT 0,
   worst_trade_pct REAL DEFAULT 0,
-  last_evaluated_at INTEGER
+  last_evaluated_at INTEGER,
+  FOREIGN KEY (parent_strategy_id) REFERENCES ml_agent_strategies(id)
 );
+-- idx_strategies_parent created in runMigrations (after column ensured)
+
+-- Modification history per strategy. Every in-place tweak (SL bumped, threshold
+-- adjusted, etc.) writes a row here so the agent + dashboard can show an audit
+-- trail. Lineage is for "where did this strategy come from"; modifications is
+-- for "how has this strategy evolved while running."
+CREATE TABLE IF NOT EXISTS ml_agent_strategy_modifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  field_path TEXT NOT NULL,            -- 'exit.stop_loss_pct' or 'sizing.sol' etc.
+  old_value TEXT,
+  new_value TEXT,
+  reason TEXT,                          -- agent's justification
+  source TEXT DEFAULT 'agent',         -- 'agent' | 'manual'
+  FOREIGN KEY (strategy_id) REFERENCES ml_agent_strategies(id)
+);
+CREATE INDEX IF NOT EXISTS idx_strat_mods_strategy ON ml_agent_strategy_modifications(strategy_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_strategies_status ON ml_agent_strategies(status);
 
 -- Full reasoning trail. Every introspection cycle, every consult, every
@@ -277,6 +299,147 @@ CREATE TABLE IF NOT EXISTS ml_agent_state (
 INSERT OR IGNORE INTO ml_agent_state (id, status, current_thought, updated_at)
 VALUES (1, 'observing', 'agent has not started yet', 0);
 
+-- Migration snapshots — captured the moment a mint graduates to AMM.
+-- Mirrors ml_mint_snapshots but for post-migration ML. Pre-mig features
+-- (proven graduator?) + initial AMM state. Labels resolve after 24-72h:
+-- did it 2x post-mig? hit $1M mcap? rug? still alive?
+--
+-- This is the second ML domain — we already train on pre-migration outcomes
+-- (peaked_30/100/300, will_die_fast). Post-migration is a NEW game with its
+-- own dynamics, deserves its own models.
+-- Migration snapshots — multi-age time series of a mint's day post-migration.
+-- Mirrors ml_mint_snapshots's age-based design but for post-migration tracking.
+-- Each (mint, age) row captures features AT that age; labels resolve once
+-- the 24h horizon has passed and live on the age=0 anchor row.
+--
+-- Snapshot ages (minutes post-migration):
+--   0     = at migration moment (pre-mig features + initial AMM state)
+--   30    = first 30 min — early dump or breakout window
+--   60    = first hour — establishing trend
+--   360   = 6 hours — momentum confirmation
+--   720   = 12 hours — sustained interest
+--   1440  = 24 hours — final outcome
+CREATE TABLE IF NOT EXISTS ml_migration_snapshots (
+  mint_address TEXT NOT NULL,
+  snapshot_age_min INTEGER NOT NULL,    -- 0, 30, 60, 360, 720, 1440
+  migrated_at INTEGER NOT NULL,
+  snapshot_ts INTEGER NOT NULL,          -- when this row was captured
+  -- === FEATURES AT THIS AGE ===
+  -- Common across all ages
+  current_mcap_sol REAL,
+  current_price_sol REAL,
+  liquidity_usd REAL,
+  amm_volume_h1_usd REAL,
+  amm_volume_h24_usd REAL,
+  amm_buys_h24 INTEGER,
+  amm_sells_h24 INTEGER,
+  amm_price_change_h1 REAL,
+  amm_price_change_h24 REAL,
+  -- Window-relative: trades in this snapshot's window (since prev snapshot)
+  window_buys INTEGER,
+  window_sells INTEGER,
+  window_unique_buyers INTEGER,
+  window_tracked_buyers INTEGER,
+  window_kol_buyers INTEGER,
+  -- Cumulative since migration
+  pct_from_migration REAL,               -- (current - mig_anchor) / mig_anchor
+  peak_pct_so_far REAL,                  -- best % seen so far
+  -- === AGE=0 SNAPSHOT ONLY: pre-mig features + initial state ===
+  pre_mig_age_min REAL,
+  pre_mig_peak_mcap_sol REAL,
+  pre_mig_unique_buyers INTEGER,
+  pre_mig_trade_count INTEGER,
+  pre_mig_buy_count INTEGER,
+  pre_mig_sell_count INTEGER,
+  pre_mig_buy_sell_ratio REAL,
+  pre_mig_tracked_buyers INTEGER,
+  pre_mig_kol_buyers INTEGER,
+  pre_mig_bundle_buyers INTEGER,
+  pre_mig_volatility_pct REAL,
+  pre_mig_sandwich_risk REAL,
+  pre_mig_creator_launches INTEGER,
+  pre_mig_creator_migrations INTEGER,
+  has_twitter INTEGER,
+  has_telegram INTEGER,
+  has_website INTEGER,
+  name_length INTEGER,
+  symbol_length INTEGER,
+  migration_hour_utc INTEGER,
+  migration_dow INTEGER,
+  amm_initial_liquidity_usd REAL,
+  amm_dex TEXT,
+  amm_pool_address TEXT,
+  pre_mig_intel_verdict TEXT,
+  -- === LABELS — resolved at 24h+, stored on ALL age rows for easy joins ===
+  post_mig_peak_mcap_sol REAL,
+  post_mig_peak_pct REAL,
+  post_mig_hits_2x INTEGER,
+  post_mig_hits_5x INTEGER,
+  post_mig_hits_10x INTEGER,
+  post_mig_hits_1m_usd INTEGER,
+  post_mig_rugs_1h INTEGER,
+  post_mig_alive_24h INTEGER,
+  post_mig_alive_72h INTEGER,
+  post_mig_volume_24h_usd REAL,
+  post_mig_max_liquidity_usd REAL,
+  labels_resolved_at INTEGER,
+  PRIMARY KEY (mint_address, snapshot_age_min)
+);
+CREATE INDEX IF NOT EXISTS idx_migsnap_migrated ON ml_migration_snapshots(migrated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_migsnap_unresolved ON ml_migration_snapshots(labels_resolved_at) WHERE labels_resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_migsnap_age ON ml_migration_snapshots(snapshot_age_min);
+
+-- Anomaly detector. Rolling-window comparisons to baseline. When something
+-- unusual happens (mint volume spike, tracked-cohort cluster, dormant creator
+-- waking, theme cluster spawning), surface it for the agent's context.
+CREATE TABLE IF NOT EXISTS anomalies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  kind TEXT NOT NULL,                  -- 'mint_volume_spike' | 'tracked_cohort' | 'dormant_creator' | 'theme_cluster' | 'bundle_reactivation'
+  severity TEXT,                        -- 'info' | 'watch' | 'high'
+  subject TEXT,                         -- mint/wallet/theme/etc.
+  description TEXT,
+  data_json TEXT,                       -- full event payload
+  expires_at INTEGER                    -- when to drop from "active" view
+);
+CREATE INDEX IF NOT EXISTS idx_anomalies_ts ON anomalies(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_anomalies_active ON anomalies(expires_at, kind);
+
+-- Daily intelligence condensate. Before pruning bulky raw tables (trades,
+-- predictions), nightly job rolls up the meaningful aggregates here. This is
+-- the agent's long-term memory — what was the state of the world on day X.
+CREATE TABLE IF NOT EXISTS daily_intelligence (
+  date_key TEXT PRIMARY KEY,           -- YYYY-MM-DD (local)
+  ts INTEGER NOT NULL,                  -- when condensate was computed
+  mints_created INTEGER,
+  mints_migrated INTEGER,
+  trades_total INTEGER,
+  unique_traders INTEGER,
+  -- Outcome rates from labeled snapshots (the population's day)
+  pop_peaked_30_rate REAL,
+  pop_peaked_100_rate REAL,
+  pop_peaked_300_rate REAL,
+  pop_migration_rate REAL,
+  pop_avg_peak_pct REAL,
+  -- Tracked-wallet activity
+  tracked_wallet_buys INTEGER,
+  kol_buys INTEGER,
+  -- Per-strategy daily PnL (JSON map: { strategy_id: pnl_sol })
+  per_strategy_pnl_json TEXT,
+  -- Top winners that day (JSON array of {mint, name, peak_pct})
+  top_winners_json TEXT,
+  -- Top tickers/themes from news + reddit aggregated
+  top_themes_json TEXT,
+  -- Model snapshot — current AUC/Brier per target at end of day
+  model_metrics_json TEXT,
+  -- Cultural meta if synthesis ran that day
+  cultural_summary TEXT,
+  -- Trump posts count (high-impact signal)
+  trump_post_count INTEGER,
+  notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_daily_intel_ts ON daily_intelligence(ts DESC);
+
 -- Shared Claude consult rate limiter. Every subsystem (agent introspection,
 -- post-mortem, daily report, calibration review, mint intel) checks this
 -- before firing a Claude call. Hard caps per subsystem per day prevent runaway
@@ -287,6 +450,56 @@ CREATE TABLE IF NOT EXISTS ml_agent_rate_limit (
   count INTEGER DEFAULT 0,
   PRIMARY KEY (date_key, subsystem)
 );
+
+-- News + cultural pulse ingestion. Multiple sources (RSS, Reddit, CoinGecko
+-- trending, Truth Social, etc.) feed into news_items + trend_signals. The
+-- agent reads aggregates from these for its "current cultural moment" view.
+CREATE TABLE IF NOT EXISTS news_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,        -- 'rss:CoinDesk' | 'rss:NYT' | 'reddit:r/solana' | etc.
+  title TEXT,
+  url TEXT UNIQUE,
+  summary TEXT,
+  ts INTEGER NOT NULL,         -- when published (or fetched)
+  relevance_score REAL,
+  keywords TEXT                -- JSON array of matched keywords
+);
+CREATE INDEX IF NOT EXISTS idx_news_ts ON news_items(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_news_source ON news_items(source);
+
+-- Trend signals: trending tickers, search keywords, hot mentions
+CREATE TABLE IF NOT EXISTS trend_signals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,        -- 'coingecko-trending' | 'dexscreener-trending' | 'reddit-mentions' | 'lunarcrush' | etc.
+  keyword TEXT NOT NULL,       -- ticker, hashtag, or phrase
+  score REAL,                  -- source-specific score (rank, mentions, etc.)
+  metadata_json TEXT,          -- extra source-specific data
+  ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trend_ts ON trend_signals(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_trend_source ON trend_signals(source);
+
+-- Manual user flags — quick "watching today" overrides
+CREATE TABLE IF NOT EXISTS manual_flags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  flag TEXT NOT NULL,
+  note TEXT,
+  active INTEGER DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER           -- nullable; if set, auto-deactivates
+);
+CREATE INDEX IF NOT EXISTS idx_flags_active ON manual_flags(active, created_at DESC);
+
+-- Daily/4-hourly synthesis: Claude reads ALL news + trends + flags and writes
+-- a "current meta" summary. Agent reads the latest one in its context.
+CREATE TABLE IF NOT EXISTS agent_meta_synthesis (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  summary TEXT,
+  raw_context TEXT,            -- the full input we gave Claude (for audit)
+  cost_estimate_usd REAL
+);
+CREATE INDEX IF NOT EXISTS idx_synthesis_ts ON agent_meta_synthesis(ts DESC);
 
 -- Mint metadata intel — agent's per-mint scam/winner verdicts. Populated by
 -- the hourly batch in agent-mint-intel.js. Combined heuristic + Claude review.

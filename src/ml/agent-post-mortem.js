@@ -10,8 +10,8 @@ import { db } from '../db/index.js';
 import { freeformThought } from './agent-llm.js';
 import { canConsult, recordConsult } from './agent-rate-limit.js';
 
-const TICK_INTERVAL_MS = 60 * 60 * 1000;        // check hourly
-const BATCH_WINDOW_MS = 6 * 60 * 60 * 1000;     // 6h batch window
+const TICK_INTERVAL_MS = 30 * 60 * 1000;        // check every 30min
+const BATCH_WINDOW_MS = 3 * 60 * 60 * 1000;     // 3h batch window — faster iteration
 const MIN_TRADES_FOR_BATCH = 3;                 // skip if too few trades to find patterns
 const FIRST_RUN_DELAY_MS = 30 * 60 * 1000;      // 30min after boot
 const STATE_KEY = 'agent_postmortem_last_batch_at';
@@ -163,5 +163,7 @@ async function tick() {
 export function startPostMortem() {
   setTimeout(tick, FIRST_RUN_DELAY_MS);
   setInterval(tick, TICK_INTERVAL_MS);
-  console.log('[post-mortem] batch watcher started · checks hourly, batches every ~6h');
+  const tickMin = TICK_INTERVAL_MS / 60000;
+  const batchHr = BATCH_WINDOW_MS / 3600000;
+  console.log(`[post-mortem] batch watcher started · checks every ${tickMin}min, batches every ~${batchHr}h`);
 }

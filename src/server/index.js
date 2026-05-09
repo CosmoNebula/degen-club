@@ -916,7 +916,7 @@ export function startServer(getIngestionStatus) {
         WHERE mint_address = ? AND timestamp >= ? AND price_sol > 0
         ORDER BY timestamp ASC LIMIT 1
       `);
-      const findKingExit = d.prepare(`
+      const findSignalWalletExit = d.prepare(`
         SELECT MAX(price_sol) AS best_sell_price, MAX(timestamp) AS last_sell_at,
                COUNT(*) AS sell_count, SUM(sol_amount) AS total_sold
         FROM trades
@@ -937,18 +937,18 @@ export function startServer(getIngestionStatus) {
 
         let trackedWallet = null;
         try { trackedWallet = JSON.parse(p.entry_signal || '{}').wallet || null; } catch {}
-        let kingComparison = null;
+        let signalWalletComparison = null;
         if (trackedWallet) {
-          const k = findKingExit.get(p.mint_address, trackedWallet, p.entered_at);
+          const k = findSignalWalletExit.get(p.mint_address, trackedWallet, p.entered_at);
           if (k && k.sell_count > 0) {
-            const kingExitProceeds = Math.max(0, liveTokens * (k.best_sell_price || 0) * (1 - slip) * (1 - fee) - priority);
-            kingComparison = {
+            const signalWalletExitProceeds = Math.max(0, liveTokens * (k.best_sell_price || 0) * (1 - slip) * (1 - fee) - priority);
+            signalWalletComparison = {
               wallet: trackedWallet,
               their_best_sell_price: k.best_sell_price,
               their_last_sell_at: k.last_sell_at,
               their_sell_count: k.sell_count,
               their_total_sold_sol: k.total_sold,
-              if_we_matched_their_top_pnl: kingExitProceeds - p.entry_sol,
+              if_we_matched_their_top_pnl: signalWalletExitProceeds - p.entry_sol,
               we_exited_first_by_ms: k.last_sell_at ? k.last_sell_at - p.exited_at : null,
             };
           }
@@ -977,7 +977,7 @@ export function startServer(getIngestionStatus) {
           paper_exit_price: p.exit_price,
           buy_price_drift_pct: buyDriftPct,
           sell_price_drift_pct: sellDriftPct,
-          king_comparison: kingComparison,
+          signal_wallet_comparison: signalWalletComparison,
         };
       });
 
@@ -986,19 +986,19 @@ export function startServer(getIngestionStatus) {
         const s = byStrat[t.strategy] || (byStrat[t.strategy] = {
           n: 0, paper_net: 0, live_net: 0,
           paper_wins: 0, live_wins: 0,
-          we_beat_king: 0, king_beat_us: 0, king_pairs: 0,
-          king_first_pnl_total: 0,
+          we_beat_signal: 0, signal_beat_us: 0, signal_pairs: 0,
+          signal_first_pnl_total: 0,
         });
         s.n++;
         s.paper_net += t.paper_pnl;
         s.live_net += t.live_sim_pnl;
         if (t.paper_pnl > 0) s.paper_wins++;
         if (t.live_sim_pnl > 0) s.live_wins++;
-        if (t.king_comparison) {
-          s.king_pairs++;
-          s.king_first_pnl_total += t.king_comparison.if_we_matched_their_top_pnl;
-          if (t.live_sim_pnl > t.king_comparison.if_we_matched_their_top_pnl) s.we_beat_king++;
-          else s.king_beat_us++;
+        if (t.signal_wallet_comparison) {
+          s.signal_pairs++;
+          s.signal_first_pnl_total += t.signal_wallet_comparison.if_we_matched_their_top_pnl;
+          if (t.live_sim_pnl > t.signal_wallet_comparison.if_we_matched_their_top_pnl) s.we_beat_signal++;
+          else s.signal_beat_us++;
         }
       }
       const summary = Object.entries(byStrat).map(([strategy, s]) => ({
@@ -1010,10 +1010,10 @@ export function startServer(getIngestionStatus) {
         live_net_sol: s.live_net,
         slippage_cost_sol: s.live_net - s.paper_net,
         avg_slippage_per_trade_sol: (s.live_net - s.paper_net) / s.n,
-        king_pairs: s.king_pairs,
-        we_beat_their_top_n: s.we_beat_king,
-        their_top_beat_us_n: s.king_beat_us,
-        avg_potential_per_trade_if_perfect_king_top: s.king_pairs > 0 ? s.king_first_pnl_total / s.king_pairs : null,
+        signal_pairs: s.signal_pairs,
+        we_beat_their_top_n: s.we_beat_signal,
+        their_top_beat_us_n: s.signal_beat_us,
+        avg_potential_per_trade_if_perfect_signal_top: s.signal_pairs > 0 ? s.signal_first_pnl_total / s.signal_pairs : null,
       }));
 
       res.json({
@@ -1120,7 +1120,7 @@ export function startServer(getIngestionStatus) {
 
   app.post('/api/strategies/builder/create', (req, res) => {
     try {
-      const { name, label, description, trigger, sourceFilter, mcCeiling, mcFloor, defaults, kingWallets, kingSellExitThreshold } = req.body || {};
+      const { name, label, description, trigger, sourceFilter, mcCeiling, mcFloor, defaults, trustedWallets, signalSellExitThreshold } = req.body || {};
       if (!name || !/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) {
         return res.status(400).json({ error: 'name must be camelCase identifier' });
       }
@@ -1130,8 +1130,8 @@ export function startServer(getIngestionStatus) {
       if (sourceFilter) cfg.sourceFilter = sourceFilter;
       if (typeof mcCeiling === 'number') cfg.mcCeiling = mcCeiling;
       if (typeof mcFloor === 'number') cfg.mcFloor = mcFloor;
-      if (Array.isArray(kingWallets) && kingWallets.length) cfg.kingWallets = kingWallets;
-      if (typeof kingSellExitThreshold === 'number') cfg.kingSellExitThreshold = kingSellExitThreshold;
+      if (Array.isArray(trustedWallets) && trustedWallets.length) cfg.trustedWallets = trustedWallets;
+      if (typeof signalSellExitThreshold === 'number') cfg.signalSellExitThreshold = signalSellExitThreshold;
       cfg.defaults = defaults || {};
       const body = `// User-built strategy — generated via Strategy Builder UI\nexport default ${JSON.stringify({ name, config: cfg }, null, 2)};\n`;
       fs.writeFileSync(file, body);
@@ -1144,13 +1144,13 @@ export function startServer(getIngestionStatus) {
       const name = req.params.name;
       const file = path.join(config.publicDir, '..', 'src', 'strategies', `${name}.js`);
       if (!fs.existsSync(file)) return res.status(404).json({ error: `${name} not found` });
-      const { label, description, trigger, sourceFilter, mcCeiling, mcFloor, defaults, kingWallets, kingSellExitThreshold } = req.body || {};
+      const { label, description, trigger, sourceFilter, mcCeiling, mcFloor, defaults, trustedWallets, signalSellExitThreshold } = req.body || {};
       const cfg = { label: label || name, description: description || '', trigger: trigger || 'smart_trade' };
       if (sourceFilter) cfg.sourceFilter = sourceFilter;
       if (typeof mcCeiling === 'number') cfg.mcCeiling = mcCeiling;
       if (typeof mcFloor === 'number') cfg.mcFloor = mcFloor;
-      if (Array.isArray(kingWallets) && kingWallets.length) cfg.kingWallets = kingWallets;
-      if (typeof kingSellExitThreshold === 'number') cfg.kingSellExitThreshold = kingSellExitThreshold;
+      if (Array.isArray(trustedWallets) && trustedWallets.length) cfg.trustedWallets = trustedWallets;
+      if (typeof signalSellExitThreshold === 'number') cfg.signalSellExitThreshold = signalSellExitThreshold;
       cfg.defaults = defaults || {};
       const body = `// User-built strategy — generated via Strategy Builder UI\nexport default ${JSON.stringify({ name, config: cfg }, null, 2)};\n`;
       fs.writeFileSync(file, body);
@@ -1179,7 +1179,7 @@ export function startServer(getIngestionStatus) {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  app.get('/api/preking/stats', async (req, res) => {
+  app.get('/api/velocity-runner/stats', async (req, res) => {
     try {
       const cv = await import('../scoring/coin-velocity.js');
       const stats = cv.getProfileStats();
@@ -1197,7 +1197,7 @@ export function startServer(getIngestionStatus) {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
-  app.post('/api/preking/stats/reset', async (req, res) => {
+  app.post('/api/velocity-runner/stats/reset', async (req, res) => {
     try {
       const cv = await import('../scoring/coin-velocity.js');
       cv.resetProfileStats();
@@ -1317,6 +1317,57 @@ export function startServer(getIngestionStatus) {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
+  // Lift profile — for each classification target, show how predicted-prob
+  // deciles map to actual outcome rates. Reveals model's discrimination
+  // (does it rank winners higher than losers) separately from calibration
+  // (are the absolute probabilities honest).
+  app.get('/api/ml/lift-profile', async (req, res) => {
+    try {
+      const TARGETS = ['peaked_30', 'peaked_100', 'peaked_300', 'migrated', 'will_die_fast'];
+      const out = {};
+      for (const target of TARGETS) {
+        const rows = db().prepare(`
+          SELECT p.prob, MAX(s.${target}) AS actual
+          FROM ml_predictions p
+          JOIN ml_mint_snapshots s ON s.mint_address = p.mint_address
+          WHERE p.prob IS NOT NULL AND p.target = ?
+            AND s.labels_resolved_at IS NOT NULL AND s.${target} IS NOT NULL
+          GROUP BY p.id
+        `).all(target);
+        if (rows.length === 0) { out[target] = { n: 0, deciles: [], baseline: null, lift_at_30: null }; continue; }
+        const baseline = rows.reduce((a, r) => a + (r.actual || 0), 0) / rows.length;
+        // decile buckets
+        const buckets = Array.from({ length: 10 }, (_, i) => ({
+          low: i * 0.1, high: (i + 1) * 0.1, n: 0, n_pos: 0, sum_prob: 0,
+        }));
+        for (const r of rows) {
+          const idx = Math.min(9, Math.floor((r.prob || 0) * 10));
+          buckets[idx].n++;
+          buckets[idx].sum_prob += r.prob;
+          if (r.actual === 1) buckets[idx].n_pos++;
+        }
+        const deciles = buckets.map(b => ({
+          low: b.low, high: b.high, n: b.n,
+          predicted: b.n > 0 ? b.sum_prob / b.n : null,
+          actual: b.n > 0 ? b.n_pos / b.n : null,
+          lift: b.n > 0 && baseline > 0 ? (b.n_pos / b.n) / baseline : null,
+        }));
+        // Also surface the headline number: top-30%-prob actual rate vs baseline
+        const top = rows.filter(r => r.prob > 0.30);
+        const topRate = top.length > 0 ? top.reduce((a, r) => a + (r.actual || 0), 0) / top.length : null;
+        out[target] = {
+          n: rows.length,
+          baseline,
+          top30_n: top.length,
+          top30_rate: topRate,
+          top30_lift: topRate != null && baseline > 0 ? topRate / baseline : null,
+          deciles,
+        };
+      }
+      res.json(out);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
   // Live progress for the dashboard's retrain bar.
   app.get('/api/ml/retrain-status', async (req, res) => {
     try {
@@ -1325,7 +1376,63 @@ export function startServer(getIngestionStatus) {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
+  // === Manual flags (cultural pulse override) ===
+  app.get('/api/flags', (req, res) => {
+    try {
+      const rows = db().prepare(`SELECT id, flag, note, active, created_at, expires_at
+         FROM manual_flags ORDER BY created_at DESC LIMIT 50`).all();
+      res.json({ flags: rows });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+  app.post('/api/flags', (req, res) => {
+    try {
+      const { flag, note, expires_in_hours } = req.body || {};
+      if (!flag || flag.length < 2) return res.status(400).json({ error: 'flag required' });
+      const expiresAt = expires_in_hours ? Date.now() + (expires_in_hours * 3600000) : null;
+      db().prepare(`INSERT INTO manual_flags (flag, note, active, created_at, expires_at) VALUES (?, ?, 1, ?, ?)`)
+         .run(flag.slice(0, 200), note?.slice(0, 500) || null, Date.now(), expiresAt);
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+  app.post('/api/flags/:id/deactivate', (req, res) => {
+    try {
+      db().prepare(`UPDATE manual_flags SET active=0 WHERE id=?`).run(req.params.id);
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // News + meta synthesis read endpoints (for dashboard panel)
+  app.get('/api/news/recent', (req, res) => {
+    try {
+      const rows = db().prepare(`SELECT source, title, url, ts, relevance_score
+         FROM news_items WHERE ts > strftime('%s','now')*1000 - 86400000
+         ORDER BY relevance_score DESC, ts DESC LIMIT 50`).all();
+      res.json({ items: rows });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+  app.get('/api/news/synthesis', (req, res) => {
+    try {
+      const row = db().prepare(`SELECT ts, summary FROM agent_meta_synthesis ORDER BY ts DESC LIMIT 1`).get();
+      res.json(row || { ts: null, summary: null });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
   // === ML Agent endpoints ===
+  // Retired strategy archive — for the dashboard's "graveyard" view. Decluttered
+  // from the main strategies grid, kept here for post-mortem and agent learning.
+  app.get('/api/ml/agent/archive', async (req, res) => {
+    try {
+      const rows = db().prepare(`
+        SELECT id, name, rationale, status, retired_at, retired_reason,
+               n_trades, ROUND(realized_pnl_sol, 4) AS pnl, created_at
+        FROM ml_agent_strategies
+        WHERE status = 'retired'
+        ORDER BY retired_at DESC LIMIT 50
+      `).all();
+      res.json({ archived: rows });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
   app.get('/api/ml/agent/state', async (req, res) => {
     try {
       const { getAgentSummary } = await import('../ml/agent.js');

@@ -58,8 +58,8 @@ export function getMintMetrics(mintAddress) {
   return m;
 }
 
-export function checkPreKingProfile(mintAddress, now) {
-  const cfg = config.strategies?.preKing;
+export function checkVelocityRunnerProfile(mintAddress, now) {
+  const cfg = config.strategies?.velocityRunner;
   if (!cfg) return null;
   _evalCount++;
 

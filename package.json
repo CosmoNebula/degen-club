@@ -19,6 +19,7 @@
     "express": "^4.21.0",
     "jito-ts": "^4.2.1",
     "pumpdotfun-sdk": "^1.4.2",
+    "rss-parser": "^3.13.0",
     "ws": "^8.18.0"
   },
   "engines": {

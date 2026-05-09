@@ -25,9 +25,17 @@ function S() {
   const d = db();
   stmts = {
     liveStrategies: d.prepare(`SELECT * FROM ml_agent_strategies WHERE status = 'live' ORDER BY created_at`),
+    // Pre-migration candidates (the original pool — fresh bonding-curve mints)
     candidates: d.prepare(`SELECT mint_address, last_trade_at, created_at FROM mints
        WHERE migrated = 0 AND rugged = 0 AND last_trade_at > ?
        ORDER BY last_trade_at DESC LIMIT ?`),
+    // Post-migration candidates — fresh migrators with active AMM volume.
+    // Strategies opt-in via the recipe's 'targets_migrated' flag (default false).
+    migratedCandidates: d.prepare(`SELECT mint_address, migrated_at, amm_liquidity_usd, amm_volume_h24_usd, current_market_cap_sol
+       FROM mints WHERE migrated = 1 AND rugged = 0
+         AND migrated_at > strftime('%s','now')*1000 - 72 * 3600000
+         AND amm_liquidity_usd > 1000
+       ORDER BY amm_volume_h24_usd DESC LIMIT ?`),
     recentEntry: d.prepare(`SELECT id FROM paper_positions
        WHERE strategy = ? AND mint_address = ? AND entered_at > ?
        LIMIT 1`),
@@ -114,6 +122,11 @@ function computeEntrySol(recipe, preds) {
 
 // Translate the recipe's exit block to a strategy_state row so the existing
 // position monitor can apply familiar SL/TP/trailing logic.
+//
+// CRITICAL UNIT CONVENTION: the position monitor compares trigger/SL fields
+// against `peakPctRaw` which is a FRACTION (0.30 = +30%). The agent's recipe
+// uses PERCENTAGES (30 means +30%). We divide by 100 here so the monitor
+// reads fractions like the rest of the code expects.
 function syncStrategyStateRow(strategyId, recipe) {
   const exit = recipe.exit || {};
   const sizing = recipe.sizing || {};
@@ -122,20 +135,29 @@ function syncStrategyStateRow(strategyId, recipe) {
   const t2 = tiers[1] || {};
   const t3 = tiers[2] || {};
   const trail = exit.trailing_stop || {};
-  // If a trailing stop is defined and we have a tier3, encode the trail there
-  // (the monitor uses tier3_trail_pct to mean "after T3 hits, trail by this %").
-  const tier3Trail = trail.trail_pct || 0;
+  // sl_pct in the monitor is checked as `peakPctRaw <= strat.sl_pct`. Since
+  // peakPctRaw is negative on losses, sl_pct must be NEGATIVE fraction.
+  // Recipe says `stop_loss_pct: 25` meaning -25% loss → store as -0.25.
+  const slFraction = -Math.abs(exit.stop_loss_pct || 25) / 100;
+  // tier_trigger_pct: positive fraction (recipe 30 → 0.30)
+  const t1Trig = (t1.trigger_pct ?? 30) / 100;
+  const t1Sell = (t1.sell_pct ?? 30) / 100;
+  const t2Trig = (t2.trigger_pct ?? 100) / 100;
+  const t2Sell = (t2.sell_pct ?? 50) / 100;
+  const t3Trig = (t3.trigger_pct ?? (trail.arm_pct ?? 200)) / 100;
+  const t3Sell = (t3.sell_pct ?? 100) / 100;
+  const tier3Trail = (trail.trail_pct || 0) / 100;
   S().upsertStrategyState.run(
     strategyId,
     `🤖 ${recipe.name || strategyId}`,
     (recipe.rationale || '').slice(0, 240),
     1,                                 // enabled — lives in strategy_state but we evaluate entries ourselves
     sizing.sol || 0.13,
-    exit.stop_loss_pct || 25,
+    slFraction,
     exit.max_hold_min || 60,
-    t1.trigger_pct || 30, t1.sell_pct || 30,
-    t2.trigger_pct || 100, t2.sell_pct || 50,
-    t3.trigger_pct || (trail.arm_pct || 200), t3.sell_pct || 100,
+    t1Trig, t1Sell,
+    t2Trig, t2Sell,
+    t3Trig, t3Sell,
     tier3Trail,
     exit.breakeven_after_tier1 ? 1 : 0,
     Date.now(),
@@ -211,10 +233,16 @@ async function tick() {
     })).filter(s => s.recipe);
     if (strategies.length === 0) return;
     const recentTradeCutoff = Date.now() - 10 * 60 * 1000;
-    const cands = S().candidates.all(recentTradeCutoff, MAX_CANDIDATES);
-    if (cands.length === 0) return;
+    const preMigCands = S().candidates.all(recentTradeCutoff, MAX_CANDIDATES);
     let entered = 0;
     for (const strat of strategies) {
+      // Choose candidate pool based on the recipe's targets_migrated flag.
+      // Default = pre-migration only (existing behavior). Set true to target
+      // migrated mints in their 72h post-migration window.
+      const targetsMig = strat.recipe?.targets_migrated === true;
+      const cands = targetsMig
+        ? S().migratedCandidates.all(MAX_CANDIDATES).map(c => ({ mint_address: c.mint_address }))
+        : preMigCands;
       for (const m of cands) {
         try {
           const fired = await evaluateOneMint(strat, m.mint_address);
@@ -225,6 +253,46 @@ async function tick() {
     }
     if (entered > 0) console.log(`[agent-exec] tick · entered ${entered} positions across ${strategies.length} strategies`);
   } finally { _running = false; }
+}
+
+// Per-mint debounce — don't re-evaluate the same mint more than once per N seconds
+// from event triggers. Prevents fanning out across 50 trade events on a hot mint.
+const _evalDebounce = new Map();
+const EVAL_DEBOUNCE_MS = 8 * 1000;
+
+// Public: event-driven evaluator. Runs all live strategies against a mint
+// IMMEDIATELY when an interesting event happens (tracked buy, whale buy,
+// migration-eligible threshold, etc.). Bypasses the 60s polling sweep.
+//
+// Returns a promise but caller can fire-and-forget. Internally throttled
+// per-mint so a flood of trade events doesn't trigger 50 evals.
+export async function evaluateMintNow(mintAddress, reason) {
+  if (!mintAddress) return;
+  if (_running) return;  // skip if main sweep is in flight
+  if (!isHealthy()) return;
+  const last = _evalDebounce.get(mintAddress) || 0;
+  const now = Date.now();
+  if (now - last < EVAL_DEBOUNCE_MS) return;
+  _evalDebounce.set(mintAddress, now);
+  // Periodic GC
+  if (_evalDebounce.size > 1000) {
+    for (const [k, v] of _evalDebounce) if (now - v > 10 * 60 * 1000) _evalDebounce.delete(k);
+  }
+  try {
+    const strategies = S().liveStrategies.all().map(r => ({
+      ...r,
+      recipe: (() => { try { return JSON.parse(r.recipe_json); } catch { return null; } })(),
+    })).filter(x => x.recipe);
+    if (strategies.length === 0) return;
+    for (const strat of strategies) {
+      try {
+        const fired = await evaluateOneMint(strat, mintAddress);
+        if (fired) {
+          console.log(`[agent-exec] event-driven entry · ${reason} · ${mintAddress.slice(0, 8)}… · ${strat.id.slice(0, 60)}`);
+        }
+      } catch (err) { /* swallow per-strategy errors */ }
+    }
+  } catch (err) { console.error('[agent-exec] eval-now err:', err.message); }
 }
 
 // Public: install/refresh the strategy_state row when a new strategy is born

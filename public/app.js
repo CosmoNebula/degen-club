@@ -2485,7 +2485,7 @@ setInterval(refreshDbStats, 30000);
   }
 
   function clearForm() {
-    ['b-name','b-label','b-description','b-whitelist','b-categories','b-cat-under-mc','b-mc-floor','b-mc-ceiling','b-king-wallets'].forEach(id => setVal(id, ''));
+    ['b-name','b-label','b-description','b-whitelist','b-categories','b-cat-under-mc','b-mc-floor','b-mc-ceiling','b-trusted-wallets'].forEach(id => setVal(id, ''));
     setVal('b-trigger', 'smart_trade'); setVal('b-enabled', '0'); setVal('b-require-kol', '0');
     setVal('b-entry-sol', 0.13); setVal('b-max-hold', 30); setVal('b-sl-pct', -0.10);
     setVal('b-t1-trig', 0.20); setVal('b-t1-sell', 1.00);
@@ -2500,7 +2500,7 @@ setInterval(refreshDbStats, 30000);
     setVal('b-fp-sec', 0); setVal('b-fp-peak', 0); setVal('b-fp-sl', 0);
     setVal('b-flat-min', 0); setVal('b-flat-peak', 0); setVal('b-flat-band', 0);
     setVal('b-stag-min', 0); setVal('b-stag-loss', 0); setVal('b-cashback', 1.0);
-    setVal('b-king-sell-thresh', 0.5);
+    setVal('b-trusted-sell-thresh', 0.5);
   }
 
   async function loadForEdit(name) {
@@ -2532,8 +2532,8 @@ setInterval(refreshDbStats, 30000);
       setVal('b-fp-sec', d.fakepump_sec); setVal('b-fp-peak', d.fakepump_min_peak_pct); setVal('b-fp-sl', d.fakepump_sl_pct);
       setVal('b-flat-min', d.flat_exit_min); setVal('b-flat-peak', d.flat_exit_max_peak_pct); setVal('b-flat-band', d.flat_exit_band_pct);
       setVal('b-stag-min', d.stagnant_exit_min); setVal('b-stag-loss', d.stagnant_loss_pct); setVal('b-cashback', d.cashback_trigger_boost || 1.0);
-      setVal('b-king-wallets', (c.kingWallets || []).join(','));
-      setVal('b-king-sell-thresh', c.kingSellExitThreshold || 0.5);
+      setVal('b-trusted-wallets', (c.trustedWallets || []).join(','));
+      setVal('b-trusted-sell-thresh', c.signalSellExitThreshold || 0.5);
       editingName = s.name;
       titleEl.textContent = `EDIT: ${s.name}`;
       deleteBtn.style.display = s.sourceFile ? 'block' : 'none';
@@ -2554,7 +2554,7 @@ setInterval(refreshDbStats, 30000);
     if (categories.length) sourceFilter.walletCategories = categories;
     if (Object.keys(catUnderMc).length) sourceFilter.categoriesUnderMc = catUnderMc;
     if (getVal('b-require-kol') === '1') sourceFilter.requireKol = true;
-    const kingWallets = getVal('b-king-wallets').split(',').map(s => s.trim()).filter(Boolean);
+    const trustedWallets = getVal('b-trusted-wallets').split(',').map(s => s.trim()).filter(Boolean);
     return {
       name: getVal('b-name').trim(),
       label: getVal('b-label').trim() || getVal('b-name').trim(),
@@ -2563,8 +2563,8 @@ setInterval(refreshDbStats, 30000);
       sourceFilter: Object.keys(sourceFilter).length ? sourceFilter : undefined,
       mcFloor: getVal('b-mc-floor') !== '' ? getNum('b-mc-floor') : undefined,
       mcCeiling: getVal('b-mc-ceiling') !== '' ? getNum('b-mc-ceiling') : undefined,
-      kingWallets: kingWallets.length ? kingWallets : undefined,
-      kingSellExitThreshold: kingWallets.length ? getNum('b-king-sell-thresh') : undefined,
+      trustedWallets: trustedWallets.length ? trustedWallets : undefined,
+      signalSellExitThreshold: trustedWallets.length ? getNum('b-trusted-sell-thresh') : undefined,
       defaults: {
         enabled: getInt('b-enabled'),
         entry_sol: getNum('b-entry-sol'), sl_pct: getNum('b-sl-pct'), max_hold_min: getNum('b-max-hold'),

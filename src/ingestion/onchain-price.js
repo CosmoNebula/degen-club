@@ -49,9 +49,27 @@ function decodeAndUpdate(mintAddress, accountInfoData) {
         .run(Date.now(), mintAddress);
     }
   } catch (err) {
-    console.error('[onchain-price] decode', mintAddress.slice(0, 8), err.message);
+    // Self-healing: per-mint failure counter. After N decode failures, blacklist
+    // the mint to stop log spam and avoid wasted work. Some pump.fun bonding
+    // curves have malformed buffers and will never decode; subscribing to them
+    // is pure noise.
+    const fails = (_decodeFailures.get(mintAddress) || 0) + 1;
+    _decodeFailures.set(mintAddress, fails);
+    if (fails === 1 || fails === 5) {
+      console.error('[onchain-price] decode', mintAddress.slice(0, 8), err.message, `(failure #${fails})`);
+    }
+    if (fails >= DECODE_FAILURE_BLACKLIST_THRESHOLD) {
+      console.log(`[onchain-price] blacklisting ${mintAddress.slice(0, 8)}… after ${fails} decode failures — unsubscribing`);
+      _decodeBlacklist.add(mintAddress);
+      try { unsubscribe(mintAddress); } catch {}
+    }
   }
 }
+
+// Decoder self-healing state — lives in module scope, persists across reconnects.
+const _decodeFailures = new Map();    // mint -> failure count
+const _decodeBlacklist = new Set();   // mints we've given up on
+const DECODE_FAILURE_BLACKLIST_THRESHOLD = 10;
 
 function send(obj) {
   if (_ws && _ws.readyState === WebSocket.OPEN) _ws.send(JSON.stringify(obj));
@@ -59,6 +77,7 @@ function send(obj) {
 
 function subscribe(mintAddress, bondingCurveKey) {
   if (_subs.has(mintAddress)) return;
+  if (_decodeBlacklist.has(mintAddress)) return;  // self-healed: never re-subscribe to broken mints
   const reqId = _nextReqId++;
   _subs.set(mintAddress, { bondingCurveKey, subId: null, reqId });
   _pendingByReqId.set(reqId, { mint: mintAddress, kind: 'sub' });
