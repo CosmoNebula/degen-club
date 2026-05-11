@@ -785,6 +785,10 @@ function checkPosition(p) {
   }
   const peakPctRaw = rawPct;
   const ageMin = (now - p.entered_at) / 60000;
+  const ageSec = (now - p.entered_at) / 1000;
+  // peakFromEntry needed early — DCA logic at line ~830 references it before
+  // the tier-firing block below redefines/uses it. Compute once up-front.
+  const peakFromEntry = Math.max(p.highest_pct || 0, peakPctRaw);
   const minutesSinceLastTrade = m.last_trade_at ? (now - m.last_trade_at) / 60000 : ageMin;
   const tiers = (() => { try { return JSON.parse(p.tiers_hit || '[]'); } catch { return []; } })();
 
@@ -888,7 +892,6 @@ function checkPosition(p) {
   const t3Armed = tiersAfter.includes('TIER_3') ? false : (peakPctRaw >= t3Trig && (strat.tier3_trail_pct || 0) > 0);
   const breakevenArmed = !!p.breakeven_armed;
 
-  const peakFromEntry = Math.max(p.highest_pct || 0, peakPctRaw);
   const tier3TrailFloor = peakFromEntry - (strat.tier3_trail_pct || 0);
 
   let exitReason = null;
@@ -901,7 +904,6 @@ function checkPosition(p) {
     ? Math.max(0, peakFromEntry - postT1TrailPct)
     : null;
 
-  const ageSec = (Date.now() - p.entered_at) / 1000;
   const fastFailSec = strat.fast_fail_sec || 0;
   const fastFailMinPeak = strat.fast_fail_min_peak_pct || 0;
   const fastFailSl = strat.fast_fail_sl_pct || 0;
