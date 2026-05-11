@@ -532,6 +532,37 @@ table.data .neg { color: var(--pink); text-shadow: 0 0 4px rgba(255,42,109,0.5);
 .strategy-status.on { color: var(--green); border-color: var(--green); }
 .strategy-status.off { color: var(--text-dim); border-color: var(--text-dim); }
 .strategy-desc { color: var(--text-dim); font-size: 11px; line-height: 1.4; margin-bottom: 10px; }
+.strategy-entry-summary {
+  background: rgba(5,217,232,0.06);
+  border: 1px solid rgba(5,217,232,0.18);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.strategy-entry-label {
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  color: var(--cyan, #05d9e8);
+  margin-bottom: 4px;
+}
+.strategy-entry-summary pre {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--text, #ddd);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.strategy-desc-wrap { margin-bottom: 10px; }
+.strategy-desc-toggle {
+  font-size: 10px;
+  color: var(--text-dim, #888);
+  cursor: pointer;
+  letter-spacing: 0.5px;
+  padding: 2px 0;
+}
+.strategy-desc-toggle:hover { color: var(--cyan, #05d9e8); }
+.strategy-desc-wrap .strategy-desc { margin-top: 6px; padding-left: 8px; border-left: 2px solid rgba(255,255,255,0.08); }
 .strategy-stats {
   display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 14px;
   font-size: 11px; color: var(--text);

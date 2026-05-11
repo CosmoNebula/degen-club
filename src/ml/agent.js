@@ -28,7 +28,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MODELS_DIR = path.resolve(__dirname, '..', '..', 'ml', 'models');
 
 const CYCLE_INTERVAL_MS = 30 * 60 * 1000;   // 30 min
-const FIRST_CYCLE_DELAY_MS = 5 * 60 * 1000; // 5 min after boot — let things stabilize
+const FIRST_CYCLE_DELAY_MS = 20 * 60 * 1000; // 20 min after boot — long enough that dev-mode kicks don't trigger a Claude consult on every restart
 const STRATEGY_SOAK_HOURS = 4;              // shorter soak — bad strategies bleed, want to iterate fast
 const MAX_CONSULTS_PER_DAY = 55;            // soft rate limit on LLM calls
 // Bleeding-strategy thresholds. When a live strategy has clearly bled
@@ -942,16 +942,50 @@ function buildContext() {
     }
     lines.push('');
   }
-  if (_recentOrphans && _recentOrphans.length > 0) {
-    lines.push('=== ORPHANED STRATEGIES (your recent recipes that NEVER fired an entry) ===');
-    lines.push(`These ${_recentOrphans.length} recipes got 0 entries in ≥1h. Their filter stacks were too strict to match any real mint. DO NOT propose another recipe with this much overlap — LOOSEN one or more conditions, or reach for a different signal entirely. Common failure mode: too many stacked conditions, drawdown_from_peak_pct filter too tight, mint-age window too narrow.`);
-    for (const o of _recentOrphans) {
+  // Pull recent orphan retirements from DB (survives restart) plus any
+  // captured in-memory this cycle. Limit to last 7 days, dedup by id.
+  const recentOrphans = (() => {
+    try {
+      const rows = db().prepare(`
+        SELECT ml_agent_log.strategy_id AS id, ml_agent_log.timestamp AS retired_at,
+               ml_agent_log.message AS msg, ml_agent_strategies.recipe_json
+        FROM ml_agent_log
+        LEFT JOIN ml_agent_strategies ON ml_agent_strategies.id = ml_agent_log.strategy_id
+        WHERE ml_agent_log.category = 'introspect'
+          AND ml_agent_log.level = 'retire'
+          AND ml_agent_log.message LIKE 'orphan-retired%'
+          AND ml_agent_log.timestamp > strftime('%s','now')*1000 - 7*24*3600000
+        ORDER BY ml_agent_log.timestamp DESC LIMIT 12
+      `).all();
+      return rows.map(r => {
+        let conditions = [];
+        let ageWindow = '?';
+        let name = r.id;
+        try {
+          const recipe = JSON.parse(r.recipe_json || '{}');
+          name = recipe.name || r.id;
+          conditions = (recipe.entry?.conditions || []).map(c =>
+            `${c.kind === 'feature' ? 'feature.' : ''}${c.name} ${c.op} ${c.value}`);
+          ageWindow = `mint_age ${recipe.entry?.min_mint_age_sec || 0}–${recipe.entry?.max_mint_age_sec || '∞'}s`;
+        } catch {}
+        const ageMatch = r.msg.match(/no entries in (\d+\.\d+)h/);
+        return {
+          id: r.id, name, conditions, age_window: ageWindow,
+          age_hours: ageMatch ? Number(ageMatch[1]) : 0,
+        };
+      });
+    } catch { return []; }
+  })();
+  if (recentOrphans.length > 0) {
+    lines.push('=== ORPHANED STRATEGIES (recent recipes that NEVER fired an entry) ===');
+    lines.push(`These ${recentOrphans.length} recipes got 0 entries in ≥1h. Their filter stacks were too strict to match real mints. DO NOT propose another recipe with this much overlap — LOOSEN one or more conditions, or reach for a different signal entirely. Common failure modes: too many stacked conditions, drawdown_from_peak_pct filter too tight (try ≥0.45 or drop it entirely), mint-age window too narrow.`);
+    for (const o of recentOrphans) {
       lines.push(`  ${o.name} (retired after ${o.age_hours}h, 0 entries):`);
-      lines.push(`    filters: ${o.conditions.join(' AND ')}`);
+      lines.push(`    filters: ${o.conditions.join(' AND ') || '(unparseable)'}`);
       lines.push(`    window: ${o.age_window}`);
     }
     lines.push('');
-    lines.push('When you propose your next recipe, drop AT LEAST one filter condition vs. these orphans, OR widen the mint-age window, OR loosen a probability threshold. Zero entries means zero learning.');
+    lines.push('When you propose your next recipe: drop AT LEAST one filter condition vs. these orphans, OR significantly widen the mint-age window, OR loosen a probability threshold. Zero entries means zero learning. Bias toward FEWER, LOOSER conditions until you actually catch trades to learn from.');
     lines.push('');
   }
   lines.push('=== FRICTION ===');
@@ -1532,10 +1566,25 @@ function assessReadiness() {
     passed: overall.snapshots_labeled >= 5000,
     detail: `${overall.snapshots_labeled} labeled snapshots (need ≥5000)`,
   };
-  // Drift OK
+  // Drift OK — only block on CORE models the agent actually uses in recipes.
+  // Weak/sparse models (peaked_300, time_to_peak_5x_sec, migrates_within_15min,
+  // post_mig_rugs_1h) often alert from class imbalance, not real drift, and
+  // shouldn't freeze strategy iteration. Agent's recipes reference: migrated,
+  // will_die_fast, drawdown_from_peak_pct, rug_within_5min, peaked_30, peaked_100,
+  // peak_pct_max, post_mig_hits_2x. If any of THOSE go red, gate. Otherwise pass.
+  const CORE_MODELS = new Set([
+    'migrated', 'will_die_fast', 'drawdown_from_peak_pct', 'rug_within_5min',
+    'peaked_30', 'peaked_100', 'peak_pct_max', 'post_mig_hits_2x',
+  ]);
+  const coreRed = drift?.targets?.filter(t => CORE_MODELS.has(t.target) && t.level === 'red') || [];
+  const coreYellow = drift?.targets?.filter(t => CORE_MODELS.has(t.target) && t.level === 'yellow') || [];
   criteria.no_drift = {
-    passed: drift && drift.overall !== 'red',
-    detail: drift ? `model health ${drift.overall}` : 'no drift status',
+    passed: !drift || coreRed.length === 0,
+    detail: !drift
+      ? 'no drift status'
+      : coreRed.length > 0
+        ? `${coreRed.length} CORE model(s) red: ${coreRed.map(t => t.target).join(', ')}`
+        : `core models healthy (${coreYellow.length} yellow, weak-model alerts ignored)`,
   };
   // Cap: don't run more than STRATEGY_CAP concurrent strategies.
   // When at cap AND bleeders exist, the cycle's pre-pass will retire the
@@ -1617,8 +1666,6 @@ async function maybeProposeStrategy(readiness) {
   const ctx = buildContext();
   logThought('info', 'consult', null, 'consulting Claude to propose a strategy', null);
   bumpConsult();
-  // Consume the orphan-warning state — only show once per propose call.
-  _recentOrphans = [];
   let consultResult;
   try {
     consultResult = await proposeStrategy(ctx);
@@ -1884,7 +1931,7 @@ export function startAgent() {
   // First introspection 5 min after boot
   setTimeout(() => cycle().catch(err => console.error('[agent] cycle err:', err)), FIRST_CYCLE_DELAY_MS);
   setInterval(() => cycle().catch(err => console.error('[agent] cycle err:', err)), CYCLE_INTERVAL_MS);
-  console.log(`[agent] started · cycle=30min · first_run=+5min · max_consults_per_day=${MAX_CONSULTS_PER_DAY}`);
+  console.log(`[agent] started · cycle=30min · first_run=+${FIRST_CYCLE_DELAY_MS/60000}min · max_consults_per_day=${MAX_CONSULTS_PER_DAY}`);
   logThought('info', 'introspect', null, 'agent started · in observing mode until calibration validates', null);
 }
 

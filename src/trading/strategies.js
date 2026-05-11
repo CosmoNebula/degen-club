@@ -201,7 +201,80 @@ function strategiesForTrigger(trigger) {
   return KEYS.filter(k => config.strategies[k]?.trigger === trigger);
 }
 
-export function listStrategies() { return S().listStrategies.all(); }
+// Plain-English labels for the technical entry-condition fields. The dashboard
+// shows these so a human can read what a strategy looks for without parsing
+// the agent's raw rationale. Only used for agent_* strategies; built-in ones
+// keep their hand-written descriptions.
+const COND_LABELS = {
+  migrated: 'ML thinks it\'ll graduate',
+  migrates_within_15min: 'ML thinks it\'ll graduate in <15min',
+  will_die_fast: 'ML thinks it WON\'T die fast',
+  rug_within_5min: 'ML thinks low rug risk',
+  peaked_30: 'ML thinks ≥30% peak coming',
+  peaked_100: 'ML thinks ≥100% peak coming',
+  peaked_300: 'ML thinks ≥300% peak coming',
+  hits_2x_within_1h: 'ML thinks 2x within 1hr',
+  peak_pct_max: 'ML predicts peak gain',
+  drawdown_from_peak_pct: 'Not already past peak',
+  time_to_peak_sec: 'ML predicts time-to-peak',
+  post_mig_hits_2x: 'ML thinks 2x post-mig',
+  post_mig_peak_pct: 'ML predicts post-mig peak',
+  post_mig_rugs_1h: 'ML thinks low post-mig rug risk',
+  tracked_buyers: 'tracked wallets in',
+  kol_buyers: 'KOL wallets in',
+  top50_buyers: 'top-50 wallets in',
+  creator_sells_post_launch: 'creator hasn\'t dumped',
+  last_mcap_sol: 'mcap',
+  buy_count: 'buys',
+};
+function fmtThreshold(name, op, value) {
+  const isPct = op === '<' || op === '<=' || op === '>' || op === '>=' ;
+  if (name === 'migrated' || name === 'will_die_fast' || name === 'rug_within_5min' ||
+      name === 'peaked_30' || name === 'peaked_100' || name === 'peaked_300' ||
+      name === 'hits_2x_within_1h' || name === 'migrates_within_15min' ||
+      name === 'post_mig_hits_2x' || name === 'post_mig_rugs_1h' || name === 'drawdown_from_peak_pct') {
+    return `${(value * 100).toFixed(0)}%`;
+  }
+  return String(value);
+}
+function humanizeRecipe(recipe) {
+  const conds = recipe?.entry?.conditions || [];
+  const lines = [];
+  for (const c of conds) {
+    const lbl = COND_LABELS[c.name] || c.name;
+    const dir = (c.op === '<' || c.op === '<=') ? 'below' : (c.op === '>' || c.op === '>=' ? 'above' : 'at');
+    const val = fmtThreshold(c.name, c.op, c.value);
+    // Pretty form: "ML thinks it'll graduate (≥30%)", "creator hasn't dumped (=0)"
+    const opSym = c.op;
+    lines.push(`• ${lbl} (${opSym}${val})`);
+  }
+  const minAge = recipe?.entry?.min_mint_age_sec || 0;
+  const maxAge = recipe?.entry?.max_mint_age_sec;
+  if (maxAge) {
+    const minLbl = minAge < 60 ? `${minAge}s` : `${Math.round(minAge / 60)}m`;
+    const maxLbl = maxAge < 60 ? `${maxAge}s` : `${Math.round(maxAge / 60)}m`;
+    lines.push(`• Mint age: ${minLbl} – ${maxLbl}`);
+  }
+  return lines.join('\n');
+}
+
+export function listStrategies() {
+  const rows = S().listStrategies.all();
+  // Enrich agent_* strategies with a human-readable entry summary parsed from
+  // their recipe JSON. Built-in strategies keep their existing description.
+  for (const r of rows) {
+    if (typeof r.name === 'string' && r.name.startsWith('agent_')) {
+      try {
+        const ag = db().prepare('SELECT recipe_json FROM ml_agent_strategies WHERE id = ?').get(r.name);
+        if (ag?.recipe_json) {
+          const recipe = JSON.parse(ag.recipe_json);
+          r.entry_summary = humanizeRecipe(recipe);
+        }
+      } catch { /* ignore */ }
+    }
+  }
+  return rows;
+}
 export function getStrategy(name) { return S().getStrategy.get(name); }
 
 export function toggleStrategy(name) {

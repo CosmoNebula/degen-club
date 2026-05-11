@@ -1008,7 +1008,8 @@ function renderStrategiesPanel(rows) {
         </div>
         <button class="pill-btn ${s.enabled ? 'active' : ''}" data-strategy="${s.name}">${s.enabled ? 'DISABLE' : 'ENABLE'}</button>
       </div>
-      <div class="strategy-desc">${s.description}</div>
+      ${s.entry_summary ? `<div class="strategy-entry-summary"><div class="strategy-entry-label">ENTRY REQUIREMENTS</div><pre>${s.entry_summary}</pre></div>` : ''}
+      <details class="strategy-desc-wrap"><summary class="strategy-desc-toggle">Why this strategy ▾</summary><div class="strategy-desc">${s.description}</div></details>
 
       <div class="tier-ladder">
         <div class="tier-row">

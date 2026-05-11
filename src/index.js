@@ -42,6 +42,7 @@ import { startMlClient } from './ml/ml-client.js';
 import { startScoringSweeper } from './ml/scoring-sweeper.js';
 import { startAutoRetrain } from './ml/auto-retrain.js';
 import { startAgent } from './ml/agent.js';
+import { startEventLoopWatchdog } from './event-loop-watchdog.js';
 import { startServeWatchdog } from './ml/serve-watchdog.js';
 import { startRssIngest } from './ingestion/news/rss-ingest.js';
 import { startRedditIngest } from './ingestion/news/reddit.js';
@@ -116,6 +117,7 @@ startScoringSweeper();
 startAutoRetrain();
 startAgent();
 startServeWatchdog();
+startEventLoopWatchdog();
 // Cultural pulse — news/trends/social ingestion + Claude synthesis every 4h
 startRssIngest();
 startRedditIngest();
