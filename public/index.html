@@ -221,6 +221,7 @@
       <div class="tab-dropdown" data-dropdown="research" hidden>
         <button class="tab tab-sub" data-tab="mints">🐒 <span>MINTS</span></button>
         <button class="tab tab-sub" data-tab="devs">👑 <span>DEVS</span></button>
+        <button class="tab tab-sub" data-tab="top50">🏆 <span>TOP 50</span></button>
         <button class="tab tab-sub" data-tab="traders">🎯 <span>TRADERS</span></button>
         <button class="tab tab-sub" data-tab="rings">🕸 <span>RINGS</span></button>
         <button class="tab tab-sub" data-tab="lab">🧪 <span>COIN LAB</span></button>
@@ -315,6 +316,40 @@
             </tr>
           </thead>
           <tbody id="devs-table"><tr><td colspan="15" class="empty">No creators scored yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="tab-pane" data-pane="top50">
+      <div class="pane-header">
+        <h1>🏆 TOP 50 LEADERBOARD</h1>
+        <p>The 50 highest-scoring Solana wallets, recomputed hourly. The bot's Helius webhook subscriptions follow this list — when a wallet drops out, it's replaced by the next-best contender. Top 10 = KOL · 11-25 = HIGH · 26-50 = TRACKED.</p>
+        <div class="toolbar">
+          <button class="pill-btn" id="leaderboard-refresh-btn">↻ RECOMPUTE NOW</button>
+          <span class="muted" id="leaderboard-meta" style="margin-left:12px;font-size:11px;"></span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th class="num">Rank</th>
+              <th>Tier</th>
+              <th>Wallet</th>
+              <th class="num">Score</th>
+              <th class="num">PnL 30d (SOL)</th>
+              <th class="num">WR 30d</th>
+              <th class="num">Closed 30d</th>
+              <th class="num">Mig. Pre-buys</th>
+              <th class="num">Avg ×</th>
+              <th class="num">Early Entry %</th>
+              <th class="num">Rug %</th>
+              <th class="num">Snipe %</th>
+              <th class="num">Avg Hold</th>
+              <th>Score Breakdown</th>
+            </tr>
+          </thead>
+          <tbody id="leaderboard-table"><tr><td colspan="14" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </section>

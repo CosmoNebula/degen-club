@@ -28,12 +28,14 @@ import { PumpPortalClient } from './ingestion/pumpportal.js';
 import { startProcessor, startSweeper } from './ingestion/processor.js';
 import { startTraderSweep } from './scoring/traders.js';
 import { startWalletGrader } from './scoring/wallet-grader.js';
+import { startWalletLeaderboard } from './scoring/wallet-leaderboard.js';
 import { startRunnerScoreSweep } from './scoring/runner-score.js';
 import { startWhaleSpawnSweep } from './scoring/whale-spawn.js';
 import { startKolDipSweep } from './scoring/kol-dip.js';
 import { startLiveConditionsMonitor } from './scoring/live-conditions.js';
 import { startMicrostructureSweep } from './scoring/mint-microstructure.js';
 import { startSnapshotSweeper } from './ml/snapshot-sweeper.js';
+import { startKnownAddressDetector } from './ml/known-address-detector.js';
 import { startLabelResolver } from './ml/label-resolver.js';
 import { startDiskMonitor } from './ml/disk-monitor.js';
 import { startMlClient } from './ml/ml-client.js';
@@ -60,10 +62,12 @@ import { startVolumeSurgeSweep } from './scoring/volume.js';
 import { startMaintenance } from './maintenance.js';
 import { startPostExitSweep } from './scoring/post-exit.js';
 import { initStrategies } from './trading/strategies.js';
-import { startPositionMonitor, recoverLivePositions } from './trading/paper.js';
+import { startPositionMonitor, recoverLivePositions, recoverPaperPositions } from './trading/paper.js';
 import { startMoonbagPriceFeed, startOpenPositionPriceFeed } from './ingestion/dexscreener.js';
 import { startOnchainPriceFeed } from './ingestion/onchain-price.js';
 import { startHeliusWebhookSync } from './ingestion/helius-webhooks.js';
+import { startTelegramMemberWatcher } from './ingestion/telegram-members.js';
+import { startTelegramCallsBroadcaster } from './ingestion/telegram-calls.js';
 import { heliusWS } from './ingestion/helius.js';
 import { onchainPumpTrades } from './ingestion/onchain-pump-trades.js';
 import { startPriceService } from './price.js';
@@ -74,6 +78,8 @@ init();
 pollRuntimeLimits(3000); // pick up dashboard-edited limits within 3s
 initStrategies();
 startPriceService();
+try { recoverPaperPositions(); }
+catch (err) { console.error('[recover-paper] startup failed:', err.message); }
 recoverLivePositions()
   .catch(err => console.error('[recover] startup failed:', err.message))
   .finally(() => startPositionMonitor());
@@ -82,6 +88,8 @@ startMoonbagPriceFeed();
 startOpenPositionPriceFeed();
 startOnchainPriceFeed();
 startHeliusWebhookSync();
+startTelegramMemberWatcher();
+startTelegramCallsBroadcaster();
 startPostExitSweep();
 
 const pp = new PumpPortalClient();
@@ -93,6 +101,7 @@ onchainPumpTrades.start();
 startSweeper();
 startTraderSweep();
 startWalletGrader();
+startWalletLeaderboard();
 startRunnerScoreSweep();
 startWhaleSpawnSweep();
 startKolDipSweep();
@@ -100,6 +109,7 @@ startLiveConditionsMonitor();
 startMicrostructureSweep();
 startDiskMonitor();
 startSnapshotSweeper();
+startKnownAddressDetector();
 startLabelResolver();
 startMlClient();
 startScoringSweeper();

@@ -31,11 +31,12 @@ const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 90 * 1000;
 
 // Retention windows
-const TRADES_RETENTION_HOURS = 48;          // pipeline needs 7h, give 41h margin
+const TRADES_RETENTION_HOURS = 12;          // 6h label-resolver window + 1h max snapshot age = 7h hard floor. 12h gives 5h margin and a longer "recent activity" window for migrator-stats, kol-dip, copy-trade gating, etc. Older raw trades are archived to MEGA Parquet by cold-archive.js before pruning, so we never lose the source data — and digested forms (ml_mint_snapshots, daily_intelligence, wallet aggregates) carry the durable knowledge.
 const PREDICTIONS_RETENTION_DAYS = 14;       // calibration backtest window
 const LIVE_CONDITIONS_RETENTION_DAYS = 3;
 const FRICTION_LOG_RETENTION_DAYS = 7;
 const SIGNALS_RETENTION_DAYS = 14;
+const WEBHOOK_DL_RETENTION_DAYS = 7;         // keep dead-letter long enough to diagnose drift
 const COLD_MICROSTRUCTURE_HOURS = 24;        // mints not traded in 24h
 
 let stmts = null;
@@ -181,7 +182,7 @@ function condenseTick() {
   } catch (err) { console.error('[condensate] err:', err.message); }
 }
 
-function pruneTick() {
+async function pruneTick() {
   try {
     const d = db();
     const now = Date.now();
@@ -190,6 +191,7 @@ function pruneTick() {
     const liveConditionsCutoff = now - LIVE_CONDITIONS_RETENTION_DAYS * 86400000;
     const frictionCutoff = now - FRICTION_LOG_RETENTION_DAYS * 86400000;
     const signalsCutoff = now - SIGNALS_RETENTION_DAYS * 86400000;
+    const webhookDlCutoff = now - WEBHOOK_DL_RETENTION_DAYS * 86400000;
     const microstructureCutoff = now - COLD_MICROSTRUCTURE_HOURS * 3600000;
 
     // SAFETY GUARD: refuse to prune if we don't have a fresh condensate for
@@ -202,15 +204,36 @@ function pruneTick() {
       return;
     }
 
+    // ARCHIVE GUARD: dump unarchived days to MEGA Parquet before pruning. If
+    // any day-batch fails to upload, refuse to prune trades older than that
+    // day — we never delete unarchived raw data (lesson from 2026-05-09).
+    try {
+      const { archiveOldTrades, canPruneBefore } = await import('./cold-archive.js');
+      await archiveOldTrades({ verbose: true });
+      const guard = canPruneBefore(tradesCutoff);
+      if (!guard.ok) {
+        console.warn(`[prune] SKIPPED trades — unarchived days remain: ${guard.unarchivedDays.join(', ')}`);
+        // Continue with non-trade prune (preds/conditions/etc are not archived; they're OK to drop)
+        const predDel = d.prepare(`DELETE FROM ml_predictions WHERE timestamp < ?`).run(predictionsCutoff).changes;
+        const condDel = d.prepare(`DELETE FROM live_conditions WHERE timestamp < ?`).run(liveConditionsCutoff).changes;
+        if (predDel + condDel > 0) console.log(`[prune] partial: preds=${predDel} conditions=${condDel}`);
+        return;
+      }
+    } catch (err) {
+      console.error(`[prune] archive failed; SKIPPING trades prune: ${err.message}`);
+      return;
+    }
+
     const tradesDel = d.prepare(`DELETE FROM trades WHERE timestamp < ?`).run(tradesCutoff).changes;
     const predDel = d.prepare(`DELETE FROM ml_predictions WHERE timestamp < ?`).run(predictionsCutoff).changes;
     const condDel = d.prepare(`DELETE FROM live_conditions WHERE timestamp < ?`).run(liveConditionsCutoff).changes;
     let fricDel = 0; try { fricDel = d.prepare(`DELETE FROM friction_log WHERE timestamp < ?`).run(frictionCutoff).changes; } catch {}
     let sigDel = 0; try { sigDel = d.prepare(`DELETE FROM signals WHERE fired_at < ?`).run(signalsCutoff).changes; } catch {}
+    let dlDel = 0; try { dlDel = d.prepare(`DELETE FROM webhook_dead_letter WHERE received_at < ?`).run(webhookDlCutoff).changes; } catch {}
     const microDel = d.prepare(`DELETE FROM mint_microstructure WHERE active_at < ?`).run(microstructureCutoff).changes;
 
     if (tradesDel + predDel > 0) {
-      console.log(`[prune] dropped: trades=${tradesDel} preds=${predDel} conditions=${condDel} friction=${fricDel} signals=${sigDel} microstructure=${microDel}`);
+      console.log(`[prune] dropped: trades=${tradesDel} preds=${predDel} conditions=${condDel} friction=${fricDel} signals=${sigDel} webhook-dl=${dlDel} microstructure=${microDel}`);
     }
 
     // Periodic VACUUM to actually reclaim disk space (SQLite doesn't shrink on its own)

@@ -80,6 +80,58 @@
 }
 .ml-stat-sub { font-size: 10px; color: var(--text-dim, #888); margin-top: 4px; }
 
+/* Consult budget — one row per subsystem with usage bar */
+.ml-consult-budget {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(15,15,30,0.4);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 6px;
+  padding: 12px;
+}
+.ml-consult-row {
+  display: grid;
+  grid-template-columns: 140px 1fr 80px;
+  gap: 10px;
+  align-items: center;
+}
+.ml-consult-name {
+  font-size: 11px;
+  color: var(--text-dim, #aaa);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.ml-consult-bar {
+  height: 10px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+.ml-consult-bar-fill {
+  height: 100%;
+  background: var(--cyan, #05d9e8);
+  border-radius: 4px;
+  transition: width 0.4s ease;
+  box-shadow: 0 0 6px rgba(5,217,232,0.4);
+}
+.ml-consult-bar-fill.warn { background: #f4c542; box-shadow: 0 0 6px rgba(244,197,66,0.4); }
+.ml-consult-bar-fill.alert { background: #f55a4e; box-shadow: 0 0 6px rgba(245,90,78,0.4); }
+.ml-consult-count {
+  font-size: 12px;
+  color: var(--text, #ddd);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.ml-consult-total {
+  border-top: 1px solid rgba(255,255,255,0.1);
+  padding-top: 8px;
+  margin-top: 4px;
+  font-weight: 700;
+}
+.ml-consult-total .ml-consult-name { color: var(--cyan, #05d9e8); }
+
 .ml-grade-card { text-align: center; }
 .ml-grade-label {
   font-size: 10px;

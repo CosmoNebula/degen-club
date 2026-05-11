@@ -17,6 +17,33 @@ import { applyRuntimeLimits } from '../runtime-limits.js';
 
 const isLocalOrigin = (s) => /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(s || '');
 
+// Slow COUNT(*) cache. SELECT COUNT(*) on a 3M-row table full-scans (~4s) and
+// blocks the dashboard's sync better-sqlite3 event loop. Stats endpoints poll
+// every few seconds — we cache these counters for 60s to avoid the wedge.
+const _countCache = new Map();
+const COUNT_CACHE_TTL_MS = 60 * 1000;
+function getCachedCount(d, key, sql) {
+  const c = _countCache.get(key);
+  if (c && (Date.now() - c.t) < COUNT_CACHE_TTL_MS) return c.n;
+  const n = d.prepare(sql).get().n;
+  _countCache.set(key, { n, t: Date.now() });
+  return n;
+}
+
+// Whole-response cache for heavy endpoints. The frontend polls /api/stats
+// every 3s and runs ~17 SQL queries per call; on a 2.6GB DB at 91% disk
+// pressure each call takes 4-7s, so polls pile up faster than they finish
+// and the event loop drowns. We cache the full JSON for 5s — the dashboard
+// never actually needs sub-5s stats freshness.
+const _responseCache = new Map();
+function cacheResponse(key, ttlMs, computeSync) {
+  const c = _responseCache.get(key);
+  if (c && (Date.now() - c.t) < ttlMs) return c.v;
+  const v = computeSync();
+  _responseCache.set(key, { v, t: Date.now() });
+  return v;
+}
+
 function requireLocalOriginForMutations(req, res, next) {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
   if (process.env.ALLOW_REMOTE_WRITES === '1') return next();
@@ -68,6 +95,12 @@ export function startServer(getIngestionStatus) {
   });
 
   app.get('/api/stats', async (req, res) => {
+    // Front-end polls every 3s; computing this response involves ~17 SQL
+    // queries on a 2.6GB DB. Cache full response for 5s so dashboard polls
+    // never stack up faster than they finish.
+    const cached = _responseCache.get('stats');
+    if (cached && (Date.now() - cached.t) < 5000) return res.json(cached.v);
+
     const d = db();
     const wallet = await import('../trading/wallet.js');
     const isLive = wallet.isLiveMode();
@@ -107,8 +140,10 @@ export function startServer(getIngestionStatus) {
     `).get(PUMP_SUPPLY, CASHBACK_RATE);
     const cashbackEstimatedSol = cashbackRow.estimated_sol || 0;
     const cashbackPositions = cashbackRow.positions || 0;
-    const totalTrades = d.prepare("SELECT COUNT(*) AS n FROM trades").get().n;
-    const totalWallets = d.prepare("SELECT COUNT(*) AS n FROM wallets").get().n;
+    // SELECT COUNT(*) on trades full-scans 3M+ rows (~4s). Cache for 60s —
+    // these counters are display-only, no need for live precision.
+    const totalTrades = getCachedCount(d, 'trades_total', `SELECT COUNT(*) AS n FROM trades`);
+    const totalWallets = getCachedCount(d, 'wallets_total', `SELECT COUNT(*) AS n FROM wallets`);
     const trackedWallets = d.prepare("SELECT COUNT(*) AS n FROM wallets WHERE tracked = 1").get().n;
     const kolWallets = d.prepare("SELECT COUNT(*) AS n FROM wallets WHERE is_kol = 1").get().n;
     // Hunter wallets — qualifying for the migrator-hunter signal pool. Same
@@ -220,7 +255,7 @@ export function startServer(getIngestionStatus) {
       };
     }
 
-    res.json({
+    const out = {
       mode: isLive ? 'live' : 'paper',
       openPositions, closedPositions, wins,
       winRate: closedPositions ? wins / closedPositions : 0,
@@ -233,7 +268,9 @@ export function startServer(getIngestionStatus) {
       priceUpdatedAt: getPriceLastUpdate(),
       sim,
       live,
-    });
+    };
+    _responseCache.set('stats', { v: out, t: Date.now() });
+    res.json(out);
   });
 
   app.post('/api/wallet/sim/reset', (req, res) => {
@@ -427,6 +464,36 @@ export function startServer(getIngestionStatus) {
     const out = { all: 0, HUMAN: 0, BOT: 0, SCALPER: 0, BUNDLE: 0, NOT_SURE: 0 };
     for (const r of rows) { out[r.category] = r.n; out.all += r.n; }
     res.json(out);
+  });
+
+  app.get('/api/leaderboard', (req, res) => {
+    const limit = Math.min(50, Number(req.query.limit) || 50);
+    const rows = db().prepare(`
+      SELECT wl.rank, wl.tier, wl.address, wl.score, wl.realized_pnl_30d,
+             wl.win_rate_30d, wl.closed_30d, wl.migrator_pre_mig_buys,
+             wl.avg_multiple_30d, wl.early_entry_rate, wl.rug_rate_30d,
+             wl.sniper_ratio, wl.avg_hold_seconds, wl.components_json,
+             wl.computed_at, w.label, w.category, w.last_activity_at
+      FROM wallet_leaderboard wl
+      LEFT JOIN wallets w ON w.address = wl.address
+      ORDER BY wl.rank ASC LIMIT ?
+    `).all(limit);
+    for (const r of rows) {
+      try { r.components = JSON.parse(r.components_json || '{}'); } catch { r.components = {}; }
+      delete r.components_json;
+    }
+    const meta = db().prepare(`SELECT MAX(computed_at) AS computed_at, COUNT(*) AS n FROM wallet_leaderboard`).get();
+    res.json({ rows, meta });
+  });
+
+  app.post('/api/leaderboard/recompute', async (req, res) => {
+    try {
+      const m = await import('../scoring/wallet-leaderboard.js');
+      const out = m.recomputeLeaderboard({ verbose: true });
+      res.json(out);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.get('/api/wallet-rings', (req, res) => {
@@ -1895,13 +1962,43 @@ export function startServer(getIngestionStatus) {
 
       const overrideMs = config.paper?.latencyMs;
       const liveLatencyMs = latest && latest.rpc_helius_p90 != null ? Math.round(latest.rpc_helius_p90) : null;
-      const effectivePaperLagMs = (overrideMs != null && overrideMs > 0) ? overrideMs : (liveLatencyMs != null ? liveLatencyMs : 1000);
+      // Realistic paper lag cap: real Solana confirmation is 1-2 slots
+      // (400-800ms typical, ~3s worst case in congestion). When the RPC probe
+      // returns 5-15s+, that's a PROBE failure (AbortSignal didn't fire fast
+      // enough, DNS hang, TLS slow), not real execution latency. A live trader
+      // doesn't actually wait 15s for a trade — they get a timeout error or
+      // use a different RPC. We cap at 3000ms so paper-trade simulation stays
+      // grounded in realistic execution conditions.
+      const MAX_REALISTIC_PAPER_LAG_MS = 3000;
+      const slotMs = latest?.slot_time_mean || 400;
+      // If probe returned anything > 5s, fall back to slot-based estimate
+      // (real confirmation = ~2 slots + small client buffer).
+      const slotBasedLag = Math.min(Math.round(slotMs * 2 + 300), MAX_REALISTIC_PAPER_LAG_MS);
+      const probeReliable = liveLatencyMs != null && liveLatencyMs < 5000;
+      const rawLag = (overrideMs != null && overrideMs > 0)
+        ? overrideMs
+        : (probeReliable ? liveLatencyMs : slotBasedLag);
+      const effectivePaperLagMs = Math.min(rawLag, MAX_REALISTIC_PAPER_LAG_MS);
       const effectivePriorityFeeSol = latest && latest.priority_fee_p90 != null ? latest.priority_fee_p90 / 1e9 : 0.0008;
       const ageMs = latest ? Date.now() - latest.timestamp : null;
-      const fresh = ageMs != null && ageMs < 5 * 60 * 1000;
+      // Probes run every 5min now; allow up to 15min stale before declaring down.
+      const fresh = ageMs != null && ageMs < 15 * 60 * 1000;
+
+      // Override: if firehose ingestion is healthy (last event <60s ago), the
+      // bot is functionally working regardless of RPC probe latency. RPC
+      // slowness only matters for live trading. Paper-mode reality check.
+      let rawStatus = fresh ? (latest.network_status || 'unknown') : 'down';
+      try {
+        const h = readHealth();
+        const trades = h?.feeds?.onchainTrades;
+        if (trades?.connected && (trades.last_event_ago_sec ?? 999) < 60) {
+          if (rawStatus === 'down') rawStatus = 'degraded';  // slow RPC + healthy ingest = degraded, not down
+          if (rawStatus === 'unknown') rawStatus = 'healthy';
+        }
+      } catch {}
 
       res.json({
-        status: fresh ? (latest.network_status || 'unknown') : 'down',
+        status: rawStatus,
         asOf: latest ? latest.timestamp : 0,
         ageMs,
         rpc: {
@@ -1923,14 +2020,21 @@ export function startServer(getIngestionStatus) {
   app.get('/api/limits', async (req, res) => {
     const lc = await import('../scoring/live-conditions.js');
     const overrideMs = config.paper?.latencyMs;
-    const liveMs = Math.round(lc.getLatencyEstimate('helius'));
+    const liveMsRaw = Math.round(lc.getLatencyEstimate('helius'));
+    // Cap at realistic Solana fill time (see paper.js MAX_REALISTIC_PAPER_LAG_MS).
+    const MAX_REALISTIC = 3000;
+    const liveMs = Math.min(liveMsRaw, MAX_REALISTIC);
+    const paperLag = overrideMs != null && overrideMs > 0
+      ? Math.min(overrideMs, MAX_REALISTIC)
+      : liveMs;
     res.json({
       maxPerTradeSol: config.safety?.maxPerTradeSol || 0,
       maxSolExposure: config.strategies?.global?.maxSolExposure || 0,
       maxEntrySlippagePct: config.safety?.maxEntrySlippagePct ?? 0.17,
-      paperLatencyMs: overrideMs != null && overrideMs > 0 ? overrideMs : liveMs,
+      paperLatencyMs: paperLag,
       paperLatencyMsSource: overrideMs != null && overrideMs > 0 ? 'override' : 'live',
       liveLatencyMs: liveMs,
+      liveLatencyMsRaw: liveMsRaw,  // expose raw too for debugging
       networkStatus: lc.getNetworkStatus(),
     });
   });

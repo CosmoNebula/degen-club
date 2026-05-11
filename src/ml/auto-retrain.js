@@ -8,15 +8,28 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
 import { recordMetricsSnapshot, ensureBaseline } from './drift-monitor.js';
+import { db } from '../db/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ML_ROOT = path.resolve(__dirname, '..', '..', 'ml');
 const PYTHON = path.join(ML_ROOT, '.venv', 'bin', 'python');
 const SCRIPT = path.join(ML_ROOT, 'scripts', 'retrain_all.py');
+const LAST_TRAIN_META = path.join(ML_ROOT, 'data', '.last_train_meta.json');
 
 const FIRST_RUN_DELAY_MS = 15 * 60 * 1000;   // 15 min after boot
-const REPEAT_INTERVAL_MS = 60 * 60 * 1000;   // every hour
+const REPEAT_INTERVAL_MS = 60 * 60 * 1000;   // hourly backstop
+
+// Adaptive trigger (added 2026-05-11): check every 5min for either
+// (a) NEW_LABELS > N since last retrain AND last retrain ≥ 30min ago, or
+// (b) realized PnL drawdown ≥ DD_THRESHOLD over last 24h.
+// Either condition fires an immediate retrain (no waiting for the next hour).
+const ADAPTIVE_CHECK_MS = 5 * 60 * 1000;
+const MIN_NEW_LABELS = 50;
+const MIN_MINUTES_SINCE_LAST = 30;
+const DD_THRESHOLD_SOL = -2.0; // closed PnL ≤ -2.0 SOL in last 24h triggers
+const DD_THRESHOLD_PCT = -0.15; // OR ≥15% drawdown vs starting balance
 
 let _running = false;
 
@@ -89,7 +102,26 @@ function runRetrain() {
   _progress.stage = 'extract';
   _progress.startedAt = start;
   console.log('[auto-retrain] kicking off retrain pipeline...');
-  const proc = spawn(PYTHON, [SCRIPT], { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Cap Python/sklearn thread parallelism to 2 cores. Without this, sklearn
+  // + permutation_importance default to ALL cores → load avg spikes to 60+
+  // on Intel Mac and the Node event loop starves, pushing RPC probes from
+  // 200ms into 4s+ (verified 2026-05-11). 2 threads keeps training fast
+  // enough (~15 min full retrain) while leaving the bot responsive.
+  const proc = spawn(PYTHON, [SCRIPT], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      OMP_NUM_THREADS: '2',
+      OPENBLAS_NUM_THREADS: '2',
+      MKL_NUM_THREADS: '2',
+      NUMEXPR_NUM_THREADS: '2',
+    },
+  });
+  // Set lower priority (nice) so the bot's Node process wins CPU
+  // contention when the system is busy.
+  try {
+    spawn('renice', ['+10', '-p', String(proc.pid)], { stdio: 'ignore' });
+  } catch {}
   let stdoutBuf = '';
   proc.stdout.on('data', d => {
     const s = d.toString();
@@ -128,11 +160,78 @@ export function getRetrainProgress() {
   return { ..._progress };
 }
 
+// Read last retrain timestamp from the meta JSON. Returns 0 if missing.
+function getLastRetrainTs() {
+  try {
+    const j = JSON.parse(fs.readFileSync(LAST_TRAIN_META, 'utf8'));
+    return j.trained_at_ms || 0;
+  } catch { return 0; }
+}
+
+// Count labels resolved (or backfilled with new targets) since the last
+// retrain. Uses labels_resolved_at as the "new label" timestamp — this is
+// the moment a snapshot became trainable.
+function countNewLabelsSince(tsMs) {
+  if (!tsMs) return 0;
+  try {
+    const row = db().prepare(
+      `SELECT COUNT(*) AS n FROM ml_mint_snapshots WHERE labels_resolved_at > ?`
+    ).get(tsMs);
+    return row?.n || 0;
+  } catch { return 0; }
+}
+
+// Compute realized-PnL drawdown signal over last 24h. Returns the closed
+// PnL sum AND the % drawdown vs paper-wallet starting balance.
+function recentDrawdown() {
+  try {
+    const w = db().prepare(`SELECT starting_balance_sol FROM paper_wallet WHERE id=1`).get();
+    const startSol = w?.starting_balance_sol || 1.0;
+    const r = db().prepare(`
+      SELECT COALESCE(SUM(realized_pnl_sol), 0) AS pnl
+      FROM paper_positions
+      WHERE status='closed' AND exited_at > strftime('%s','now')*1000 - 86400000
+    `).get();
+    const pnl = r?.pnl || 0;
+    const pct = startSol > 0 ? pnl / startSol : 0;
+    return { pnl, pct, startSol };
+  } catch { return { pnl: 0, pct: 0, startSol: 0 }; }
+}
+
+// Decide whether the adaptive trigger should fire NOW. Logs the reason on
+// any positive decision so the user can see why a retrain happened.
+function adaptiveShouldRetrain() {
+  if (_running) return false;
+  const lastTs = getLastRetrainTs();
+  const minutesSinceLast = lastTs > 0 ? (Date.now() - lastTs) / 60000 : Infinity;
+  if (minutesSinceLast < MIN_MINUTES_SINCE_LAST) return false;
+  const newLabels = countNewLabelsSince(lastTs);
+  if (newLabels >= MIN_NEW_LABELS) {
+    console.log(`[auto-retrain] ADAPTIVE: ${newLabels} new labels since last retrain ${minutesSinceLast.toFixed(0)}min ago — firing.`);
+    return true;
+  }
+  const dd = recentDrawdown();
+  if (dd.pnl <= DD_THRESHOLD_SOL || dd.pct <= DD_THRESHOLD_PCT) {
+    console.log(`[auto-retrain] ADAPTIVE: 24h drawdown ${dd.pnl.toFixed(2)} SOL (${(dd.pct*100).toFixed(1)}%) — firing.`);
+    return true;
+  }
+  return false;
+}
+
+function adaptiveTick() {
+  try {
+    if (adaptiveShouldRetrain()) runRetrain();
+  } catch (err) {
+    console.error('[auto-retrain] adaptive check err:', err.message);
+  }
+}
+
 export function startAutoRetrain() {
   ensureBaseline();  // seed metrics history from current models if empty
   setTimeout(runRetrain, FIRST_RUN_DELAY_MS);
   setInterval(runRetrain, REPEAT_INTERVAL_MS);
-  console.log(`[auto-retrain] scheduled · first=+15min · interval=1h`);
+  setInterval(adaptiveTick, ADAPTIVE_CHECK_MS);
+  console.log(`[auto-retrain] scheduled · first=+15min · interval=1h · adaptive check every ${ADAPTIVE_CHECK_MS/60000}min (≥${MIN_NEW_LABELS} new labels OR ≥${(-DD_THRESHOLD_PCT*100).toFixed(0)}% drawdown)`);
 }
 
 // Manual trigger via API (useful for "retrain now" button)

@@ -104,7 +104,14 @@ export function vacuumDb() {
   };
 }
 
+// COUNT(*) on multi-million-row tables full-scans (~4s on trades) and blocks
+// the synchronous better-sqlite3 event loop. Cache for 60s — these are
+// display-only counters that don't need live precision.
+const _dbStatsCache = { v: null, t: 0 };
+const DB_STATS_TTL_MS = 60 * 1000;
+
 export function dbStats() {
+  if (_dbStatsCache.v && (Date.now() - _dbStatsCache.t) < DB_STATS_TTL_MS) return _dbStatsCache.v;
   const d = db();
   const dbSize = fileSize(config.dbPath);
   const walSize = fileSize(config.dbPath + '-wal');
@@ -119,13 +126,16 @@ export function dbStats() {
     bundleClusters: d.prepare('SELECT COUNT(*) AS n FROM bundle_clusters').get().n,
     copySignals: d.prepare('SELECT COUNT(*) AS n FROM copy_signals').get().n,
   };
-  return {
+  const out = {
     sizeBytes: dbSize,
     walBytes: walSize,
     shmBytes: shmSize,
     totalBytes: dbSize + walSize + shmSize,
     counts,
   };
+  _dbStatsCache.v = out;
+  _dbStatsCache.t = Date.now();
+  return out;
 }
 
 export function startMaintenance() {

@@ -51,8 +51,11 @@ function S() {
         tier1_trigger_pct, tier1_sell_pct,
         tier2_trigger_pct, tier2_sell_pct,
         tier3_trigger_pct, tier3_sell_pct, tier3_trail_pct,
-        breakeven_after_tier1, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+        breakeven_after_tier1,
+        dca_enabled, dca_trigger_pct, dca_size_pct,
+        dca_min_age_sec, dca_max_age_min, dca_max_dca,
+        updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
   };
   return stmts;
 }
@@ -92,17 +95,55 @@ function evalCondition(c, features, preds) {
   }
 }
 
-function evalEntry(recipe, mint, features, preds) {
+function evalEntry(recipe, mintAddress, features, preds) {
   const entry = recipe.entry || {};
   const ageSec = features.snapshot_age_sec || 0;
   if (entry.min_mint_age_sec && ageSec < entry.min_mint_age_sec) return false;
   if (entry.max_mint_age_sec && ageSec > entry.max_mint_age_sec) return false;
+  // Copy-trade gate: if the recipe lists target wallets, one of them must
+  // have bought the mint within the lookback window.
+  if (Array.isArray(entry.copy_trade_wallets) && entry.copy_trade_wallets.length > 0 && mintAddress) {
+    const windowSec = entry.copy_trade_window_sec || 60;
+    const since = Date.now() - windowSec * 1000;
+    const placeholders = entry.copy_trade_wallets.map(() => '?').join(',');
+    const hit = db().prepare(
+      `SELECT 1 FROM trades WHERE mint_address = ? AND is_buy = 1
+         AND wallet IN (${placeholders}) AND timestamp >= ? LIMIT 1`
+    ).get(mintAddress, ...entry.copy_trade_wallets, since);
+    if (!hit) return false;
+  }
   const conds = entry.conditions || [];
   if (conds.length === 0) return false;  // require at least one condition
   for (const c of conds) {
     if (!evalCondition(c, features, preds)) return false;
   }
   return true;
+}
+
+// Cached union of every active recipe's copy_trade_wallets list. Refreshed
+// when strategies change (cheap: liveStrategies query is short).
+let _copyTradeTargets = new Set();
+let _copyTradeRefreshedAt = 0;
+const COPY_TRADE_CACHE_MS = 60 * 1000;
+
+function refreshCopyTradeTargets() {
+  const out = new Set();
+  const live = S().liveStrategies.all();
+  for (const s of live) {
+    try {
+      const r = JSON.parse(s.recipe_json);
+      const list = r?.entry?.copy_trade_wallets;
+      if (Array.isArray(list)) for (const w of list) if (typeof w === 'string') out.add(w);
+    } catch {}
+  }
+  _copyTradeTargets = out;
+  _copyTradeRefreshedAt = Date.now();
+}
+
+export function isCopyTradeTarget(wallet) {
+  if (!wallet) return false;
+  if (Date.now() - _copyTradeRefreshedAt > COPY_TRADE_CACHE_MS) refreshCopyTradeTargets();
+  return _copyTradeTargets.has(wallet);
 }
 
 function computeEntrySol(recipe, preds) {
@@ -147,6 +188,19 @@ function syncStrategyStateRow(strategyId, recipe) {
   const t3Trig = (t3.trigger_pct ?? (trail.arm_pct ?? 200)) / 100;
   const t3Sell = (t3.sell_pct ?? 100) / 100;
   const tier3Trail = (trail.trail_pct || 0) / 100;
+  // DCA section. Default disabled — agent must opt in explicitly. Recipe
+  // values use the same percent-not-fraction convention as exit.stop_loss_pct.
+  const dca = recipe.dca || {};
+  const dcaEnabled = dca.enabled ? 1 : 0;
+  // dca_trigger_pct in DB is a NEGATIVE fraction (e.g., -0.25 = -25% drawdown).
+  // Recipe convention: trigger_pct: -25 (negative percentage). Normalize.
+  const dcaTriggerFraction = dca.trigger_pct != null
+    ? -Math.abs(dca.trigger_pct) / 100
+    : -0.25;
+  const dcaSizeFraction = dca.size_pct != null
+    ? Math.max(0, Math.min(2.0, dca.size_pct))  // already a fraction in recipe (0.5 = 50%)
+    : 0.5;
+
   S().upsertStrategyState.run(
     strategyId,
     `🤖 ${recipe.name || strategyId}`,
@@ -160,6 +214,10 @@ function syncStrategyStateRow(strategyId, recipe) {
     t3Trig, t3Sell,
     tier3Trail,
     exit.breakeven_after_tier1 ? 1 : 0,
+    dcaEnabled, dcaTriggerFraction, dcaSizeFraction,
+    dca.min_age_sec || 60,
+    dca.max_age_min || 30,
+    dca.max_dca || 1,
     Date.now(),
   );
 }
@@ -173,7 +231,7 @@ async function evaluateOneMint(strategy, mintAddress) {
   // Pull all ML predictions in one round-trip
   const preds = await getAllPredictions(mintAddress, `agent_eval:${strategy.id}`);
   if (!preds) return false;
-  if (!evalEntry(recipe, null, features, preds)) return false;
+  if (!evalEntry(recipe, mintAddress, features, preds)) return false;
   // Cooldown — don't re-enter same mint in same strategy too fast
   const cutoff = Date.now() - ENTRY_COOLDOWN_MS;
   const recent = S().recentEntry.get(strategy.id, mintAddress, cutoff);

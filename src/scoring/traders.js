@@ -24,21 +24,22 @@ function S() {
       LEFT JOIN mints m ON m.mint_address = wh.mint_address
       WHERE wh.wallet = ?
     `),
+    // Note: tracked / is_kol / tracked_since / kol_since are owned by
+    // src/scoring/wallet-leaderboard.js (top-50 dynamic system). This sweep
+    // computes per-wallet stats but does not touch leaderboard membership.
     updateWallet: d.prepare(`UPDATE wallets SET
       realized_pnl = ?, unrealized_pnl = ?, realized_pnl_30d = ?,
       position_count = ?, closed_position_count = ?, closed_30d = ?,
       win_count = ?, loss_count = ?, win_rate = ?,
       win_count_30d = ?, win_rate_30d = ?,
+      realized_pnl_7d = ?, closed_7d = ?, win_count_7d = ?, win_rate_7d = ?,
       best_coin_pnl = ?, worst_coin_pnl = ?,
       avg_hold_seconds = ?, sniper_ratio = ?, first_block_ratio = ?,
       trades_per_position = ?, graduated_touched = ?,
       sell_100pct_count = ?, sell_100pct_ratio = ?,
       category = ?, bot_flags = ?, copy_friendly = ?,
-      tracked = ?, is_kol = ?,
       last_activity_at = ?
       WHERE address = ?`),
-    setTrackedSince: d.prepare(`UPDATE wallets SET tracked_since = ? WHERE address = ? AND tracked_since IS NULL`),
-    setKolSince: d.prepare(`UPDATE wallets SET kol_since = ? WHERE address = ? AND kol_since IS NULL`),
     trackedBuyersOnMint: d.prepare(`
       SELECT DISTINCT t.wallet, MIN(t.timestamp) AS first_buy_at, MIN(t.buyer_rank) AS first_rank
       FROM trades t
@@ -69,11 +70,14 @@ export function recomputeWallet(address) {
 
   const now = Date.now();
   const cutoff30d = now - config.traders.rollingDays * DAY_MS;
+  const cutoff7d = now - 7 * DAY_MS;
 
   let realized = 0, unrealized = 0;
   let realized30d = 0;
   let closed = 0, closed30d = 0;
   let wins = 0, losses = 0, wins30d = 0;
+  // 7d hot-streak overlay (Tier B #1).
+  let realized7d = 0, closed7d = 0, wins7d = 0;
   let best = 0, worst = 0;
   let holdSeconds = 0, holdSamples = 0;
   let lastActivity = 0;
@@ -119,6 +123,12 @@ export function recomputeWallet(address) {
         realized30d += realizedThis;
         if (realizedThis > 0) wins30d++;
       }
+      // 7d window (subset of 30d) — parallel tracking for momentum.
+      if (h.last_activity_at && h.last_activity_at >= cutoff7d) {
+        closed7d++;
+        realized7d += realizedThis;
+        if (realizedThis > 0) wins7d++;
+      }
     }
     if (h.last_activity_at && h.last_activity_at > lastActivity) lastActivity = h.last_activity_at;
     if (h.migrated) graduatedTouched++;
@@ -126,6 +136,7 @@ export function recomputeWallet(address) {
 
   const winRate = closed ? wins / closed : 0;
   const winRate30d = closed30d ? wins30d / closed30d : 0;
+  const winRate7d = closed7d ? wins7d / closed7d : 0;
   const avgHold = holdSamples ? Math.round(holdSeconds / holdSamples) : 0;
   const sell100pctRatio = closed ? sell100pctCount / closed : 0;
 
@@ -146,43 +157,20 @@ export function recomputeWallet(address) {
   };
   const { category, flags, copyFriendly } = classify(ctx);
 
-  const t = config.traders;
-  const qualifies =
-    closed30d >= t.minClosedPositions &&
-    realized30d >= t.minRealizedPnlSol &&
-    winRate30d >= t.minWinRate &&
-    sniperRatio <= t.maxSniperRatio &&
-    graduatedTouched >= t.minGraduatedTouched;
-
-  const tracked = info.manually_tracked ? 1 : (qualifies ? 1 : 0);
-
-  const k = t.kol;
-  const isKolQualifies =
-    qualifies &&
-    closed30d >= k.minClosed30d &&
-    realized30d >= k.minRealizedPnl30d &&
-    winRate30d >= k.minWinRate30d &&
-    graduatedTouched >= k.minGraduatedTouched &&
-    sniperRatio <= k.maxSniperRatio;
-  const isKol = isKolQualifies ? 1 : 0;
-
   s.updateWallet.run(
     realized, unrealized, realized30d,
     positionCount, closed, closed30d,
     wins, losses, winRate,
     wins30d, winRate30d,
+    realized7d, closed7d, wins7d, winRate7d,
     best, worst,
     avgHold, sniperRatio, firstBlockRatio,
     tradesPerPosition, graduatedTouched,
     sell100pctCount, sell100pctRatio,
     category, JSON.stringify(flags), copyFriendly ? 1 : 0,
-    tracked, isKol,
     lastActivity || now,
     address
   );
-
-  if (tracked) s.setTrackedSince.run(now, address);
-  if (isKol) s.setKolSince.run(now, address);
 }
 
 function classify(ctx) {
@@ -237,11 +225,16 @@ export function recomputeEveryWallet() {
 }
 
 // Stale wallet cleanup — keeps DB lean by deleting wallets we have no reason
-// to track. "Reasons to keep" (any one): manually tracked, KOL, qualified
-// tracked, has migrator_score signal, or trade activity within `maxIdleMs`.
+// to track. "Reasons to keep" (any one): manually tracked, KOL, leaderboard,
+// has migrator_score signal, or trade activity within `maxIdleMs`.
 // If a deleted wallet ever trades again, the processor's upsertWallet recreates
 // the row with a fresh classification on its next sweep — no permanent loss.
-export function cleanupStaleWallets({ maxIdleMs = 24 * 60 * 60 * 1000 } = {}) {
+//
+// Retention bumped from 24h → 35 days so the leaderboard's 30-day scoring
+// window has full data coverage. Without this, a wallet that goes idle for
+// 24h drops out of the wallets table entirely, taking its 30d realized PnL
+// with it — leaderboard would lose context on real wallets between cycles.
+export function cleanupStaleWallets({ maxIdleMs = 35 * 24 * 60 * 60 * 1000 } = {}) {
   const d = db();
   const cutoff = Date.now() - maxIdleMs;
   const info = d.prepare(`

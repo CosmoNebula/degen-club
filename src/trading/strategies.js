@@ -130,6 +130,12 @@ function S() {
     `),
     toggleStrategy: d.prepare('UPDATE strategy_state SET enabled = 1 - enabled, updated_at = ? WHERE name = ?'),
     countOpen: d.prepare("SELECT COUNT(*) AS n FROM paper_positions WHERE status = 'open'"),
+    // Anti-snipe gate: distinct buyers + distinct sniper-tagged buyers for a
+    // mint. Uses idx_trades_sniper for an efficient scan.
+    sniperRatio: d.prepare(`SELECT
+        COUNT(DISTINCT wallet) AS unique_buyers,
+        COUNT(DISTINCT CASE WHEN is_sniper = 1 THEN wallet END) AS sniper_buyers
+      FROM trades WHERE mint_address = ? AND is_buy = 1`),
     // Exposure = at-risk capital only. Once a position has realized enough
     // through tier sells to cover its cost basis, it's house money and no
     // longer counts toward maxSolExposure — the remaining bag is pure
@@ -230,6 +236,15 @@ export function updateStrategySettings(name, fields) {
   return getStrategy(name);
 }
 
+// Sniper-dominance threshold for the anti-snipe gate. If 60%+ of distinct
+// buyers were tagged is_sniper, the cohort is dominated by sniper bots that
+// historically dump on retail entry. Tunable — start strict, relax if we see
+// the gate rejecting too many real opportunities.
+const ANTI_SNIPE_RATIO = 0.6;
+// Don't apply the anti-snipe gate until at least N distinct buyers exist —
+// before that the ratio is noisy (1/1 = 100% sniper triggers on a single buy).
+const ANTI_SNIPE_MIN_BUYERS = 5;
+
 function evaluateGuards(mint, opts = {}) {
   const g = config.strategies.global;
   const ageSec = (Date.now() - mint.created_at) / 1000;
@@ -245,6 +260,20 @@ function evaluateGuards(mint, opts = {}) {
   if (!opts.skipHolderGate) {
     const holder = passesHolderDiversity(mint.mint_address, opts);
     if (!holder.pass) return { pass: false, reason: 'HOLDER_GATE', detail: holder.reason };
+  }
+  // Anti-snipe filter: reject if sniper-tagged wallets dominate the buyer
+  // cohort. Per-entry query (cheap, entries are <10/min vs position
+  // monitor's 800/sec ticks). Skip if cohort is too small to be meaningful.
+  if (!opts.skipAntiSnipe) {
+    const row = S().sniperRatio.get(mint.mint_address);
+    const uniq = row?.unique_buyers || 0;
+    const snipers = row?.sniper_buyers || 0;
+    if (uniq >= ANTI_SNIPE_MIN_BUYERS) {
+      const ratio = snipers / uniq;
+      if (ratio >= ANTI_SNIPE_RATIO) {
+        return { pass: false, reason: 'ANTI_SNIPE', detail: `${snipers}/${uniq}=${(ratio*100).toFixed(0)}%` };
+      }
+    }
   }
   return { pass: true };
 }

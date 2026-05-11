@@ -16,6 +16,7 @@ import { config } from '../config.js';
 
 const RPC_WS = process.env.SOLANA_RPC_WS || 'wss://api.mainnet-beta.solana.com';
 const RPC_HTTP = process.env.SOLANA_RPC_HTTP || 'https://api.mainnet-beta.solana.com';
+const PRICE_FLOOR_SOL = 1e-9;  // pump.fun bonding curve floor ~2.8e-8 — anything below this is migration-moment garbage
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const REFRESH_INTERVAL_MS = 30 * 1000;       // re-evaluate which mints to sub every 30s
@@ -35,20 +36,27 @@ function decodeAndUpdate(mintAddress, accountInfoData) {
   try {
     const buf = Buffer.from(accountInfoData[0], accountInfoData[1] || 'base64');
     const curve = BondingCurveAccount.fromBuffer(buf);
+    // Once the bonding curve completes, its PDA state becomes stale relative
+    // to the new pump-amm pool — the AMM trades at a different price and the
+    // bond-curve account stops getting trade updates. A migration-moment tick
+    // (2026-05-11 Goblinjak: AMM at 5.45e-7, bond-curve final at 3.20e-7)
+    // produced a 68pp drawdown vs the AMM peak and fired the moonbag trail
+    // immediately. Mark migrated, then bail — leave price updates to the AMM
+    // pollers (dexscreener / migrated-tracker / pump-amm trade feed).
+    if (curve.complete) {
+      db().prepare(`UPDATE mints SET migrated = 1, migrated_at = COALESCE(migrated_at, ?) WHERE mint_address = ? AND migrated = 0`)
+        .run(Date.now(), mintAddress);
+      return;
+    }
     const mcapSol = lamportsToSol(curve.getMarketCapSOL());
-    // priceSol per token: mcap / supply (supply is in microunits — pump.fun tokens have 6 decimals).
     const supplyTokens = Number(curve.tokenTotalSupply) / 1e6;
     const priceSol = supplyTokens > 0 ? mcapSol / supplyTokens : 0;
+    if (priceSol < PRICE_FLOOR_SOL) return;
     db().prepare(`UPDATE mints SET
       current_market_cap_sol = ?,
       last_price_sol = ?,
       last_trade_at = ?
       WHERE mint_address = ?`).run(mcapSol, priceSol, Date.now(), mintAddress);
-    // Migrated flag flips when complete=true on curve
-    if (curve.complete) {
-      db().prepare(`UPDATE mints SET migrated = 1, migrated_at = COALESCE(migrated_at, ?) WHERE mint_address = ? AND migrated = 0`)
-        .run(Date.now(), mintAddress);
-    }
   } catch (err) {
     // Self-healing: per-mint failure counter. After N decode failures, blacklist
     // the mint to stop log spam and avoid wasted work. Some pump.fun bonding

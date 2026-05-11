@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-DB_PATH = Path('/Users/karaclaycomb/Desktop/degen-club/data/degen.db')
+DB_PATH = Path('/Users/karaclaycomb/dev/degen-club/data/degen.db')
 
 # Decision moments — age in seconds at which we snapshot the mint
 DECISION_MOMENTS_SEC = [60, 300, 900, 3600]

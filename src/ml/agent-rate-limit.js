@@ -8,22 +8,26 @@ import { db } from '../db/index.js';
 
 // Hard daily caps per subsystem. Tune here if needed.
 export const DAILY_CAPS = {
-  'agent':         12,   // strategy proposals + retirements (combined)
-  'post-mortem':    8,   // 3h batch — faster iteration, plenty of headroom
-  'daily-report':   1,   // 1 per day
-  'calib-review':   1,   // 1 per day
-  'mint-intel':    24,   // 1 per hour batch
-  'news-synthesis': 6,   // every 4h synthesis of news/trends/social
+  'agent':              55,  // strategy proposals + retirements + modifications
+  'post-mortem':         8,  // 3h batch — cross-trade pattern analysis
+  'daily-report':        1,  // 1 per day retrospective
+  'calib-review':        1,  // 1 per day calibration honesty audit
+  'mint-intel':         24,  // 1 per hour batch — ruggy/winner mint classification
+  'news-synthesis':      6,  // every 4h synthesis of news/trends/social
+  'concentration-check': 4,  // every 6h — flag if one exit_reason dominates
+  'market-regime':       2,  // noon + midnight — aggressive/normal/cautious posture
 };
 
 // Burst caps — max consults per single tick, prevents fan-out within one cycle
 export const BURST_CAPS = {
-  'agent':         3,
-  'post-mortem':   1,    // batch design — one call analyzes all recent trades
-  'daily-report':  1,
-  'calib-review':  1,
-  'mint-intel':    1,
-  'news-synthesis': 1,
+  'agent':              3,
+  'post-mortem':        1,
+  'daily-report':       1,
+  'calib-review':       1,
+  'mint-intel':         1,
+  'news-synthesis':     1,
+  'concentration-check': 1,
+  'market-regime':      1,
 };
 
 let stmts = null;

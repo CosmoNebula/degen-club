@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-DB_PATH = Path('/Users/karaclaycomb/Desktop/degen-club/data/degen.db')
+DB_PATH = Path('/Users/karaclaycomb/dev/degen-club/data/degen.db')
 
 FEATURE_COLS = [
     'snapshot_age_sec',  # which decision moment (60/300/900/3600)
@@ -49,6 +49,65 @@ FEATURE_COLS = [
     'tracked_buyers',
     'kol_buyers',
     'bundle_buyers',
+    'top10_buyers',
+    'top50_buyers',
+    'weighted_buyer_quality',
+    'avg_buy_sol',
+    'median_buy_sol',
+    'p90_buy_sol',
+    'max_buy_sol',
+    'std_buy_sol',
+    'avg_sell_sol',
+    'median_sell_sol',
+    'p90_sell_sol',
+    'max_sell_sol',
+    'std_sell_sol',
+    'top1_buyer_sol_pct',
+    'top3_buyer_sol_pct',
+    'top5_buyer_sol_pct',
+    'buyer_hhi',
+    'top1_seller_sol_pct',
+    'top3_seller_sol_pct',
+    'top5_seller_sol_pct',
+    'seller_hhi',
+    'sniper_buyer_count',
+    'pct_sniper_buys',
+    'first_block_buyer_count',
+    'pct_first_block_buys',
+    'avg_buyer_rank',
+    'median_buyer_rank',
+    'pct_buyers_in_first_10',
+    'tracked_first_seen_sec',
+    'kol_first_seen_sec',
+    'seconds_to_5_unique_buyers',
+    'seconds_to_10_unique_buyers',
+    'n_reversals_in_window',
+    'longest_up_run_pct',
+    'longest_down_run_pct',
+    'max_30s_buy_sol',
+    'max_30s_buy_count',
+    'max_30s_buy_sell_ratio',
+    'creator_buys_post_launch',
+    'creator_sells_post_launch',
+    'creator_sol_to_sidewallets',
+    'creator_sidewallet_buyer_count',
+    'inflow_accel_pct',
+    'buy_count_accel_pct',
+    'top10_buy_timing_std_sec',
+    'max_30s_sell_sol',
+    'max_30s_sell_count',
+    'max_30s_unique_sellers',
+    'creator_recent_launch_siblings',
+    'trend_signal_match',
+    'narrative_match_count',
+    'pressure_60_buy_pct',
+    'pressure_60_net',
+    'telegram_member_count',
+    'buyer_hhi_delta',
+    'seller_hhi_delta',
+    'bot_sniper_buyer_count',
+    'fast_human_sniper_count',
+    'seconds_since_prev_creator_death',
     'trade_count',
     'trades_per_min',
     'volatility_pct',
@@ -65,6 +124,11 @@ LABEL_COLS = [
     'peak_pct_max',
     'time_to_peak_sec',
     'will_die_fast',
+    'rug_within_5min',
+    'migrates_within_15min',
+    'drawdown_from_peak_pct',
+    'hits_2x_within_1h',
+    'time_to_peak_5x_sec',
 ]
 
 
@@ -77,6 +141,8 @@ def main():
                     help='Filter by snapshot_age_sec (default: all)')
     ap.add_argument('--target', type=str, default=None,
                     help='Filter to specific label (drops rows where target is null)')
+    ap.add_argument('--include-zero-price', action='store_true',
+                    help='Include snapshots with last_price_sol <= 1e-9 (debug only — adds noise)')
     args = ap.parse_args()
 
     out_path = Path(__file__).parent.parent / args.out
@@ -88,6 +154,13 @@ def main():
     params = []
     if not args.include_unresolved:
         where.append('labels_resolved_at IS NOT NULL')
+    # Exclude snapshots with junk price (last_price_sol <= 1e-9). These are
+    # mints with NO trades at snapshot time — peak_pct ratios are ungroundable
+    # and several labels (rug_within_5min, drawdown_from_peak_pct) end up NULL.
+    # ~15% of historical snapshots fall in this bucket; including them adds
+    # noise without information. --include-zero-price overrides for debugging.
+    if not args.include_zero_price:
+        where.append('last_price_sol > 1e-9')
     if args.age:
         where.append(f'snapshot_age_sec IN ({",".join("?" * len(args.age))})')
         params.extend(args.age)

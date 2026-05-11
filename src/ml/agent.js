@@ -19,6 +19,8 @@ import { startPostMortem } from './agent-post-mortem.js';
 import { startDailyReport } from './agent-daily-report.js';
 import { startCalibrationReview } from './agent-calibration-review.js';
 import { startMintIntel } from './agent-mint-intel.js';
+import { startConcentrationCheck } from './agent-concentration-check.js';
+import { startMarketRegime } from './agent-market-regime.js';
 import { canConsult, recordConsult, getRateLimitState, BURST_CAPS } from './agent-rate-limit.js';
 import { getModelHealth } from './drift-monitor.js';
 
@@ -28,14 +30,34 @@ const MODELS_DIR = path.resolve(__dirname, '..', '..', 'ml', 'models');
 const CYCLE_INTERVAL_MS = 30 * 60 * 1000;   // 30 min
 const FIRST_CYCLE_DELAY_MS = 5 * 60 * 1000; // 5 min after boot — let things stabilize
 const STRATEGY_SOAK_HOURS = 4;              // shorter soak — bad strategies bleed, want to iterate fast
-const MAX_CONSULTS_PER_DAY = 12;            // soft rate limit on LLM calls
-// Emergency retire DISABLED — user wants strategies to keep running while
-// learning, even through drawdowns. Paper money is paper. Agent's own consult
-// path can still retire after soak time + Claude evaluation.
-const EMERGENCY_PNL_FRACTION = -999;        // disabled (no realistic loss triggers it)
+const MAX_CONSULTS_PER_DAY = 55;            // soft rate limit on LLM calls
+// Bleeding-strategy thresholds. When a live strategy has clearly bled
+// (>=BLEED_MIN_TRADES closed AND realized PnL fraction <= BLEED_PNL_FRACTION
+// of starting wallet), the agent is allowed to propose VARIANTS even with
+// live strategies running, AND the re-consult cooldown shortens. Philosophy:
+// "being wrong should make the agent strive harder to find a fix, not slow
+// down." Paper money is paper, so we don't auto-retire — we iterate.
+const BLEED_PNL_FRACTION = -0.03;           // -3% of starting wallet → "actively bleeding"
+const BLEED_MIN_TRADES = 50;                // need enough samples for the signal to be real
+const BLEED_RECONSULT_HOURS = 2;            // normal cooldown is 12h; if bleeding, re-eval every 2h
+const STRATEGY_CAP = 8;                     // max live strategies; evolutionary retire-worst makes room
+const STRATEGY_FRESH_FLOOR = 4;             // when live count drops below this, agent proposes new ones regardless of bleeders — keeps roster healthy
+const ORPHAN_AGE_HOURS = 1;                 // strategies w/ 0 entries past this age get auto-retired — 1h is enough to know filters are too strict
+const RETIRE_WORST_MIN_TRADES = 10;         // need at least N closed trades before considering for evolutionary retire
+// Emergency retire DISABLED for user-tuned strategies — agent's modify path
+// can still adjust them based on evidence.
+const EMERGENCY_PNL_FRACTION = -999;        // disabled
 const EMERGENCY_MIN_TRADES = 999999;        // disabled
 
 let stmts = null;
+// Set by maybeProposeStrategy when one or more live strategies are bleeding,
+// read by buildContext to inject a "fix this" prompt section for Claude.
+let _bleedersForNextProposal = [];
+// Tracks recent orphan retirements so the next propose-strategy prompt can
+// tell Claude "these filter stacks got ZERO entries — they were too strict."
+// Cleared after each propose call. Caps at 8 entries to keep prompt tight.
+let _recentOrphans = [];
+const RECENT_ORPHANS_MAX = 8;
 function S() {
   if (stmts) return stmts;
   const d = db();
@@ -49,6 +71,94 @@ function S() {
     log: d.prepare(`INSERT INTO ml_agent_log (timestamp, level, category, strategy_id, message, data_json)
        VALUES (?, ?, ?, ?, ?, ?)`),
     liveStrategies: d.prepare(`SELECT * FROM ml_agent_strategies WHERE status = 'live'`),
+    // DCA performance per strategy. Compares the realized PnL of positions
+    // that DCA'd (dca_count > 0) against positions on the same strategy that
+    // did NOT DCA. Agent uses this to decide whether to keep dca_enabled on
+    // or to tune dca_trigger_pct / dca_size_pct. Only shows strategies that
+    // have actually fired DCA at least once — quiet on non-DCA strategies.
+    // Data quality summary — closed positions flagged as junk_exit_tick
+    // (exit recorded against a price below the bonding-curve floor).
+    // Their realized_pnl_sol is fake-negative; per-strategy PnL/lift should
+    // be read with that caveat.
+    dataQualitySummary: d.prepare(`
+      SELECT
+        strategy,
+        COUNT(*) AS total,
+        SUM(CASE WHEN data_quality_flag IS NOT NULL THEN 1 ELSE 0 END) AS flagged,
+        ROUND(100.0 * SUM(CASE WHEN data_quality_flag IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS pct_flagged
+      FROM paper_positions
+      WHERE status='closed' AND entered_at > strftime('%s','now')*1000 - 7*86400000
+      GROUP BY strategy
+      HAVING flagged > 0
+      ORDER BY pct_flagged DESC
+    `),
+    // Rejected vs accepted comparison (Tier A #2, added 2026-05-11).
+    // Per-reject-reason: count, then JOIN to ml_mint_snapshots labels to compute
+    // "what we passed on" outcomes (peaked_30/100 rates, avg peak%). Lets the
+    // agent see if it's rejecting real winners. Bucketed by reject reason so
+    // we know which gate is filtering well vs filtering blindly.
+    rejectionLearnings: d.prepare(`
+      SELECT
+        g.reason,
+        COUNT(*) AS n_rejected,
+        AVG(CASE WHEN s.peaked_30 IS NOT NULL THEN s.peaked_30 END) AS p30_rate,
+        AVG(CASE WHEN s.peaked_100 IS NOT NULL THEN s.peaked_100 END) AS p100_rate,
+        AVG(CASE WHEN s.peak_pct_max IS NOT NULL THEN s.peak_pct_max END) AS avg_peak_pct,
+        SUM(CASE WHEN s.peak_pct_max >= 1.0 THEN 1 ELSE 0 END) AS n_2x_missed,
+        SUM(CASE WHEN s.peak_pct_max >= 3.0 THEN 1 ELSE 0 END) AS n_4x_missed,
+        SUM(CASE WHEN s.migrated = 1 THEN 1 ELSE 0 END) AS n_migrated_missed,
+        SUM(CASE WHEN s.labels_resolved_at IS NOT NULL THEN 1 ELSE 0 END) AS n_labeled
+      FROM gate_rejections g
+      LEFT JOIN ml_mint_snapshots s ON s.mint_address = g.mint_address
+        AND s.snapshot_age_sec = 60
+      WHERE g.first_rejected_at > strftime('%s','now')*1000 - 7*86400000
+      GROUP BY g.reason
+      ORDER BY n_rejected DESC
+      LIMIT 12
+    `),
+    // Baseline accepted-entry outcomes for comparison.
+    acceptedBaseline: d.prepare(`
+      SELECT
+        COUNT(*) AS n,
+        AVG(realized_pnl_pct) AS avg_pnl_pct,
+        AVG(highest_pct) AS avg_peak_pct,
+        SUM(CASE WHEN highest_pct >= 1.0 THEN 1 ELSE 0 END) AS n_2x,
+        SUM(CASE WHEN highest_pct >= 3.0 THEN 1 ELSE 0 END) AS n_4x
+      FROM paper_positions
+      WHERE status='closed' AND entered_at > strftime('%s','now')*1000 - 7*86400000
+    `),
+    // Anomaly detector summary for the agent's strategy-proposal context.
+    // 6 kinds (volume_spike, tracked_cohort, dormant_creator, theme_cluster,
+    // kol_cluster, tracked_dump) — the agent never saw these. Now it does.
+    recentAnomalySummary: d.prepare(`
+      SELECT kind, severity, COUNT(*) AS n FROM anomalies
+      WHERE ts > strftime('%s','now')*1000 - 4*3600000
+      GROUP BY kind, severity ORDER BY n DESC
+    `),
+    recentAnomalyExamples: d.prepare(`
+      SELECT kind, subject, description, datetime(ts/1000,'unixepoch','localtime') AS at
+      FROM anomalies
+      WHERE ts > strftime('%s','now')*1000 - 4*3600000 AND severity = 'high'
+      ORDER BY ts DESC LIMIT 6
+    `),
+    dcaPerformance: d.prepare(`
+      SELECT
+        strategy,
+        COUNT(*) AS n_total,
+        SUM(CASE WHEN dca_count > 0 THEN 1 ELSE 0 END) AS n_dca,
+        SUM(CASE WHEN dca_count > 0 AND realized_pnl_pct > 0 THEN 1 ELSE 0 END) AS n_dca_wins,
+        SUM(CASE WHEN dca_count = 0 AND realized_pnl_pct > 0 THEN 1 ELSE 0 END) AS n_nodca_wins,
+        ROUND(AVG(CASE WHEN dca_count > 0 THEN realized_pnl_pct END) * 100, 1) AS avg_pnl_pct_dca,
+        ROUND(AVG(CASE WHEN dca_count = 0 THEN realized_pnl_pct END) * 100, 1) AS avg_pnl_pct_no_dca,
+        ROUND(AVG(CASE WHEN dca_count > 0 THEN dca_total_sol_added END), 4) AS avg_sol_added,
+        ROUND(AVG(CASE WHEN dca_count > 0 THEN highest_pct END) * 100, 1) AS avg_post_dca_peak_pct
+      FROM paper_positions
+      WHERE status = 'closed'
+        AND entered_at > strftime('%s','now')*1000 - 7*86400000
+      GROUP BY strategy
+      HAVING n_dca > 0
+      ORDER BY n_total DESC
+    `),
     insertStrategy: d.prepare(`INSERT INTO ml_agent_strategies
        (id, name, rationale, recipe_json, status, created_at, parent_strategy_id, generation)
        VALUES (?, ?, ?, ?, 'live', ?, ?, ?)`),
@@ -423,7 +533,10 @@ function S() {
           MAX(CASE WHEN target='peaked_100' THEN prob END) AS p100,
           MAX(CASE WHEN target='peaked_300' THEN prob END) AS p300,
           MAX(CASE WHEN target='migrated' THEN prob END) AS mig,
-          MAX(CASE WHEN target='will_die_fast' THEN prob END) AS die
+          MAX(CASE WHEN target='will_die_fast' THEN prob END) AS die,
+          MAX(CASE WHEN target='rug_within_5min' THEN prob END) AS rug5,
+          MAX(CASE WHEN target='migrates_within_15min' THEN prob END) AS mig15,
+          MAX(CASE WHEN target='hits_2x_within_1h' THEN prob END) AS h2x1h
         FROM ml_predictions
         WHERE prob IS NOT NULL
           AND timestamp > strftime('%s','now')*1000 - 7*86400000
@@ -436,12 +549,13 @@ function S() {
           MAX(peaked_300) AS y_p300,
           MAX(migrated) AS y_mig,
           MAX(peak_pct_max) AS y_peak,
+          MAX(hits_2x_within_1h) AS y_h2x1h,
           MAX(tracked_buyers) AS tracked_n
         FROM ml_mint_snapshots
         WHERE labels_resolved_at IS NOT NULL
         GROUP BY mint_address
       )
-      SELECT p.*, l.y_p30, l.y_p100, l.y_p300, l.y_mig, l.y_peak, l.tracked_n
+      SELECT p.*, l.y_p30, l.y_p100, l.y_p300, l.y_mig, l.y_peak, l.y_h2x1h, l.tracked_n
       FROM per_mint_preds p
       JOIN per_mint_labels l ON l.mint_address = p.mint_address
       WHERE p.p30 IS NOT NULL OR p.mig IS NOT NULL
@@ -821,6 +935,25 @@ function buildContext() {
     }
   }
   lines.push('');
+  if (_bleedersForNextProposal && _bleedersForNextProposal.length > 0) {
+    lines.push('=== BLEEDING STRATEGIES — PROPOSE A VARIANT THAT FIXES THE FAILURE MODE ===');
+    for (const b of _bleedersForNextProposal) {
+      lines.push(`  ${b.id}: ${b.closed} closed trades, ${b.pnl_sol.toFixed(3)} SOL realized (${b.pnl_pct_of_wallet.toFixed(1)}% of wallet). Read its exit_reason distribution and recent trade ml_features in the data above and propose a recipe that targets a DIFFERENT failure mode — different entry filter, different exit policy, different size scaling, different time-of-day, etc. Do NOT just tweak parameters; propose a meaningfully different recipe with a clear hypothesis for why it should outperform.`);
+    }
+    lines.push('');
+  }
+  if (_recentOrphans && _recentOrphans.length > 0) {
+    lines.push('=== ORPHANED STRATEGIES (your recent recipes that NEVER fired an entry) ===');
+    lines.push(`These ${_recentOrphans.length} recipes got 0 entries in ≥1h. Their filter stacks were too strict to match any real mint. DO NOT propose another recipe with this much overlap — LOOSEN one or more conditions, or reach for a different signal entirely. Common failure mode: too many stacked conditions, drawdown_from_peak_pct filter too tight, mint-age window too narrow.`);
+    for (const o of _recentOrphans) {
+      lines.push(`  ${o.name} (retired after ${o.age_hours}h, 0 entries):`);
+      lines.push(`    filters: ${o.conditions.join(' AND ')}`);
+      lines.push(`    window: ${o.age_window}`);
+    }
+    lines.push('');
+    lines.push('When you propose your next recipe, drop AT LEAST one filter condition vs. these orphans, OR widen the mint-age window, OR loosen a probability threshold. Zero entries means zero learning.');
+    lines.push('');
+  }
   lines.push('=== FRICTION ===');
   lines.push('Realistic exit costs: ~3-8% slippage on entry, ~5-10% on exit, plus priority fee (~0.005 SOL contested).');
   lines.push('A predicted +30% peak is barely break-even after friction. Need clear edge above that.');
@@ -872,6 +1005,71 @@ function buildContext() {
       lines.push(`    n=${r.n_trades} (${labeled} labeled) · ${r.wins}W · realized PnL ${r.pnl_sol} SOL · avg_pnl_pct=${pnlPct}%`);
       lines.push(`    ENTRIES caught: ${p30}% peaked_30 · ${p100}% peaked_100 · ${p300}% peaked_300 · ${mig}% migrated · avg true peak ${truePeak}%`);
       lines.push(`    EXITS captured: avg realized peak only ${realizedPeak}% during hold (vs true peak ${truePeak}% — gap = exit logic leaving money on table)`);
+    }
+  }
+
+  // DATA QUALITY NOTICE — fired only when there are flagged historical
+  // positions. Two known flag values:
+  //   junk_exit_tick — pre-2026-05-11 sub-curve-floor exit ticks
+  //   dup_tier_fire — May 9-11 2026 duplicate-bot-tree caused tiers to
+  //                   fire 2-3× on the same position, inflating realized PnL
+  const dqRows = s.dataQualitySummary.all();
+  if (dqRows.length > 0) {
+    lines.push('');
+    lines.push('=== DATA QUALITY NOTICE — historical PnL inflation/distortion ===');
+    lines.push('Some closed positions have unreliable realized_pnl_sol. Two known causes:');
+    lines.push('  • junk_exit_tick: pre-2026-05-11 the bot accepted sub-bonding-curve-floor price ticks at exit, recording fake -99% losses on positions that exited fine. Forward guard now in place.');
+    lines.push('  • dup_tier_fire: May 9-11 a duplicate-bot-tree bug caused tier sells to fire 2-3× on the same position, INFLATING realized PnL by selling phantom tokens. Fixed 2026-05-11 via launchd-only supervision.');
+    lines.push('Per-strategy flagged counts:');
+    for (const r of dqRows) {
+      lines.push(`  ${r.strategy}: ${r.flagged}/${r.total} closes flagged (${r.pct_flagged}% of last 7d)`);
+    }
+    lines.push('When deciding whether a strategy is broken, MENTALLY EXCLUDE flagged rows. New closes post-2026-05-11 are clean.');
+  }
+
+  // REJECTED VS ACCEPTED — close the open learning loop. gate_rejections
+  // table has every mint we passed on; join to ml_mint_snapshots gives the
+  // ACTUAL outcome of mints we rejected. Lets the agent see which gates are
+  // filtering correctly vs filtering blindly.
+  const rejectionLearnings = s.rejectionLearnings.all();
+  if (rejectionLearnings.length > 0) {
+    const baseline = s.acceptedBaseline.get();
+    lines.push('');
+    lines.push('=== REJECTED VS ACCEPTED (last 7d) — are gates filtering winners or losers? ===');
+    if (baseline?.n > 0) {
+      lines.push(`ACCEPTED ENTRIES baseline (n=${baseline.n}): avg PnL ${(baseline.avg_pnl_pct * 100).toFixed(1)}% · avg realized peak ${(baseline.avg_peak_pct * 100).toFixed(0)}% · ${baseline.n_2x} hit 2x · ${baseline.n_4x} hit 4x`);
+      lines.push('');
+    }
+    lines.push('REJECTED mints (TRUE outcomes — what gates filtered out):');
+    for (const r of rejectionLearnings) {
+      const labeled = r.n_labeled || 0;
+      if (labeled < 5) {
+        lines.push(`  ${r.reason}: ${r.n_rejected} rejected · ${labeled} labeled (too fresh to assess)`);
+        continue;
+      }
+      const p30 = ((r.p30_rate || 0) * 100).toFixed(1);
+      const p100 = ((r.p100_rate || 0) * 100).toFixed(1);
+      const peakPct = ((r.avg_peak_pct || 0) * 100).toFixed(0);
+      lines.push(`  ${r.reason}: ${r.n_rejected} rejected · of ${labeled} labeled: p30=${p30}% p100=${p100}% avg_peak=${peakPct}% · ${r.n_2x_missed} hit 2x · ${r.n_4x_missed} hit 4x · ${r.n_migrated_missed} migrated`);
+    }
+    lines.push('');
+    lines.push('Interpret: if a reject reason\'s p100 rate is HIGHER than the accepted baseline\'s peak rate, the gate is rejecting winners — re-examine that gate or use a different filter. If p100 is LOW, the gate is doing its job.');
+  }
+
+  // DCA performance — only renders if any strategy fired DCA in the last 7d.
+  // Tells the agent whether scale-in helped or hurt per strategy. Agent can
+  // tune dca_trigger_pct / dca_size_pct / dca_enabled based on these numbers.
+  const dcaPerf = s.dcaPerformance.all();
+  if (dcaPerf.length > 0) {
+    lines.push('');
+    lines.push('=== DCA PERFORMANCE (last 7d) — did scale-in help on the strategies that opted in? ===');
+    lines.push('Compares DCA\'d positions vs non-DCA\'d positions WITHIN the same strategy.');
+    lines.push('If avg_pnl_dca >> avg_pnl_no_dca → DCA is working; consider widening conditions (lower trigger_pct = catch deeper dips, higher size_pct = bigger adds).');
+    lines.push('If avg_pnl_dca << avg_pnl_no_dca → DCA is throwing good money after bad; tighten trigger_pct (e.g. -40% instead of -25%) or disable.');
+    for (const r of dcaPerf) {
+      lines.push(`  ${r.strategy}:`);
+      lines.push(`    DCA'd ${r.n_dca}/${r.n_total} positions (${r.n_dca_wins}W on DCA vs ${r.n_nodca_wins}W on non-DCA)`);
+      lines.push(`    avg PnL: DCA=${r.avg_pnl_pct_dca ?? '?'}% · non-DCA=${r.avg_pnl_pct_no_dca ?? '?'}% · avg ${r.avg_sol_added ?? 0} SOL added per DCA · post-DCA peak ${r.avg_post_dca_peak_pct ?? '?'}%`);
     }
   }
 
@@ -1045,6 +1243,29 @@ function buildContext() {
     else if (regimeLabel.includes('COLD') || regimeLabel.includes('COOL')) lines.push('Tactic: regime is weak — be MORE selective. Tighten thresholds, smaller size, may be a day to skip mediocre setups entirely.');
   }
 
+  // === ANOMALY DETECTOR (LAST 4H) ===
+  // 6 anomaly kinds: volume_spike, tracked_cohort, dormant_creator,
+  // theme_cluster, kol_cluster, tracked_dump. Was logged to the DB but never
+  // surfaced to the agent before 2026-05-11. Counts + high-severity examples
+  // help the agent see what's HAPPENING right now beyond just rate stats.
+  const anomalySummary = s.recentAnomalySummary.all();
+  if (anomalySummary.length > 0) {
+    lines.push('');
+    lines.push('=== ANOMALY DETECTOR — last 4h ===');
+    lines.push('Real-time market events. Use these to time strategy proposals — e.g., a kol_cluster surge means smart money is moving, so a kol-buy strategy is timely.');
+    for (const a of anomalySummary) {
+      lines.push(`  ${a.kind} (${a.severity}): ${a.n}`);
+    }
+    const highEx = s.recentAnomalyExamples.all();
+    if (highEx.length > 0) {
+      lines.push('');
+      lines.push('Recent HIGH-severity anomalies (sample):');
+      for (const e of highEx) {
+        lines.push(`  [${e.at}] ${e.kind}: ${e.description}`);
+      }
+    }
+  }
+
   // === CROSS-TARGET CORRELATIONS ===
   const crossRows = s.perMintPredsAndOutcomes.all();
   if (crossRows.length >= 100) {
@@ -1055,10 +1276,13 @@ function buildContext() {
     lines.push(fmtOut('BASELINE (any predicted mint)', baseline, baseline));
     lines.push('');
     lines.push('SINGLE-TARGET BUCKETS:');
-    lines.push(fmtOut('peaked_30 ≥ 0.30 alone',  baseline, computeOutcome(crossRows, r => (r.p30 || 0) >= 0.30)));
-    lines.push(fmtOut('peaked_100 ≥ 0.20 alone', baseline, computeOutcome(crossRows, r => (r.p100 || 0) >= 0.20)));
-    lines.push(fmtOut('peaked_300 ≥ 0.15 alone', baseline, computeOutcome(crossRows, r => (r.p300 || 0) >= 0.15)));
-    lines.push(fmtOut('migrated ≥ 0.30 alone',   baseline, computeOutcome(crossRows, r => (r.mig || 0) >= 0.30)));
+    lines.push(fmtOut('peaked_30 ≥ 0.30 alone',          baseline, computeOutcome(crossRows, r => (r.p30 || 0) >= 0.30)));
+    lines.push(fmtOut('peaked_100 ≥ 0.20 alone',         baseline, computeOutcome(crossRows, r => (r.p100 || 0) >= 0.20)));
+    lines.push(fmtOut('peaked_300 ≥ 0.15 alone',         baseline, computeOutcome(crossRows, r => (r.p300 || 0) >= 0.15)));
+    lines.push(fmtOut('migrated ≥ 0.30 alone',           baseline, computeOutcome(crossRows, r => (r.mig || 0) >= 0.30)));
+    lines.push(fmtOut('hits_2x_within_1h ≥ 0.10 alone',  baseline, computeOutcome(crossRows, r => (r.h2x1h || 0) >= 0.10)));
+    lines.push(fmtOut('migrates_within_15min ≥ 0.10 alone', baseline, computeOutcome(crossRows, r => (r.mig15 || 0) >= 0.10)));
+    lines.push(fmtOut('rug_within_5min ≥ 0.30 alone',    baseline, computeOutcome(crossRows, r => (r.rug5 || 0) >= 0.30)));
     lines.push('');
     lines.push('STACKED COMBOS (where the agent finds the real edge):');
     lines.push(fmtOut('CLEAN PUMP: peaked_30 ≥ 0.30 AND will_die_fast < 0.40',     baseline, computeOutcome(crossRows, r => (r.p30 || 0) >= 0.30 && (r.die || 0) < 0.40)));
@@ -1068,6 +1292,10 @@ function buildContext() {
     lines.push(fmtOut('ELITE+ALIVE: migrated ≥ 0.30 AND will_die_fast < 0.30',      baseline, computeOutcome(crossRows, r => (r.mig || 0) >= 0.30 && (r.die || 0) < 0.30)));
     lines.push(fmtOut('TRACKED+ML: peaked_300 ≥ 0.15 AND tracked_buyers ≥ 2',       baseline, computeOutcome(crossRows, r => (r.p300 || 0) >= 0.15 && (r.tracked_n || 0) >= 2)));
     lines.push(fmtOut('TRIPLE: mig ≥ 0.20 AND p300 ≥ 0.15 AND will_die_fast < 0.40', baseline, computeOutcome(crossRows, r => (r.mig || 0) >= 0.20 && (r.p300 || 0) >= 0.15 && (r.die || 0) < 0.40)));
+    // New stacks featuring the new short-horizon + flash-rug signals.
+    lines.push(fmtOut('FAST RUNNER: h2x1h ≥ 0.10 AND rug_within_5min < 0.20',       baseline, computeOutcome(crossRows, r => (r.h2x1h || 0) >= 0.10 && (r.rug5 || 0) < 0.20)));
+    lines.push(fmtOut('IMMINENT MIG: migrates_within_15min ≥ 0.15 AND will_die_fast < 0.40', baseline, computeOutcome(crossRows, r => (r.mig15 || 0) >= 0.15 && (r.die || 0) < 0.40)));
+    lines.push(fmtOut('SAFE FAST: h2x1h ≥ 0.10 AND will_die_fast < 0.30 AND rug5 < 0.20', baseline, computeOutcome(crossRows, r => (r.h2x1h || 0) >= 0.10 && (r.die || 0) < 0.30 && (r.rug5 || 0) < 0.20)));
     lines.push('');
     lines.push('Read the lift columns. Combos with 2-3x higher migration lift than their single-target version are real stacking edge. Combos where adding a filter DROPS the rate (e.g. CONFLICTED) reveal models contradicting each other — fade those signals.');
   }
@@ -1286,13 +1514,17 @@ function assessReadiness() {
   // 50% absolute means EV-positive trades are achievable.
   const lift = edge?.baseline_rate > 0 && edge?.top_rate != null
     ? edge.top_rate / edge.baseline_rate : 0;
-  const liftOk = lift >= 1.5;
+  // 1.3x lift threshold (was 1.5x). Rationale: baseline is already high
+  // (~55%) because upstream candidate filters do a lot of work, which
+  // compresses the lift ratio. Absolute pump rate floor (≥50%) is the
+  // strong signal — lift just confirms the model isn't a flat function.
+  const liftOk = lift >= 1.3;
   const absRateOk = (edge?.top_rate || 0) >= 0.50;
   const sampleOk = (edge?.top_n || 0) >= 50;
   criteria.has_measurable_edge = {
     passed: liftOk && absRateOk && sampleOk,
     detail: edge?.top_rate != null
-      ? `top-30%-prob picks pump ${(edge.top_rate * 100).toFixed(1)}% vs baseline ${(edge.baseline_rate * 100).toFixed(1)}% = ${lift.toFixed(1)}x lift (n=${edge.top_n}; need ≥1.5x AND ≥50% rate AND n≥50)`
+      ? `top-30%-prob picks pump ${(edge.top_rate * 100).toFixed(1)}% vs baseline ${(edge.baseline_rate * 100).toFixed(1)}% = ${lift.toFixed(1)}x lift (n=${edge.top_n}; need ≥1.3x AND ≥50% rate AND n≥50)`
       : 'no edge data yet',
   };
   // Models exist and have decent metrics
@@ -1305,10 +1537,12 @@ function assessReadiness() {
     passed: drift && drift.overall !== 'red',
     detail: drift ? `model health ${drift.overall}` : 'no drift status',
   };
-  // Cap: don't run more than 5 concurrent strategies for sanity
+  // Cap: don't run more than STRATEGY_CAP concurrent strategies.
+  // When at cap AND bleeders exist, the cycle's pre-pass will retire the
+  // worst-performing one (or the oldest 0-entry orphan) to make room.
   criteria.under_strategy_cap = {
-    passed: live.length < 5,
-    detail: `${live.length} active strategies (cap at 5)`,
+    passed: live.length < STRATEGY_CAP,
+    detail: `${live.length} active strategies (cap at ${STRATEGY_CAP})`,
   };
   const ready = Object.values(criteria).every(c => c.passed);
   return { ready, criteria };
@@ -1335,15 +1569,46 @@ async function maybeProposeStrategy(readiness) {
       { criteria: readiness.criteria });
     return;
   }
-  // Already have at least one live strategy? Be patient — let it accumulate
-  // performance data before proposing variants. We'll consider variants once
-  // existing ones have soaked.
+  // Already have live strategies? Default behavior: be patient. Override:
+  // if ANY live strategy is actively bleeding (n≥BLEED_MIN_TRADES AND PnL
+  // fraction ≤ BLEED_PNL_FRACTION of starting wallet), allow proposing a
+  // variant in parallel. Goal: agent should strive to find fixes when its
+  // current strategies are losing, not sit on losses politely.
   const live = S().liveStrategies.all();
-  if (live.length > 0) {
+  const w = db().prepare('SELECT starting_balance_sol FROM paper_wallet WHERE id=1').get();
+  const startBal = w?.starting_balance_sol || 1.0;
+  const bleedThresholdSol = startBal * BLEED_PNL_FRACTION;
+  const bleeders = [];
+  for (const st of live) {
+    const perf = S().strategyPerf.get(st.id, st.id, st.id, st.id, st.id);
+    const closed = perf?.closed || 0;
+    const pnl = perf?.pnl_sol || 0;
+    if (closed >= BLEED_MIN_TRADES && pnl <= bleedThresholdSol) {
+      bleeders.push({ id: st.id, closed, pnl_sol: pnl, pnl_pct_of_wallet: (pnl / startBal) * 100 });
+    }
+  }
+  // Propose if: (a) no live strategies, (b) any bleeders to fix, OR
+  // (c) roster has dropped below the freshness floor (likely due to orphan
+  // retirement of overly-strict variants). Goal: keep agent iterating even
+  // in quiet windows.
+  const belowFreshFloor = live.length > 0 && live.length < STRATEGY_FRESH_FLOOR;
+  if (live.length > 0 && bleeders.length === 0 && !belowFreshFloor) {
     logThought('thought', 'introspect', null,
-      `${live.length} live strategy(ies) running — letting them accumulate trade data before proposing more`, null);
+      `${live.length} live strategy(ies) running, none bleeding, above freshness floor (${STRATEGY_FRESH_FLOOR}) — letting them accumulate before proposing variants`, null);
     return;
   }
+  if (belowFreshFloor) {
+    logThought('thought', 'introspect', null,
+      `${live.length} live strategy(ies), below freshness floor (${STRATEGY_FRESH_FLOOR}) — proposing a new one to maintain roster diversity`, null);
+  }
+  if (bleeders.length > 0) {
+    logThought('thought', 'introspect', null,
+      `${bleeders.length} live strategy(ies) bleeding (PnL ≤ ${bleedThresholdSol.toFixed(3)} SOL on ≥${BLEED_MIN_TRADES} trades) — allowing variant proposal to strive for a fix`,
+      { bleeders });
+  }
+  // Stash bleeders so buildContext can include them in the prompt for Claude.
+  // Module-scope so buildContext can read without threading a parameter through.
+  _bleedersForNextProposal = bleeders;
   if (!rateLimitOk()) {
     logThought('thought', 'introspect', null,
       `rate-limited at ${MAX_CONSULTS_PER_DAY} consults/day — sleeping`, null);
@@ -1352,6 +1617,8 @@ async function maybeProposeStrategy(readiness) {
   const ctx = buildContext();
   logThought('info', 'consult', null, 'consulting Claude to propose a strategy', null);
   bumpConsult();
+  // Consume the orphan-warning state — only show once per propose call.
+  _recentOrphans = [];
   let consultResult;
   try {
     consultResult = await proposeStrategy(ctx);
@@ -1396,8 +1663,14 @@ async function maybeRetireStrategies() {
   // all consulting in the same 30-min cycle).
   const burstCap = BURST_CAPS['agent'] || 3;
   let consultedThisCycle = 0;
-  // Don't re-consult on the same strategy more than once per 12h
-  const RECONSULT_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+  // Re-consult cooldown: 12h normally, BLEED_RECONSULT_HOURS for bleeders.
+  // When a strategy is actively losing capital, we want fresher evaluations
+  // so the modify path gets a chance to react before too much damage.
+  const NORMAL_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+  const BLEEDING_COOLDOWN_MS = BLEED_RECONSULT_HOURS * 60 * 60 * 1000;
+  const wForBleed = db().prepare('SELECT starting_balance_sol FROM paper_wallet WHERE id=1').get();
+  const startBalForBleed = wForBleed?.starting_balance_sol || 1.0;
+  const bleedThresholdSolForReeval = startBalForBleed * BLEED_PNL_FRACTION;
 
   // Pre-pass: emergency retire any strategy that's clearly destroying capital.
   // Code-only — no Claude consult, no rate limit, no soak time. Strategy must
@@ -1426,10 +1699,13 @@ async function maybeRetireStrategies() {
     const perf = S().strategyPerf.get(st.id, st.id, st.id, st.id, st.id);
     if ((perf?.closed || 0) < 5) continue;  // need at least 5 closed trades
     if (!rateLimitOk()) continue;
-    // Cooldown — skip if we evaluated this strategy recently
+    // Cooldown — skip if we evaluated this strategy recently. Bleeders get
+    // a shorter cooldown so the modify path can react to fresh losses.
+    const isBleeding = (perf?.closed || 0) >= BLEED_MIN_TRADES && (perf?.pnl_sol || 0) <= bleedThresholdSolForReeval;
+    const cooldownMs = isBleeding ? BLEEDING_COOLDOWN_MS : NORMAL_COOLDOWN_MS;
     const lastEval = db().prepare(`SELECT MAX(timestamp) AS ts FROM ml_agent_log
        WHERE category = 'consult' AND strategy_id = ? AND level = 'info'`).get(st.id);
-    if (lastEval?.ts && (Date.now() - lastEval.ts < RECONSULT_COOLDOWN_MS)) continue;
+    if (lastEval?.ts && (Date.now() - lastEval.ts < cooldownMs)) continue;
     consultedThisCycle++;
     const perfStr = `Closed: ${perf.closed} · Open: ${perf.open} · Realized PnL: ${perf.pnl_sol || 0} SOL · Avg trade: ${perf.avg_pct || 0}% · Wins: ${perf.wins}`;
     logThought('info', 'consult', st.id, 'consulting Claude to evaluate strategy', { perf });
@@ -1478,8 +1754,97 @@ async function maybeRetireStrategies() {
   }
 }
 
+// Orphan retire — fires EVERY cycle regardless of cap. A strategy with zero
+// entries past ORPHAN_AGE_HOURS has filters that don't match real-world mints;
+// retiring frees the slot AND gives the agent unambiguous "filters too strict"
+// signal for its next proposal. Returns # of strategies retired this pass.
+function retireOrphans() {
+  const live = S().liveStrategies.all();
+  const now = Date.now();
+  const orphans = live
+    .map(s => ({ ...s, perf: S().strategyPerf.get(s.id, s.id, s.id, s.id, s.id) }))
+    .filter(r =>
+      (r.perf?.closed || 0) === 0 &&
+      (now - r.created_at) >= ORPHAN_AGE_HOURS * 3600000
+    );
+  let retired = 0;
+  for (const target of orphans) {
+    const ageHours = ((now - target.created_at) / 3600000).toFixed(1);
+    retireStrategy(target.id, `orphan retire: 0 entries in ${ageHours}h — filters too strict`);
+    logThought('retire', 'introspect', target.id,
+      `orphan-retired ${target.id}: no entries in ${ageHours}h`, { reason: 'orphan' });
+    console.log(`[agent] 🗑️ ORPHAN RETIRE: ${target.id} — 0 entries in ${ageHours}h`);
+    retired++;
+    // Capture filter stack so next proposal prompt can tell Claude exactly
+    // which condition combos produced zero entries.
+    try {
+      const recipe = JSON.parse(target.recipe_json || '{}');
+      const conditions = (recipe.entry?.conditions || []).map(c =>
+        `${c.kind === 'feature' ? 'feature.' : ''}${c.name} ${c.op} ${c.value}`
+      );
+      const ageWindow = `mint_age ${recipe.entry?.min_mint_age_sec || 0}–${recipe.entry?.max_mint_age_sec || '∞'}s`;
+      _recentOrphans.unshift({
+        id: target.id,
+        name: recipe.name || target.id,
+        age_hours: Number(ageHours),
+        conditions,
+        age_window: ageWindow,
+        retired_at: now,
+      });
+      if (_recentOrphans.length > RECENT_ORPHANS_MAX) _recentOrphans.length = RECENT_ORPHANS_MAX;
+    } catch { /* ignore parse error */ }
+  }
+  return retired;
+}
+
+// Evolutionary retire — only fires when at strategy cap AND a bleeder exists.
+// Picks the worst-PnL strategy (≥RETIRE_WORST_MIN_TRADES closed) and retires
+// it to make room for a variant. Survival of the most profitable.
+function maybeMakeRoomForVariant() {
+  const live = S().liveStrategies.all();
+  if (live.length < STRATEGY_CAP) return false;
+  const now = Date.now();
+  const soakedLive = live.filter(s => (now - s.created_at) >= STRATEGY_SOAK_HOURS * 3600000);
+  if (soakedLive.length === 0) {
+    logThought('thought', 'introspect', null,
+      `at cap (${live.length}/${STRATEGY_CAP}) but all strategies still in ${STRATEGY_SOAK_HOURS}h soak — no room to make`, null);
+    return false;
+  }
+  const ranked = soakedLive.map(s => ({ ...s, perf: S().strategyPerf.get(s.id, s.id, s.id, s.id, s.id) }));
+  const measurable = ranked.filter(r => (r.perf?.closed || 0) >= RETIRE_WORST_MIN_TRADES);
+  if (measurable.length === 0) {
+    logThought('thought', 'introspect', null,
+      `at cap (${live.length}/${STRATEGY_CAP}) but no soaked strategy has ≥${RETIRE_WORST_MIN_TRADES} trades yet to evaluate — waiting`, null);
+    return false;
+  }
+  measurable.sort((a, b) => (a.perf?.pnl_sol || 0) - (b.perf?.pnl_sol || 0));
+  const worst = measurable[0];
+  retireStrategy(worst.id, `evolutionary retire: worst PnL ${(worst.perf.pnl_sol || 0).toFixed(3)} SOL on ${worst.perf.closed} trades — making room`);
+  logThought('retire', 'introspect', worst.id,
+    `evolutionary-retired ${worst.id}: ${(worst.perf.pnl_sol || 0).toFixed(3)} SOL on ${worst.perf.closed} trades`,
+    { reason: 'evolutionary', perf: worst.perf });
+  console.log(`[agent] 🗑️ EVOLUTIONARY RETIRE: ${worst.id} — ${(worst.perf.pnl_sol || 0).toFixed(3)} SOL on ${worst.perf.closed} trades`);
+  return true;
+}
+
 async function cycle() {
   const now = Date.now();
+  // Pre-pass 1: always retire orphans (0 entries past ORPHAN_AGE_HOURS).
+  // Independent of cap/bleeders — a strategy that never fires is just
+  // wasting a slot and feeding zero signal to the agent.
+  retireOrphans();
+  // Pre-pass 2: at cap AND any bleeders → evolutionary retire to free a slot.
+  const _liveBefore = S().liveStrategies.all();
+  if (_liveBefore.length >= STRATEGY_CAP) {
+    const w = db().prepare('SELECT starting_balance_sol FROM paper_wallet WHERE id=1').get();
+    const startBal = w?.starting_balance_sol || 1.0;
+    const bleedThreshold = startBal * BLEED_PNL_FRACTION;
+    const anyBleeder = _liveBefore.some(s => {
+      const perf = S().strategyPerf.get(s.id, s.id, s.id, s.id, s.id);
+      return (perf?.closed || 0) >= BLEED_MIN_TRADES && (perf?.pnl_sol || 0) <= bleedThreshold;
+    });
+    if (anyBleeder) maybeMakeRoomForVariant();
+  }
   const readiness = assessReadiness();
   const status = readiness.ready ? 'ready' : 'observing';
   let thought;
@@ -1514,6 +1879,8 @@ export function startAgent() {
   startDailyReport();        // daily recap, runs ~once/day
   startCalibrationReview();  // daily deep-review of model honesty (when data lands)
   startMintIntel();          // hourly batch: heuristic + Claude scam/winner classifier
+  startConcentrationCheck(); // every 6h: flag dominant exit_reason + diagnose
+  startMarketRegime();       // noon + midnight: aggressive/normal/cautious posture
   // First introspection 5 min after boot
   setTimeout(() => cycle().catch(err => console.error('[agent] cycle err:', err)), FIRST_CYCLE_DELAY_MS);
   setInterval(() => cycle().catch(err => console.error('[agent] cycle err:', err)), CYCLE_INTERVAL_MS);

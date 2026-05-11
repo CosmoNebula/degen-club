@@ -47,9 +47,12 @@ export async function fetchDexscreenerPrice(mintAddress) {
   }
 }
 
+const PRICE_FLOOR_SOL = 1e-9;
+
 async function refreshMintPrice(mintAddress) {
   const data = await fetchDexscreenerPrice(mintAddress);
   if (!data || !data.priceNative || data.priceNative <= 0) return null;
+  if (data.priceNative < PRICE_FLOOR_SOL) return null;
   const solUsd = getSolUsd() || 1;
   const mcapSol = solUsd > 0 ? (data.fdvUsd / solUsd) : 0;
   // Sanity cap — pump.fun bonding curve physically cannot exceed ~85 SOL

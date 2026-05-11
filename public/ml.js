@@ -574,11 +574,49 @@ document.getElementById('ml-flag-input')?.addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('ml-flag-submit').click();
 });
 
+function renderConsultBudget(today) {
+  const el = document.getElementById('ml-agent-consult-budget');
+  if (!el) return;
+  const order = ['agent', 'post-mortem', 'mint-intel', 'concentration-check', 'market-regime', 'calib-review', 'daily-report', 'news-synthesis'];
+  const labels = {
+    'agent': 'Strategy work',
+    'post-mortem': 'Post-mortem',
+    'mint-intel': 'Mint intel',
+    'concentration-check': 'Concentration',
+    'market-regime': 'Market regime',
+    'calib-review': 'Calibration',
+    'daily-report': 'Daily report',
+    'news-synthesis': 'News synthesis',
+  };
+  let totalUsed = 0, totalCap = 0;
+  const rows = order.filter(k => today[k]).map(k => {
+    const r = today[k];
+    const used = r.used || 0, cap = r.cap || 1;
+    totalUsed += used; totalCap += cap;
+    const pct = Math.min(100, (used / cap) * 100);
+    const cls = pct >= 90 ? 'alert' : pct >= 70 ? 'warn' : '';
+    return `<div class="ml-consult-row">
+      <div class="ml-consult-name">${labels[k] || k}</div>
+      <div class="ml-consult-bar"><div class="ml-consult-bar-fill ${cls}" style="width:${pct}%"></div></div>
+      <div class="ml-consult-count">${used} / ${cap}</div>
+    </div>`;
+  });
+  const totalPct = totalCap > 0 ? Math.min(100, (totalUsed / totalCap) * 100) : 0;
+  const totalCls = totalPct >= 90 ? 'alert' : totalPct >= 70 ? 'warn' : '';
+  rows.push(`<div class="ml-consult-row ml-consult-total">
+    <div class="ml-consult-name">Total today</div>
+    <div class="ml-consult-bar"><div class="ml-consult-bar-fill ${totalCls}" style="width:${totalPct}%"></div></div>
+    <div class="ml-consult-count">${totalUsed} / ${totalCap}</div>
+  </div>`);
+  el.innerHTML = rows.join('');
+}
+
 async function refreshAgent() {
   try {
-    const [summary, logRes] = await Promise.all([
+    const [summary, logRes, rateLimits] = await Promise.all([
       fetchJson('/api/ml/agent/state'),
       fetchJson('/api/ml/agent/log?n=30'),
+      fetchJson('/api/ml/agent/rate-limits').catch(() => ({ today: {} })),
     ]);
     const s = summary?.state || {};
     document.getElementById('ml-agent-status').textContent = (s.status || 'unknown').toUpperCase();
@@ -589,6 +627,7 @@ async function refreshAgent() {
       ? 'agent has not proposed any yet'
       : `${live.reduce((a, x) => a + x.n_open, 0)} open positions across ${live.length} strategies`;
     document.getElementById('ml-agent-consults').textContent = `${s.consults_today || 0} / ${s.consults_max || '?'}`;
+    renderConsultBudget(rateLimits?.today || {});
     document.getElementById('ml-agent-last-cycle').textContent = s.last_cycle_at
       ? fmtTs(s.last_cycle_at)
       : '—';

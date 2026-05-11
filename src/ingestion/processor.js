@@ -5,7 +5,7 @@ import { checkCopySignal } from '../scoring/traders.js';
 import { onSmartTrade, onCoinVelocity, onMigratorHunter } from '../trading/strategies.js';
 import { trackHunterBuy } from '../scoring/migrator-hunter.js';
 import { notifyTradeForMint } from '../trading/paper.js';
-import { evaluateMintNow } from '../ml/agent-executor.js';
+import { evaluateMintNow, isCopyTradeTarget } from '../ml/agent-executor.js';
 import { config } from '../config.js';
 import { checkCashbackFlag } from './helius.js';
 import { trackBuyer, checkVelocityRunnerProfile, markFired } from '../scoring/coin-velocity.js';
@@ -28,6 +28,14 @@ export function ensureCashback(mintAddress, bondingCurveKey, currentValue) {
 }
 
 let stmts = null;
+
+// Aggregate junk-price drops — at peak ~500 drops/min were being logged
+// individually, blocking the event loop with synchronous console.warn and
+// slowing RPC probes from 200ms into 6s+. Now count silently and log a
+// rollup once per minute.
+let _junkDropCount = 0;
+let _junkDropLastLog = Date.now();
+const JUNK_DROP_LOG_INTERVAL_MS = 60 * 1000;
 function S() {
   if (stmts) return stmts;
   const d = db();
@@ -153,7 +161,11 @@ function onCreate(e) {
         db().prepare(`INSERT OR IGNORE INTO whale_watch (mint_address, initial_buy_sol, seed_price, peak_price, peak_at, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
           .run(e.mint, initBuy, seedPrice, seedPrice, now, now, now + 10 * 60 * 1000);
         console.log(`[whale-watch] enrolled ${e.mint.slice(0,8)}… init_buy=${initBuy.toFixed(1)}SOL seed=${seedPrice.toExponential(2)}`);
-      } catch (err) { /* row exists — fine */ }
+      } catch (err) {
+        // INSERT OR IGNORE swallows UNIQUE violations natively, so the only
+        // real errors reaching here are schema/connection issues — log them.
+        console.error('[whale-watch] enroll failed:', err.message);
+      }
     }
 
     if (e.uri) {
@@ -212,10 +224,33 @@ function onTrade(e) {
       mcapSol, secondsFromCreation, isSniper, isFirstBlock, buyerRank, label, now
     );
 
-    s.updateMintOnTrade.run(
-      mcapSol, priceSol || 0, e.vSolInBondingCurve || 0, e.vTokensInBondingCurve || 0,
-      now, mcapSol, e.mint
+    // SANITY: pump.fun bonding-curve math says min price ≈ 2.8e-8 SOL/token.
+    // Trades arriving with priceSol below 1e-8 on a non-migrated mint are
+    // junk. Migrated mints get a relaxed floor (1e-9) — they CAN crater on
+    // AMM but a 100x drop in seconds is migration-moment garbage (2026-05-11
+    // Goblinjak: 4.3e-7 → 3.5e-9 in one tick, corrupted last_price_sol).
+    // Keep the trade row (audit) but DON'T poison mints.last_price_sol.
+    const PRICE_FLOOR = 1e-8;
+    const MIGRATED_PRICE_FLOOR = 1e-9;
+    const px = priceSol || 0;
+    const isJunkPrice = !mint.rugged && (
+      (!mint.migrated && px < PRICE_FLOOR) ||
+      (mint.migrated && px < MIGRATED_PRICE_FLOOR)
     );
+    if (isJunkPrice) {
+      _junkDropCount++;
+      const sinceLog = now - _junkDropLastLog;
+      if (sinceLog >= JUNK_DROP_LOG_INTERVAL_MS) {
+        console.log(`[processor] DROPPED ${_junkDropCount} sub-floor mint-state updates in last ${Math.round(sinceLog/1000)}s — trade rows stored, mints.last_price_sol preserved`);
+        _junkDropCount = 0;
+        _junkDropLastLog = now;
+      }
+    } else {
+      s.updateMintOnTrade.run(
+        mcapSol, priceSol || 0, e.vSolInBondingCurve || 0, e.vTokensInBondingCurve || 0,
+        now, mcapSol, e.mint
+      );
+    }
 
     if (isBuy) {
       s.holdingBuy.run(wallet, e.mint, tokenAmount, solAmount, now, now, isSniper, isFirstBlock, buyerRank);
@@ -269,6 +304,13 @@ function onTrade(e) {
       // EVENT: tracked/SMART wallet just bought — strongest possible signal.
       // Fire agent evaluation immediately, don't wait for the 60s sweep.
       evaluateMintNow(e.mint, 'tracked-wallet-buy').catch(() => {});
+    }
+
+    // EVENT: agent copy-trade target wallet bought. Fires for ANY wallet the
+    // agent has opted into via a recipe's `entry.copy_trade_wallets` field —
+    // even wallets outside the top-50 leaderboard.
+    if (isBuy && isCopyTradeTarget(wallet)) {
+      evaluateMintNow(e.mint, `copy-trade-${wallet.slice(0, 6)}`).catch(() => {});
     }
 
     // EVENT: whale buy (≥3 SOL in single trade) — real conviction. Retail

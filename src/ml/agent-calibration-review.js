@@ -10,7 +10,15 @@ import { freeformThought } from './agent-llm.js';
 import { canConsult, recordConsult } from './agent-rate-limit.js';
 
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;  // hourly check
-const TARGETS = ['peaked_30', 'peaked_100', 'peaked_300', 'migrated', 'will_die_fast'];
+// Binary classifiers to compute calibration deciles for. Regression targets
+// (peak_pct_max, time_to_peak_sec, drawdown_from_peak_pct, time_to_peak_5x_sec,
+// post_mig_peak_pct) are excluded because the decile rollup is a binary-
+// outcome rate by design. Add new binary classifiers here when they ship.
+const TARGETS = [
+  'peaked_30', 'peaked_100', 'peaked_300', 'migrated', 'will_die_fast',
+  'rug_within_5min', 'migrates_within_15min', 'hits_2x_within_1h',
+  'post_mig_hits_2x', 'post_mig_rugs_1h',
+];
 
 let stmts = null;
 function S() {

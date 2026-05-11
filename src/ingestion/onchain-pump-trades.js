@@ -63,7 +63,12 @@ class OnchainPumpTrades extends EventEmitter {
   }
 
   url() {
-    if (config.heliusApiKey) return `wss://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
+    // The Pump.fun firehose receives every cluster trade — millions of WS
+    // notifications/day. Helius bills per WS message, so this single
+    // subscription can burn 1M credits in 24h (verified 2026-05-10).
+    // Default to public RPC unless explicitly opted in via FIREHOSE_USE_HELIUS=true.
+    const useHelius = process.env.FIREHOSE_USE_HELIUS === 'true' && config.heliusApiKey;
+    if (useHelius) return `wss://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
     return process.env.PUBLIC_WS_URL || 'wss://api.mainnet-beta.solana.com';
   }
 

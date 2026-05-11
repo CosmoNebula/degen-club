@@ -668,6 +668,55 @@ function botFlagsBadges(flags) {
 let ringsSort = 'paper_net_sol';
 let _ringsCache = [];
 
+function renderLeaderboardTable(data) {
+  const rows = (data && data.rows) || [];
+  const meta = data && data.meta;
+  const el = document.getElementById('leaderboard-table');
+  const metaEl = document.getElementById('leaderboard-meta');
+  if (metaEl) {
+    if (meta && meta.computed_at) {
+      const ageMin = Math.floor((Date.now() - meta.computed_at) / 60000);
+      metaEl.textContent = `${meta.n} wallets · last computed ${ageMin}m ago`;
+    } else metaEl.textContent = '';
+  }
+  if (!rows.length) {
+    el.innerHTML = '<tr><td colspan="14" class="empty">Leaderboard empty — first compute runs ~60s after startup. Or click ↻ RECOMPUTE NOW.</td></tr>';
+    return;
+  }
+  el.innerHTML = rows.map(r => {
+    const tierColor = r.tier === 'KOL' ? 'var(--gold,#f4c430)' : r.tier === 'HIGH' ? 'var(--green)' : 'var(--muted)';
+    const tierBadge = `<span style="background:${tierColor};color:#111;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;">${r.tier}</span>`;
+    const pnlCls = (r.realized_pnl_30d || 0) > 0 ? 'pos' : (r.realized_pnl_30d || 0) < 0 ? 'neg' : 'muted';
+    const wr = ((r.win_rate_30d || 0) * 100).toFixed(0);
+    const earlyPct = ((r.early_entry_rate || 0) * 100).toFixed(0);
+    const rugPct = ((r.rug_rate_30d || 0) * 100).toFixed(0);
+    const snipePct = ((r.sniper_ratio || 0) * 100).toFixed(0);
+    const hold = r.avg_hold_seconds ? (r.avg_hold_seconds < 60 ? `${r.avg_hold_seconds}s` : `${Math.floor(r.avg_hold_seconds / 60)}m`) : '–';
+    const c = r.components || {};
+    const breakdown = `pnl ${c.pnl ?? 0} + wr ${c.win_rate ?? 0} + mig ${c.migrator ?? 0} + ×${c.multiple ?? 0} + early ${c.early_entry ?? 0} − rug ${c.rug_penalty ?? 0}`;
+    const label = r.label ? ` <span class="muted">(${r.label})</span>` : '';
+    return `<tr class="wallet-row" data-wallet="${r.address}" style="cursor:pointer;">
+      <td class="num"><strong>${r.rank}</strong></td>
+      <td>${tierBadge}</td>
+      <td><code>${r.address.slice(0, 8)}…${r.address.slice(-4)}</code>${label}</td>
+      <td class="num"><strong>${r.score.toFixed(1)}</strong></td>
+      <td class="num ${pnlCls}">${(r.realized_pnl_30d || 0).toFixed(2)}</td>
+      <td class="num">${wr}%</td>
+      <td class="num">${r.closed_30d || 0}</td>
+      <td class="num">${r.migrator_pre_mig_buys || 0}</td>
+      <td class="num">${(r.avg_multiple_30d || 0).toFixed(2)}×</td>
+      <td class="num">${earlyPct}%</td>
+      <td class="num ${(r.rug_rate_30d || 0) > 0.2 ? 'neg' : 'muted'}">${rugPct}%</td>
+      <td class="num">${snipePct}%</td>
+      <td class="num">${hold}</td>
+      <td class="muted" style="font-size:10px;">${breakdown}</td>
+    </tr>`;
+  }).join('');
+  el.querySelectorAll('.wallet-row').forEach(row => {
+    row.addEventListener('click', () => { location.hash = `#wallet/${row.dataset.wallet}`; });
+  });
+}
+
 function renderRingsTable(rows) {
   _ringsCache = rows;
   const el = document.getElementById('rings-table');
@@ -747,6 +796,17 @@ document.addEventListener('click', (e) => {
       .then(d => {
         btn.disabled = false; btn.textContent = '↻ RECOMPUTE NOW';
         if (d.ok && typeof refresh === 'function') refresh();
+      })
+      .catch(() => { btn.disabled = false; btn.textContent = '↻ RECOMPUTE NOW'; });
+  }
+  if (e.target && e.target.id === 'leaderboard-refresh-btn') {
+    const btn = e.target;
+    btn.disabled = true; btn.textContent = '↻ RUNNING…';
+    fetch('/api/leaderboard/recompute', { method: 'POST' })
+      .then(r => r.json())
+      .then(() => {
+        btn.disabled = false; btn.textContent = '↻ RECOMPUTE NOW';
+        if (typeof tick === 'function') tick();
       })
       .catch(() => { btn.disabled = false; btn.textContent = '↻ RECOMPUTE NOW'; });
   }
@@ -2260,6 +2320,9 @@ async function tick() {
       renderTradersTable(traders);
       updateTraderCatCounts(counts);
       renderBoostStatus(grader);
+    } else if (currentView === 'top50') {
+      const data = await fetchJson('/api/leaderboard?limit=50');
+      renderLeaderboardTable(data);
     } else if (currentView === 'rings') {
       const data = await fetchJson(`/api/wallet-rings?limit=200&sort=${ringsSort}`);
       renderRingsTable(data.rings || []);
@@ -2443,8 +2506,31 @@ bindSortable();
 persistSectionState();
 const refresh = tick;
 tick();
-setInterval(tick, 3000);
-setInterval(tickHealth, 5000);
+// Polling slowed from 3s/5s to 15s/15s — at the current DB size (~3M trades,
+// 2.6GB) on a disk-pressured Mac, the dashboard's sync better-sqlite3 queries
+// can't keep up with sub-5s polling without queueing requests faster than
+// they finish, which wedges the event loop. Re-tighten when DB pressure eases.
+// 2026-05-11: bumped 15s → 5s. Endpoint latencies measured at 50-250ms with
+// existing 60s COUNT cache + 5s /api/stats response cache, so 5s polls have
+// plenty of slack. User complaint was "coins have moved a TON between updates"
+// — at 15s a pump.fun mint can pump-and-dump entirely. 5s makes positions
+// feel live without risking event-loop pile-up.
+setInterval(tick, 5000);
+setInterval(tickHealth, 15000);
+
+// Faster price-only refresh for the positions view — that's where stale
+// data hurts most ("my position is up 200%! oh wait, it's already down 30%").
+// Only fires when positions view is active to avoid wasting requests on
+// other views. The full tick still runs every 5s for the heavier panels
+// (strategies, rejections, exit analysis).
+setInterval(async () => {
+  if (document.hidden) return;
+  if (currentView !== 'positions') return;
+  try {
+    const positions = await fetchJson('/api/positions');
+    renderPositionsTables(positions);
+  } catch {}
+}, 2000);
 tickHealth();
 refreshDbStats();
 setInterval(refreshDbStats, 30000);

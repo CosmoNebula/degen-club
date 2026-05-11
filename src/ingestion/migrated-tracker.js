@@ -93,7 +93,7 @@ async function pollOne(mintAddress) {
   const solUsd = getSolUsd() || 1;
   const mcapSol = solUsd > 0 ? fdvUsd / solUsd : 0;
   // Sanity: don't accept obviously broken values
-  if (priceNative <= 0 || mcapSol <= 0) {
+  if (priceNative <= 0 || mcapSol <= 0 || priceNative < 1e-9) {
     S().markRefreshed.run(Date.now(), mintAddress);
     return false;
   }

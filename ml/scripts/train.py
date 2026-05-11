@@ -31,13 +31,17 @@ from sklearn.metrics import (
 
 # Targets that should be trained as regression (continuous outputs).
 # Everything else is binary classification.
-REGRESSION_TARGETS = {'peak_pct_max', 'time_to_peak_sec'}
+REGRESSION_TARGETS = {
+    'peak_pct_max', 'time_to_peak_sec', 'drawdown_from_peak_pct',
+    'time_to_peak_5x_sec',
+    'post_mig_peak_pct',
+}
 
 # Regression targets with heavy-tailed distributions get log1p-transformed
 # during training. Inverse (expm1) applied at predict time. Critical for
 # targets where the bulk is near 0 but a long tail of huge values exists
 # (e.g. peak_pct_max: median=0, max=138 → log compresses to learnable range).
-LOG_TRANSFORM_TARGETS = {'peak_pct_max', 'time_to_peak_sec'}
+LOG_TRANSFORM_TARGETS = {'peak_pct_max', 'time_to_peak_sec', 'time_to_peak_5x_sec'}
 
 # Same feature list as extract — keep in sync
 FEATURE_COLS = [
@@ -49,21 +53,94 @@ FEATURE_COLS = [
     'v_sol_in_curve', 'sol_inflow', 'sol_outflow',
     'buy_count', 'sell_count', 'buy_sell_ratio',
     'unique_buyers', 'tracked_buyers', 'kol_buyers', 'bundle_buyers',
+    'top10_buyers', 'top50_buyers', 'weighted_buyer_quality',
+    'avg_buy_sol', 'median_buy_sol', 'p90_buy_sol', 'max_buy_sol', 'std_buy_sol',
+    'avg_sell_sol', 'median_sell_sol', 'p90_sell_sol', 'max_sell_sol', 'std_sell_sol',
+    'top1_buyer_sol_pct', 'top3_buyer_sol_pct', 'top5_buyer_sol_pct', 'buyer_hhi',
+    'top1_seller_sol_pct', 'top3_seller_sol_pct', 'top5_seller_sol_pct', 'seller_hhi',
+    'sniper_buyer_count', 'pct_sniper_buys', 'first_block_buyer_count', 'pct_first_block_buys',
+    'avg_buyer_rank', 'median_buyer_rank', 'pct_buyers_in_first_10',
+    'tracked_first_seen_sec', 'kol_first_seen_sec',
+    'seconds_to_5_unique_buyers', 'seconds_to_10_unique_buyers',
+    'n_reversals_in_window', 'longest_up_run_pct', 'longest_down_run_pct',
+    'max_30s_buy_sol', 'max_30s_buy_count', 'max_30s_buy_sell_ratio',
+    'creator_buys_post_launch', 'creator_sells_post_launch',
+    'creator_sol_to_sidewallets', 'creator_sidewallet_buyer_count',
+    'inflow_accel_pct', 'buy_count_accel_pct', 'top10_buy_timing_std_sec',
+    'max_30s_sell_sol', 'max_30s_sell_count', 'max_30s_unique_sellers',
+    'creator_recent_launch_siblings',
+    'trend_signal_match', 'narrative_match_count',
+    'pressure_60_buy_pct', 'pressure_60_net',
+    'telegram_member_count',
+    'buyer_hhi_delta', 'seller_hhi_delta',
+    'bot_sniper_buyer_count', 'fast_human_sniper_count',
+    'seconds_since_prev_creator_death',
     'trade_count', 'trades_per_min',
     'volatility_pct', 'sandwich_risk', 'reaction_speed_ms',
     'rpc_latency_p90_ms', 'priority_fee_p90',
 ]
 
+# Post-migration feature set — used for models that predict POST-AMM behavior.
+# Triggered via `--features-mode post`. Reads from ml_migration_snapshots-derived
+# CSV (different feature names than pre-mig). Includes both at-migration anchor
+# state AND any window/cumulative features captured at later snapshot ages.
+POSTMIG_FEATURE_COLS = [
+    'snapshot_age_min',  # which age of snapshot (0, 30, 60, 360, 720, 1440)
+    # Current state at this age
+    'current_mcap_sol', 'current_price_sol', 'liquidity_usd',
+    'amm_volume_h1_usd', 'amm_volume_h24_usd',
+    'amm_buys_h24', 'amm_sells_h24',
+    'amm_price_change_h1', 'amm_price_change_h24',
+    # Window aggregates (since previous snapshot age)
+    'window_buys', 'window_sells', 'window_unique_buyers',
+    'window_tracked_buyers', 'window_kol_buyers',
+    # Cumulative since migration
+    'pct_from_migration', 'peak_pct_so_far',
+    # Pre-mig features (only populated on age=0 anchor rows; NULL on later ages)
+    'pre_mig_age_min',
+    'pre_mig_peak_mcap_sol',
+    'pre_mig_unique_buyers', 'pre_mig_trade_count',
+    'pre_mig_buy_count', 'pre_mig_sell_count', 'pre_mig_buy_sell_ratio',
+    'pre_mig_tracked_buyers', 'pre_mig_kol_buyers', 'pre_mig_bundle_buyers',
+    'pre_mig_volatility_pct', 'pre_mig_sandwich_risk',
+    'pre_mig_creator_launches', 'pre_mig_creator_migrations',
+    'has_twitter', 'has_telegram', 'has_website',
+    'name_length', 'symbol_length',
+    'migration_hour_utc', 'migration_dow',
+    'amm_initial_liquidity_usd',
+]
+
 DEFAULT_TARGET = 'migrated'
 TRAIN_FRAC = 0.80  # oldest 80% by time
+# 24h gap between train and val sets. Labels resolve 6h after snapshot, so
+# without a gap a row whose label resolves AFTER its snapshot can still leak
+# into the val set's evaluation while the model was trained on a directly
+# correlated outcome. 24h is comfortably > 6h resolution window AND covers
+# clustered-launch dynamics where related mints have correlated outcomes.
+# A full week would be overkill for memecoin lifecycles (most mints resolve
+# within hours, not weeks).
+TRAIN_VAL_GAP_HOURS = 24
 
 
-def time_based_split(df, train_frac=TRAIN_FRAC):
-    """Split chronologically — train on oldest, validate on newest."""
+def time_based_split(df, train_frac=TRAIN_FRAC, gap_hours=TRAIN_VAL_GAP_HOURS):
+    """Split chronologically — train on oldest, validate on newest, with a
+    gap between them to prevent label leakage. Rows inside the gap are
+    dropped entirely. If the dataset is too small to support the gap (val
+    would have <50 rows), falls back to no-gap split with a warning."""
     df = df.sort_values('snapshot_ts').reset_index(drop=True)
     cutoff = int(len(df) * train_frac)
     train = df.iloc[:cutoff]
     val = df.iloc[cutoff:]
+    if gap_hours > 0 and len(train) > 0 and len(val) > 0:
+        gap_ms = gap_hours * 3600 * 1000
+        train_max_ts = train['snapshot_ts'].max()
+        val_filtered = val[val['snapshot_ts'] >= train_max_ts + gap_ms]
+        if len(val_filtered) < 50:
+            print(f'[split] WARN: {gap_hours}h gap leaves only {len(val_filtered)} val rows — falling back to no-gap split')
+        else:
+            dropped = len(val) - len(val_filtered)
+            val = val_filtered
+            print(f'[split] applied {gap_hours}h gap · dropped {dropped} val rows inside gap · final: {len(train)} train + {len(val)} val')
     return train, val
 
 
@@ -162,12 +239,16 @@ def train_one(X_train, y_train, X_val, y_val, target_name, args):
         early_stopping=True,
         n_iter_no_change=20,
     )
-    # CHRONOLOGICAL calibration holdout — split off the latest 15% of training
+    # CHRONOLOGICAL calibration holdout — split off the latest 25% of training
     # data, fit base on the rest, then fit isotonic calibration on the holdout.
     # Using random CV folds calibrates on temporally-mixed data and produces
     # systematic under/over-confidence on out-of-time inference. The
     # most-recent slice is closest to the distribution we'll predict on.
-    holdout_pct = 0.15
+    # 25% (was 15%, raised 2026-05-11): rare-positive labels like
+    # hits_2x_within_1h have ~0.8% base rate, so 15% of training data left
+    # only ~25 positives in the holdout — barely enough for isotonic to fit.
+    # 25% gives ~40+ positives while still leaving 75% for the base model.
+    holdout_pct = 0.25
     cutoff = int(len(X_train) * (1 - holdout_pct))
     X_inner, X_calib = X_train.iloc[:cutoff], X_train.iloc[cutoff:]
     y_inner, y_calib = y_train.iloc[:cutoff], y_train.iloc[cutoff:]
@@ -250,10 +331,16 @@ def main():
     ap.add_argument('--target', type=str, default=DEFAULT_TARGET)
     ap.add_argument('--out', type=str, default=None,
                     help='Output model path (default: models/<target>_v1.pkl)')
+    ap.add_argument('--features-mode', type=str, default='pre',
+                    choices=['pre', 'post'],
+                    help='pre = pre-migration feature set (default), post = post-migration')
     ap.add_argument('--iters', type=int, default=300, help='max_iter for HGB')
     ap.add_argument('--lr', type=float, default=0.05)
     ap.add_argument('--depth', type=int, default=8)
     args = ap.parse_args()
+
+    # Pick the feature column set based on mode
+    feature_cols = POSTMIG_FEATURE_COLS if args.features_mode == 'post' else FEATURE_COLS
 
     csv_path = Path(__file__).parent.parent / args.csv
     out_path = Path(__file__).parent.parent / (args.out or f'models/{args.target}_v1.pkl')
@@ -278,7 +365,7 @@ def main():
         df = df[np.isfinite(df[args.target])]
 
     train, val = time_based_split(df)
-    X_cols = [c for c in FEATURE_COLS if c in train.columns]
+    X_cols = [c for c in feature_cols if c in train.columns]
     X_train = train[X_cols]
     X_val = val[X_cols]
     # Regression targets stay float; binary targets cast to int.
