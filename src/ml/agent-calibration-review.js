@@ -14,10 +14,13 @@ const CHECK_INTERVAL_MS = 60 * 60 * 1000;  // hourly check
 // (peak_pct_max, time_to_peak_sec, drawdown_from_peak_pct, time_to_peak_5x_sec,
 // post_mig_peak_pct) are excluded because the decile rollup is a binary-
 // outcome rate by design. Add new binary classifiers here when they ship.
+// Only targets that have a label column on ml_mint_snapshots (the table this
+// query JOINs against). migrates_within_15min / post_mig_* live on different
+// tables and need their own calibration query — excluded here to prevent
+// "no such column" errors that crashed the bot overnight (2026-05-12).
 const TARGETS = [
   'peaked_30', 'peaked_100', 'peaked_300', 'migrated', 'will_die_fast',
-  'rug_within_5min', 'migrates_within_15min', 'hits_2x_within_1h',
-  'post_mig_hits_2x', 'post_mig_rugs_1h',
+  'rug_within_5min', 'hits_2x_within_1h',
 ];
 
 let stmts = null;
@@ -33,14 +36,22 @@ function S() {
   return stmts;
 }
 
-// Compute per-target calibration table (10 deciles): predicted vs actual rate
+// Compute per-target calibration table (10 deciles): predicted vs actual rate.
+// LIMIT 50,000 most-recent predictions per target. With 4.88M total
+// predictions, the unbounded query was scanning the full prediction × snapshot
+// cross product and blocking the event loop for 10+ minutes, freezing the
+// bot and tripping the loop watchdog (2026-05-12). 50K samples per decile
+// bucket is plenty for stable calibration estimates.
 function calibrationFor(target) {
   const rows = db().prepare(`
     SELECT p.prob, MAX(s.${target}) AS actual
-    FROM ml_predictions p
+    FROM (
+      SELECT id, mint_address, prob FROM ml_predictions
+      WHERE prob IS NOT NULL AND target = ?
+      ORDER BY timestamp DESC LIMIT 50000
+    ) p
     JOIN ml_mint_snapshots s ON s.mint_address = p.mint_address
-    WHERE p.prob IS NOT NULL AND p.target = ?
-      AND s.labels_resolved_at IS NOT NULL AND s.${target} IS NOT NULL
+    WHERE s.labels_resolved_at IS NOT NULL AND s.${target} IS NOT NULL
     GROUP BY p.id
   `).all(target);
   if (rows.length < 50) return { target, n: rows.length, deciles: [], usable: false };

@@ -233,7 +233,31 @@ function onTrade(e) {
     const PRICE_FLOOR = 1e-8;
     const MIGRATED_PRICE_FLOOR = 1e-9;
     const px = priceSol || 0;
+    // SANITY: dust trades on post-migration pools sometimes report a wildly
+    // inflated implied price (off-pool quote, partial fill, AMM/router quirk).
+    // 2026-05-11 SLEEP: 0.003-SOL "sells" reported 1e-6 to 2e-6 prices vs the
+    // real ~5e-7 market — corrupted peak_market_cap_sol to 2085 SOL and made
+    // the dashboard display 2x reality. Reject mint-state updates from
+    // sub-0.01-SOL trades on migrated mints; the trade row is still stored.
+    const DUST_TRADE_SOL = 0.01;
+    const isDustOnAmm = mint.migrated && (solAmount || 0) < DUST_TRADE_SOL;
+    // Spike-out guard: if this trade's implied price is >5x the prior price
+    // AND the prior price was set in the last 5 min AND we're already past
+    // the bonding-curve floor, treat as an off-pool quote artifact.
+    // 2026-05-11 NICHEBABY: 6.5-SOL sell reported 6105 SOL mcap, 15x the
+    // prior trade 2 min before. Real price was ~$160k, displayed showed
+    // $589k peak. Same class of corruption as dust ticks, but bigger trade.
+    const SPIKE_MAX_RATIO = 5;
+    const SPIKE_WINDOW_MS = 5 * 60 * 1000;
+    const priorPx = mint.last_price_sol || 0;
+    const priorTradeAt = mint.last_trade_at || 0;
+    const isSpikeUp = mint.migrated &&
+                     priorPx > 0 &&
+                     px > priorPx * SPIKE_MAX_RATIO &&
+                     (now - priorTradeAt) < SPIKE_WINDOW_MS;
     const isJunkPrice = !mint.rugged && (
+      isDustOnAmm ||
+      isSpikeUp ||
       (!mint.migrated && px < PRICE_FLOOR) ||
       (mint.migrated && px < MIGRATED_PRICE_FLOOR)
     );

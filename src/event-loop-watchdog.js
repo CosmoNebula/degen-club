@@ -13,8 +13,12 @@
 // gives a clean restart window).
 
 const CHECK_INTERVAL_MS = 2000;
-const LAG_THRESHOLD_MS = 5000;
-const CONSECUTIVE_BAD = 3;
+// Bumped from 5s → 30s thresh, 3 → 8 consecutive. Bot was getting killed
+// during legitimate heavy startup work (snapshot sweeps, agent context
+// builds) which then triggered a death loop. Better to log lag but keep
+// running unless truly catastrophic.
+const LAG_THRESHOLD_MS = 30000;
+const CONSECUTIVE_BAD = 8;
 const HISTORY_SIZE = 60;  // ~2 min rolling history for diagnostics
 
 const _lagHistory = [];

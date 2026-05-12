@@ -23,7 +23,8 @@ TRAINING_CSV = ML_ROOT / 'data' / 'training.csv'
 POSTMIG_TRAINING_CSV = ML_ROOT / 'data' / 'training_postmig.csv'
 LAST_TRAIN_FILE = ML_ROOT / 'data' / '.last_train_meta.json'
 SERVE_RELOAD_URL = 'http://127.0.0.1:5050/reload'
-DB_PATH = ML_ROOT.parent / 'data' / 'degen.db'
+import os
+DB_PATH = Path(os.environ.get('DEGEN_DB_PATH') or str(ML_ROOT.parent / 'data' / 'degen.db'))
 
 TARGETS = [
     # ---------- PRE-MIGRATION (csv=training.csv, features-mode=pre) ----------

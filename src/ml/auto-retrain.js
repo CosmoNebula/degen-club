@@ -90,17 +90,44 @@ function updateProgressFromLine(line) {
   }
 }
 
-function runRetrain() {
+async function runRetrain() {
   if (_running) {
     console.log('[auto-retrain] previous run still in progress — skipping');
     return;
   }
+  // Kill switch — touch data/.retrain-paused to disable retrains globally.
+  try {
+    if (fs.existsSync(path.resolve(ML_ROOT, '..', 'data', '.retrain-paused'))) {
+      console.log('[auto-retrain] paused via data/.retrain-paused — skipping');
+      return;
+    }
+  } catch {}
   _running = true;
   const start = Date.now();
   resetProgress();
   _progress.running = true;
-  _progress.stage = 'extract';
+  _progress.stage = 'snapshot';
   _progress.startedAt = start;
+  // 2026-05-12: retrain's SQLite extract was holding read transactions long
+  // enough to starve the main bot's event loop for 100+ seconds. Fix: snapshot
+  // the live DB to /tmp via better-sqlite3's backup API (uses SQLite backup
+  // API → consistent + non-blocking from the live DB's perspective), then
+  // point Python at the snapshot. Live bot keeps writing to degen.db freely.
+  const snapshotPath = path.join('/tmp', `degen-retrain-snapshot-${process.pid}.db`);
+  try { fs.unlinkSync(snapshotPath); } catch {}
+  try { fs.unlinkSync(snapshotPath + '-shm'); } catch {}
+  try { fs.unlinkSync(snapshotPath + '-wal'); } catch {}
+  console.log(`[auto-retrain] snapshotting live DB → ${snapshotPath} (isolates from live writes)`);
+  const snapStart = Date.now();
+  try {
+    const liveDb = (await import('../db/index.js')).db();
+    await liveDb.backup(snapshotPath, { progress: () => 100 });
+    const snapMs = Date.now() - snapStart;
+    console.log(`[auto-retrain] snapshot done in ${(snapMs / 1000).toFixed(1)}s`);
+  } catch (err) {
+    console.error(`[auto-retrain] snapshot FAILED: ${err.message} — falling back to live DB (may cause event-loop pressure)`);
+  }
+  _progress.stage = 'extract';
   console.log('[auto-retrain] kicking off retrain pipeline...');
   // Cap Python/sklearn thread parallelism to 2 cores. Without this, sklearn
   // + permutation_importance default to ALL cores → load avg spikes to 60+
@@ -115,6 +142,7 @@ function runRetrain() {
       OPENBLAS_NUM_THREADS: '2',
       MKL_NUM_THREADS: '2',
       NUMEXPR_NUM_THREADS: '2',
+      DEGEN_DB_PATH: snapshotPath,
     },
   });
   // Set lower priority (nice) so the bot's Node process wins CPU
@@ -139,6 +167,10 @@ function runRetrain() {
     const elapsed = ((Date.now() - start) / 1000).toFixed(1);
     if (code === 0) console.log(`[auto-retrain] complete in ${elapsed}s`);
     else console.error(`[auto-retrain] FAILED (exit ${code}) in ${elapsed}s`);
+    // Clean up the snapshot DB — it's only valid for this one run.
+    try { fs.unlinkSync(snapshotPath); } catch {}
+    try { fs.unlinkSync(snapshotPath + '-shm'); } catch {}
+    try { fs.unlinkSync(snapshotPath + '-wal'); } catch {}
     if (_progress.currentTarget && !_progress.completedTargets.includes(_progress.currentTarget)) {
       _progress.completedTargets.push(_progress.currentTarget);
     }

@@ -692,9 +692,12 @@ function checkMoonbag(p, m) {
   if (!p.migration_price || p.migration_price <= 0) return;
   const currentPrice = m.last_price_sol || p.migration_price;
   // Defense: ignore ticks that imply >70% drop from migration_price within
-  // a single poll while the moonbag is still alive. Real rugs trip the
-  // dedicated rug flag path; this catches stale/garbage price snapshots.
-  if (currentPrice < p.migration_price * 0.3 && !m.rugged) {
+  // the first 10 min after migration — those are usually stale bond-curve
+  // final-state artifacts, not real price action. AFTER 10 min, trust the
+  // tick and let MOONBAG_SL fire normally. (2026-05-11: superapp position
+  // 4562 stuck for 2.5h because this filter was time-unbounded.)
+  const ageSinceMigMs = now - (p.moonbag_started_at || p.entered_at || now);
+  if (ageSinceMigMs < 10 * 60 * 1000 && currentPrice < p.migration_price * 0.3 && !m.rugged) {
     return;
   }
   const moonbagPct = (currentPrice - p.migration_price) / p.migration_price;
@@ -896,7 +899,12 @@ function checkPosition(p) {
 
   let exitReason = null;
   const beArmPct = strat.breakeven_arm_pct || 0;
-  const beActive = breakevenArmed && peakFromEntry >= beArmPct;
+  // When breakeven_after_tier1 = 0 AND breakeven_arm_pct > 0, the breakeven
+  // trail arms on peak threshold WITHOUT needing tier1 to fire first.
+  // Lets a strategy say "if peak >= +X% and pulls back below +Y%, sell" as a
+  // standalone exit (no tier1 dependency).
+  const beStandalone = !strat.breakeven_after_tier1 && beArmPct > 0;
+  const beActive = (breakevenArmed || beStandalone) && peakFromEntry >= beArmPct;
   const postT1TrailPct = strat.tp_trail_pct || 0;
   const postT1ArmPct = strat.tp_trail_arm_pct || 0;
   const trailArmed = breakevenArmed && postT1TrailPct > 0 && peakFromEntry >= postT1ArmPct;
@@ -992,7 +1000,23 @@ function checkPosition(p) {
   // floor-style exits (PEAK_FLOOR, BREAKEVEN_SL) already handled it via a
   // stricter trigger; only fires when this would be the active floor.
   else if (realizedLockActive && peakPctRaw <= REALIZED_LOCK_FLOOR) exitReason = 'REALIZED_LOCK';
-  else if (!breakevenArmed && peakPctRaw <= strat.sl_pct) exitReason = 'SL_HIT';
+  else if (!breakevenArmed && peakPctRaw <= strat.sl_pct) {
+    // Smart SL — require ML confirmation that the coin is actually dying
+    // before cutting. 2026-05-12 data: SL_HIT trades had +649% avg post-exit
+    // peak — we were cutting positions that recovered. Now SL fires only if:
+    //   - rug_within_5min ≥ 0.40 (model thinks it's rugging), OR
+    //   - will_die_fast ≥ 0.60 (model thinks it's flatlining), OR
+    //   - peakPctRaw ≤ -0.90 (catastrophic — exit regardless), OR
+    //   - mint.rugged flag set.
+    // Otherwise hold and let time_exit, dead_bag, or actual rug clean up.
+    const catastrophic = peakPctRaw <= -0.90;
+    const rugConf = s.getDcaSafety.get(p.mint_address);
+    const rugConfirmed = catastrophic || m.rugged || (rugConf && (
+      (rugConf.p_rug5 != null && rugConf.p_rug5 >= 0.40) ||
+      (rugConf.p_die_fast != null && rugConf.p_die_fast >= 0.60)
+    ));
+    if (rugConfirmed) exitReason = 'SL_HIT';
+  }
   else if (
     strat.stagnant_exit_min > 0 &&
     minutesSinceLastTrade >= strat.stagnant_exit_min &&

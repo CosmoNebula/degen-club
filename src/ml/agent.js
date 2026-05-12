@@ -28,7 +28,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MODELS_DIR = path.resolve(__dirname, '..', '..', 'ml', 'models');
 
 const CYCLE_INTERVAL_MS = 30 * 60 * 1000;   // 30 min
-const FIRST_CYCLE_DELAY_MS = 20 * 60 * 1000; // 20 min after boot — long enough that dev-mode kicks don't trigger a Claude consult on every restart
+const FIRST_CYCLE_DELAY_MS = 10 * 60 * 1000; // 10 min after boot — long enough that dev kicks don't burn consults, short enough that the cycle actually fires between bot restarts
 const STRATEGY_SOAK_HOURS = 4;              // shorter soak — bad strategies bleed, want to iterate fast
 const MAX_CONSULTS_PER_DAY = 55;            // soft rate limit on LLM calls
 // Bleeding-strategy thresholds. When a live strategy has clearly bled
@@ -935,6 +935,27 @@ function buildContext() {
     }
   }
   lines.push('');
+  // Surface recent human manual-overrides on live strategies. The human has
+  // looked at the data and adjusted something — Claude should see what they
+  // changed and the reasoning, both as inspiration and to compare its
+  // proposals against the human's intuition.
+  try {
+    const overrides = db().prepare(`
+      SELECT timestamp, strategy_id, message FROM ml_agent_log
+      WHERE category='manual-override'
+        AND timestamp > strftime('%s','now')*1000 - 7*24*3600000
+      ORDER BY timestamp DESC LIMIT 8
+    `).all();
+    if (overrides.length > 0) {
+      lines.push('=== HUMAN MANUAL OVERRIDES (recent, last 7 days) ===');
+      lines.push('A human operator looked at strategy performance and made the following manual changes. Their reasoning is included. Treat these as a strong signal — the human has context the bot does not. Compare your future proposals against this thinking; do not undo their changes without a specific data-backed reason.');
+      for (const o of overrides) {
+        const ageH = ((Date.now() - o.timestamp) / 3600000).toFixed(1);
+        lines.push(`  [${ageH}h ago] ${o.strategy_id}: ${o.message}`);
+      }
+      lines.push('');
+    }
+  } catch { /* ignore */ }
   if (_bleedersForNextProposal && _bleedersForNextProposal.length > 0) {
     lines.push('=== BLEEDING STRATEGIES — PROPOSE A VARIANT THAT FIXES THE FAILURE MODE ===');
     for (const b of _bleedersForNextProposal) {
