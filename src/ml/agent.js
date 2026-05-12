@@ -41,7 +41,7 @@ const BLEED_PNL_FRACTION = -0.03;           // -3% of starting wallet → "activ
 const BLEED_MIN_TRADES = 50;                // need enough samples for the signal to be real
 const BLEED_RECONSULT_HOURS = 2;            // normal cooldown is 12h; if bleeding, re-eval every 2h
 const STRATEGY_CAP = 8;                     // max live strategies; evolutionary retire-worst makes room
-const STRATEGY_FRESH_FLOOR = 4;             // when live count drops below this, agent proposes new ones regardless of bleeders — keeps roster healthy
+const STRATEGY_FRESH_FLOOR = 1;             // 2026-05-12: dropped 4→1 — human wants to focus on the winning strategy (alive-migrator-v1), no auto-propose churn
 const ORPHAN_AGE_HOURS = 1;                 // strategies w/ 0 entries past this age get auto-retired — 1h is enough to know filters are too strict
 const RETIRE_WORST_MIN_TRADES = 10;         // need at least N closed trades before considering for evolutionary retire
 // Emergency retire DISABLED for user-tuned strategies — agent's modify path

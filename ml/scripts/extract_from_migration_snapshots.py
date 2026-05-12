@@ -69,7 +69,8 @@ def main():
     out_path = Path(__file__).parent.parent / args.out
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(DB_PATH))
+    # Read-only WAL mode — non-blocking vs live bot writes
+    conn = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
     cols = ['mint_address', 'migrated_at', 'snapshot_ts'] + FEATURE_COLS + LABEL_COLS + ['labels_resolved_at']
 
     # Forward-fill pre-mig features from the age=0 anchor row to all later ages

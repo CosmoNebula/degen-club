@@ -39,6 +39,12 @@ function S() {
     recentEntry: d.prepare(`SELECT id FROM paper_positions
        WHERE strategy = ? AND mint_address = ? AND entered_at > ?
        LIMIT 1`),
+    // Hard dedup: never enter a mint on a strategy while we already hold an
+    // open position on it. 2026-05-12 bug: 10-min cooldown allowed re-entry
+    // on the SAME mint that was still being held (GOATSE/OPAQUE doubled-up).
+    openOnMint: d.prepare(`SELECT id FROM paper_positions
+       WHERE strategy = ? AND mint_address = ? AND status = 'open'
+       LIMIT 1`),
     bumpEvaluated: d.prepare(`UPDATE ml_agent_strategies SET last_evaluated_at = ? WHERE id = ?`),
     bumpTrade: d.prepare(`UPDATE ml_agent_strategies SET n_trades = n_trades + 1 WHERE id = ?`),
     paperWallet: d.prepare(`SELECT * FROM paper_wallet WHERE id = 1`),
@@ -232,7 +238,10 @@ async function evaluateOneMint(strategy, mintAddress) {
   const preds = await getAllPredictions(mintAddress, `agent_eval:${strategy.id}`);
   if (!preds) return false;
   if (!evalEntry(recipe, mintAddress, features, preds)) return false;
-  // Cooldown — don't re-enter same mint in same strategy too fast
+  // Hard dedup: never double up on a mint we already hold on this strategy.
+  const alreadyHeld = S().openOnMint.get(strategy.id, mintAddress);
+  if (alreadyHeld) return false;
+  // Post-exit cooldown — don't re-enter immediately after we just closed it.
   const cutoff = Date.now() - ENTRY_COOLDOWN_MS;
   const recent = S().recentEntry.get(strategy.id, mintAddress, cutoff);
   if (recent) return false;

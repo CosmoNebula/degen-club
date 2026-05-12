@@ -106,29 +106,17 @@ async function runRetrain() {
   const start = Date.now();
   resetProgress();
   _progress.running = true;
-  _progress.stage = 'snapshot';
-  _progress.startedAt = start;
-  // 2026-05-12: retrain's SQLite extract was holding read transactions long
-  // enough to starve the main bot's event loop for 100+ seconds. Fix: snapshot
-  // the live DB to /tmp via better-sqlite3's backup API (uses SQLite backup
-  // API → consistent + non-blocking from the live DB's perspective), then
-  // point Python at the snapshot. Live bot keeps writing to degen.db freely.
-  const snapshotPath = path.join('/tmp', `degen-retrain-snapshot-${process.pid}.db`);
-  try { fs.unlinkSync(snapshotPath); } catch {}
-  try { fs.unlinkSync(snapshotPath + '-shm'); } catch {}
-  try { fs.unlinkSync(snapshotPath + '-wal'); } catch {}
-  console.log(`[auto-retrain] snapshotting live DB → ${snapshotPath} (isolates from live writes)`);
-  const snapStart = Date.now();
-  try {
-    const liveDb = (await import('../db/index.js')).db();
-    await liveDb.backup(snapshotPath, { progress: () => 100 });
-    const snapMs = Date.now() - snapStart;
-    console.log(`[auto-retrain] snapshot done in ${(snapMs / 1000).toFixed(1)}s`);
-  } catch (err) {
-    console.error(`[auto-retrain] snapshot FAILED: ${err.message} — falling back to live DB (may cause event-loop pressure)`);
-  }
   _progress.stage = 'extract';
-  console.log('[auto-retrain] kicking off retrain pipeline...');
+  _progress.startedAt = start;
+  // 2026-05-12 v2: switched from snapshot-then-train → read-only WAL access.
+  // Python scripts now open the live DB with file:...?mode=ro&uri=True. In WAL
+  // mode, read-only connections get a consistent point-in-time snapshot at
+  // transaction start AND don't block the bot's writers. Zero copy, zero disk
+  // churn, retrain starts ~60s faster. The 1.8GB-backup-every-hour was an
+  // overcautious response to a freeze that turned out to be caused by the
+  // bot's own calibration query (since fixed with LIMIT 50K), not by Python.
+  const livePath = path.resolve(ML_ROOT, '..', 'data', 'degen.db');
+  console.log('[auto-retrain] kicking off retrain pipeline (read-only WAL, zero-copy)...');
   // Cap Python/sklearn thread parallelism to 2 cores. Without this, sklearn
   // + permutation_importance default to ALL cores → load avg spikes to 60+
   // on Intel Mac and the Node event loop starves, pushing RPC probes from
@@ -142,7 +130,7 @@ async function runRetrain() {
       OPENBLAS_NUM_THREADS: '2',
       MKL_NUM_THREADS: '2',
       NUMEXPR_NUM_THREADS: '2',
-      DEGEN_DB_PATH: snapshotPath,
+      DEGEN_DB_PATH: livePath,
     },
   });
   // Set lower priority (nice) so the bot's Node process wins CPU
@@ -167,10 +155,6 @@ async function runRetrain() {
     const elapsed = ((Date.now() - start) / 1000).toFixed(1);
     if (code === 0) console.log(`[auto-retrain] complete in ${elapsed}s`);
     else console.error(`[auto-retrain] FAILED (exit ${code}) in ${elapsed}s`);
-    // Clean up the snapshot DB — it's only valid for this one run.
-    try { fs.unlinkSync(snapshotPath); } catch {}
-    try { fs.unlinkSync(snapshotPath + '-shm'); } catch {}
-    try { fs.unlinkSync(snapshotPath + '-wal'); } catch {}
     if (_progress.currentTarget && !_progress.completedTargets.includes(_progress.currentTarget)) {
       _progress.completedTargets.push(_progress.currentTarget);
     }

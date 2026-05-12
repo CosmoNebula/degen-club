@@ -96,7 +96,9 @@ def record_history(target, kind, model_path):
         None,
     )
     try:
-        conn = sqlite3.connect(str(DB_PATH), timeout=10)
+        # Read-only WAL mode — bot keeps writing freely, we get a consistent
+        # snapshot at transaction start. Zero copy, zero contention. 2026-05-12.
+        conn = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True, timeout=10)
         conn.execute(
             'INSERT INTO ml_model_history (target, kind, trained_at, n_train, n_val, n_pos, '
             'auc_pr, auc_roc, brier, lift, baseline_rate, mae, median_ae, r2, log_transform, '
