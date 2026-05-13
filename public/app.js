@@ -939,9 +939,13 @@ function renderPositionsTables({ open, recent }) {
       const exitMc = avgExitMc(p);
       const mcDeltaPct = entryMc > 0 ? ((exitMc - entryMc) / entryMc) : 0;
       const events = parseSellEvents(p.sell_events);
-      const exitMcTitle = events.length > 1
-        ? `Weighted avg of ${events.length} sells: ${events.map(e => `${e.r}@${fmt.mcap(e.m)} (${(e.s||0).toFixed(4)}◎)`).join(' · ')}`
-        : 'Single exit';
+      const usedDerived = p.entry_mcap_sol > 0 && p.entry_price > 0 && p.exit_price > 0;
+      const tierBreakdown = events.length > 1
+        ? events.map(e => `${e.r}@${fmt.mcap(e.m)} (${(e.s||0).toFixed(4)}◎)`).join(' · ')
+        : '';
+      const exitMcTitle = usedDerived
+        ? `Derived: entry_mcap × (exit_price/entry_price). Robust against migration-handoff noise.${tierBreakdown ? ' Tier sells (raw): ' + tierBreakdown : ''}`
+        : (events.length > 1 ? `Weighted avg of ${events.length} sells: ${tierBreakdown}` : 'Single exit');
       return `<tr class="clickable" ${coinLink(p.mint_address)}>
         <td class="addr">${fmt.dt(p.exited_at)}</td>
         <td>${strategyBadge(p.strategy)}</td>
@@ -964,6 +968,16 @@ function parseSellEvents(s) {
   try { return JSON.parse(s) || []; } catch { return []; }
 }
 function avgExitMc(p) {
+  // Prefer derived mcap: entry_mcap × (exit_price / entry_price). Supply is
+  // constant on pump.fun so the ratio is exact, and exit_price is robust
+  // (multiple guards on the price path) while stored exit_mcap_sol and
+  // sell_events[i].m both read m.current_market_cap_sol at sell-moment —
+  // which can be polluted by migration-handoff price source mismatches.
+  if (p.entry_mcap_sol > 0 && p.entry_price > 0 && p.exit_price > 0) {
+    return p.entry_mcap_sol * (p.exit_price / p.entry_price);
+  }
+  // Fall back to the weighted-avg-from-sell-events behavior for rows that
+  // pre-date entry_price/entry_mcap_sol being populated.
   const events = parseSellEvents(p.sell_events);
   if (!events.length) return p.exit_mcap_sol || 0;
   let totalSol = 0, totalMcSol = 0;
