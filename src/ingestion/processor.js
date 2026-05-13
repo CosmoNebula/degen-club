@@ -269,12 +269,27 @@ function onTrade(e) {
                      priorPx > 0 &&
                      px > priorPx * SPIKE_MAX_RATIO &&
                      (now - priorTradeAt) < SPIKE_WINDOW_MS;
+    // 2026-05-13: spike-DOWN guard. Mirror of spike-up — rejects phantom down
+    // ticks (>5× drop within 5min) on mature non-rugged mints. The migration
+    // handoff is a known fragile zone: bonding-curve PDA can emit one final
+    // stale state after the AMM has already taken over, fresh AMM pools can
+    // quote weird before liquidity stabilizes, and Raydium/PumpAMM routers
+    // sometimes return off-pool values. Without this guard those phantom
+    // values poison mints.last_price_sol and every position monitor reading
+    // it fires bad exits (FAKE_PUMP, SL_HIT, MOONBAG_SL).
+    // Caught NUBBIX/CUPPY/BALLSACKDORKL exits at phantom 4.108e-07 across
+    // multiple unrelated positions/times.
+    const isSpikeDown = isMatureEnough &&
+                       priorPx > 0 &&
+                       px < priorPx / SPIKE_MAX_RATIO &&
+                       (now - priorTradeAt) < SPIKE_WINDOW_MS;
     const priorPeak = mint.peak_market_cap_sol || 0;
     const isAbsurdPeakJump = priorPeak > PEAK_GUARD_MIN_SOL &&
                              mcapSol > priorPeak * PEAK_RATIO_CAP;
     const isJunkPrice = !mint.rugged && (
       isDustOnAmm ||
       isSpikeUp ||
+      isSpikeDown ||
       isAbsurdPeakJump ||
       (!mint.migrated && px < PRICE_FLOOR) ||
       (mint.migrated && px < MIGRATED_PRICE_FLOOR)
