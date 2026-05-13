@@ -145,11 +145,19 @@ function S() {
       ORDER BY ts ASC
       LIMIT 200
     `),
-    findMintBySymbol: d.prepare(`
-      SELECT mint_address FROM mints
+    // Pick the recently-active mint for this symbol. Symbols are NOT unique on
+    // pump.fun — READ has 727 mints, NUBBIX has 8. Attributing sentiment to the
+    // historical-highest-peak mint (the old query) was wrong: yesterday's READ
+    // discussion would land on a dead 6-month-old READ mint. Now we restrict
+    // to mints that traded within the active window, and skip when ambiguous.
+    findActiveMintsBySymbol: d.prepare(`
+      SELECT mint_address, last_trade_at FROM mints
       WHERE UPPER(symbol) = UPPER(?)
-      ORDER BY COALESCE(peak_market_cap_sol, 0) DESC
-      LIMIT 1
+        AND last_trade_at IS NOT NULL
+        AND last_trade_at > ?
+        AND COALESCE(rugged, 0) = 0
+      ORDER BY last_trade_at DESC
+      LIMIT 2
     `),
     upsertMint: d.prepare(`
       INSERT INTO mint_sentiment
@@ -273,7 +281,12 @@ function storeBatch(scored, batch, runId) {
   const s = S();
   const windowStart = currentWindowStart();
   const now = Date.now();
+  // 4h activity window for symbol disambiguation. Matches the sentiment window
+  // length itself — sentiment from today's post should only land on a mint
+  // that's been trading today.
+  const activeCutoff = now - 4 * 60 * 60 * 1000;
   let mintHits = 0, themeHits = 0;
+  let symbolSkipsNoMatch = 0, symbolSkipsAmbiguous = 0;
   for (const item of (scored?.items || [])) {
     const sent = item.sentiment;
     const conf = typeof item.confidence === 'number' ? item.confidence : 0;
@@ -306,9 +319,10 @@ function storeBatch(scored, batch, runId) {
     // Mint mentions
     for (const ticker of (item.tickers || []).slice(0, 5)) {
       if (typeof ticker !== 'string' || ticker.length < 2 || ticker.length > 12) continue;
-      const row = s.findMintBySymbol.get(ticker);
-      if (!row?.mint_address) continue;
-      s.upsertMint.run(row.mint_address, windowStart, bull, bear, shill, fud, neutral, 1, conf, now);
+      const rows = s.findActiveMintsBySymbol.all(ticker, activeCutoff);
+      if (rows.length === 0) { symbolSkipsNoMatch++; continue; }
+      if (rows.length >= 2) { symbolSkipsAmbiguous++; continue; }
+      s.upsertMint.run(rows[0].mint_address, windowStart, bull, bear, shill, fud, neutral, 1, conf, now);
       mintHits++;
     }
     // Theme mentions
@@ -317,6 +331,9 @@ function storeBatch(scored, batch, runId) {
       s.upsertNarrative.run(theme.toLowerCase().trim(), windowStart, bull, bear, shill, fud, neutral, 1, conf, now);
       themeHits++;
     }
+  }
+  if (symbolSkipsNoMatch > 0 || symbolSkipsAmbiguous > 0) {
+    console.log(`[sentiment] symbol skips: no-recent-match=${symbolSkipsNoMatch} ambiguous=${symbolSkipsAmbiguous}`);
   }
   return { mintHits, themeHits };
 }
