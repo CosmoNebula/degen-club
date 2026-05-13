@@ -88,6 +88,17 @@ function S() {
       SELECT COUNT(*) AS n FROM trend_signals
       WHERE ts >= ? AND UPPER(keyword) LIKE '%' || UPPER(?) || '%'
     `),
+    // Symbol ambiguity check: pump.fun has duplicate symbols (READ=727 mints,
+    // NUBBIX=8). When other active mints share this symbol, trend_signal_match
+    // can't tell us anything — the buzz could be about a different mint.
+    symbolHasOtherActiveMints: d.prepare(`
+      SELECT COUNT(*) AS n FROM mints
+      WHERE UPPER(symbol) = UPPER(?)
+        AND mint_address != ?
+        AND last_trade_at IS NOT NULL
+        AND last_trade_at > ?
+        AND COALESCE(rugged, 0) = 0
+    `),
     // Narrative match (Tier 4 #2): count of distinct news_items keywords in
     // the last 4h that appear as substrings of the mint's name+symbol+description.
     // Done in JS (this stmt just returns the raw keyword set; we do the
@@ -689,9 +700,13 @@ function takeSnapshot(mint, target, snapshotTs) {
       )?.n ?? null)
     : null;
 
-  // Tier 4 #1 — trend signal match. Skip if mint has no symbol.
+  // Tier 4 #1 — trend signal match. Skip if mint has no symbol OR if symbol
+  // is ambiguous (another recently-active mint shares it).
   const trendWindowMs = snapshotTs - 4 * 3600 * 1000;
-  const trendSignalMatch = mint.symbol
+  const symbolAmbiguous = mint.symbol
+    ? (s.symbolHasOtherActiveMints.get(mint.symbol, mint.mint_address, trendWindowMs)?.n ?? 0) > 0
+    : false;
+  const trendSignalMatch = (mint.symbol && !symbolAmbiguous)
     ? ((s.trendSignalMatch.get(trendWindowMs, mint.symbol)?.n ?? 0) > 0 ? 1 : 0)
     : null;
   // Tier 4 #2 — narrative match count. Pull recent news keywords, count

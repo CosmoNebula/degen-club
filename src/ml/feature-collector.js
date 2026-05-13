@@ -54,6 +54,17 @@ function S() {
       SELECT COUNT(*) AS n FROM trend_signals
       WHERE ts >= ? AND UPPER(keyword) LIKE '%' || UPPER(?) || '%'
     `),
+    // Symbol ambiguity check: are there OTHER recently-active mints sharing
+    // this symbol? If yes, trend_signal_match is meaningless — a $READ Reddit
+    // mention could be about any of 727 READ mints, not specifically this one.
+    symbolHasOtherActiveMints: d.prepare(`
+      SELECT COUNT(*) AS n FROM mints
+      WHERE UPPER(symbol) = UPPER(?)
+        AND mint_address != ?
+        AND last_trade_at IS NOT NULL
+        AND last_trade_at > ?
+        AND COALESCE(rugged, 0) = 0
+    `),
     // Tier 4 #2 — recent news keywords (substring-matched in JS).
     recentNewsKeywords: d.prepare(`
       SELECT keywords FROM news_items
@@ -543,7 +554,10 @@ export function collectFeatures(mintAddress, snapshotAgeSec = null) {
 
   // Tier 4 features (mirrors snapshot-sweeper).
   const trendWindowMs = now - 4 * 3600 * 1000;
-  const trendSignalMatch = mint.symbol
+  const symbolAmbiguous = mint.symbol
+    ? (s.symbolHasOtherActiveMints.get(mint.symbol, mintAddress, trendWindowMs)?.n ?? 0) > 0
+    : false;
+  const trendSignalMatch = (mint.symbol && !symbolAmbiguous)
     ? ((s.trendSignalMatch.get(trendWindowMs, mint.symbol)?.n ?? 0) > 0 ? 1 : 0)
     : null;
   const newsKwRows = s.recentNewsKeywords.all(trendWindowMs);
