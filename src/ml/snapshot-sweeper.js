@@ -668,14 +668,14 @@ function takeSnapshot(mint, target, snapshotTs) {
     ? getCreatorActivity(mint.mint_address)
     : null;
   // Trigger creator-activity fetch at age=60s — but ONLY when the mint shows
-  // ≥2 tracked-wallet buyers. Each parse-history call costs 100 Helius credits
-  // (we learned this the expensive way on 2026-05-11 after burning 102k credits
-  // / 1k calls in 12h). Without a gate, the unbounded volume would consume
-  // ~75% of monthly budget on a signal that produced 8 cross-matches in 965
-  // fetches. The tracked>=2 gate concentrates on coordinated smart-money
-  // launches — exactly the population where dev-side shenanigans matter.
-  // creator-activity.js also enforces a 24h rolling fetch cap as a hard ceiling.
-  if (target === 60 && mint.creator_wallet && agg.trackedBuyers >= 2) {
+  // ≥3 tracked-wallet buyers. Each parse-history call costs 100 Helius credits
+  // (learned the expensive way on 2026-05-11 after burning 102k credits / 1k
+  // calls in 12h). 2026-05-13: raised gate from ≥2 to ≥3 after D2's
+  // humans-only filter made remaining trackers more concentrated/synchronized
+  // — same 2-of-N convergence was firing parse-tx more often. ≥3 keeps the
+  // signal selectivity high while halving call volume. creator-activity.js
+  // also enforces a 24h rolling fetch cap as a hard ceiling.
+  if (target === 60 && mint.creator_wallet && agg.trackedBuyers >= 3) {
     maybeFetchCreatorActivity(mint.mint_address);
   }
   // Tier 3 #7 — count of OTHER mints by this creator launched in the hour
