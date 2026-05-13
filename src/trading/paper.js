@@ -1066,7 +1066,14 @@ function checkPosition(p) {
   else if (peakFloorActive && peakPctRaw < peakFloorExit) exitReason = 'PEAK_FLOOR';
   else if (beActive && !trailArmed && peakPctRaw <= (strat.breakeven_floor_pct || 0)) exitReason = 'BREAKEVEN_SL';
   else if (fastFailActive && peakPctRaw <= fastFailSl) exitReason = 'FAST_FAIL';
-  else if (fakePumpActive && peakPctRaw <= fakeSl) exitReason = 'FAKE_PUMP';
+  // 2026-05-13: FAKE_PUMP missed 2/8 huge runners (NUBBIX +935% post-exit,
+  // MONET +140% post-exit). Common signal at exit moment: inflow_accel_pct
+  // was positive — buyers stepping in even though price was momentarily under
+  // -15%. Veto FAKE_PUMP when inflow is actively accelerating so we don't
+  // panic out right before a recovery. Null velocity (no snapshot yet) and
+  // negative/zero velocity both leave the rule firing normally.
+  else if (fakePumpActive && peakPctRaw <= fakeSl &&
+           !(recentVelocity != null && recentVelocity > 0)) exitReason = 'FAKE_PUMP';
   else if (flatActive) exitReason = 'FLAT_EXIT';
   // REALIZED_LOCK — once 50%+ of entry SOL has been realized via tier sells,
   // never let the residual bag drop below +20% from entry. Skips when other
