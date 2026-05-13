@@ -389,18 +389,45 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
     return positionId;
   }
 
-  ({ tokens: tokenAmount } = applyBuyFriction(entrySol, entryPrice, { mintAddress, strategy }));
+  // 2026-05-13 CRITICAL FIX: the caller passes entryPrice from a snapshot's
+  // last_price_sol which can be tens of seconds stale. Without this drift
+  // check we book phantom wins — ALgoat case: snapshot price 1.22e-08, live
+  // price at "fill" 2.27e-07 (18x higher) → bot pretends to buy 9.8M tokens
+  // for 0.12 SOL when reality could only get 528K → on legit exit at 2.30e-07
+  // we record 14x phantom PnL. The latency-simulation branch above already
+  // does this; this branch silently bypassed it.
+  // Read live price at fill time, abort if drift > maxEntrySlippagePct,
+  // otherwise use the LIVE fill price (not the stale trigger price) for
+  // token math + entry_price storage. All downstream pct calculations
+  // (tiers, trail, SL) then operate from a real entry.
+  const mintNow = s.getMint.get(mintAddress);
+  const fillPrice = (mintNow && mintNow.last_price_sol > 0) ? mintNow.last_price_sol : entryPrice;
+  const drift = entryPrice > 0 ? (fillPrice - entryPrice) / entryPrice : 0;
+  const maxDrift = config.safety?.maxEntrySlippagePct ?? 0.17;
+  if (drift > maxDrift) {
+    const stamp = Date.now();
+    const abortResult = s.insertPosition.run(
+      mintAddress, strategy, JSON.stringify({ ...(signalDetails || {}), triggerPrice: entryPrice, fillPrice }),
+      entryPrice, entrySol, 0, 0, entryMcap || 0, stamp, stamp
+    );
+    db().prepare(`UPDATE paper_positions SET status = 'closed', exit_reason = ?, exited_at = ?, updated_at = ?, realized_pnl_sol = 0, realized_pnl_pct = 0 WHERE id = ?`)
+      .run(`STALE_QUOTE_PAPER:${(drift * 100).toFixed(1)}%`, stamp, stamp, abortResult.lastInsertRowid);
+    console.log(`[paper] BUY ABORT ${strategy} on ${mintAddress.slice(0, 8)}… STALE_QUOTE drift ${(drift * 100).toFixed(1)}% > ${(maxDrift * 100).toFixed(1)}%`);
+    return null;
+  }
+  ({ tokens: tokenAmount } = applyBuyFriction(entrySol, fillPrice, { mintAddress, strategy }));
   if (tokenAmount <= 0) return null;
   const now = Date.now();
   const result = s.insertPosition.run(
-    mintAddress, strategy, JSON.stringify(signalDetails || {}),
-    entryPrice, entrySol, tokenAmount, tokenAmount, entryMcap || 0, now, now
+    mintAddress, strategy,
+    JSON.stringify({ ...(signalDetails || {}), triggerPrice: entryPrice, fillPrice, driftPct: drift }),
+    fillPrice, entrySol, tokenAmount, tokenAmount, entryMcap || 0, now, now
   );
   s.bumpOpened.run(strategy);
   if (entryScore && entryScore !== 1.0) {
     db().prepare('UPDATE paper_positions SET entry_score = ? WHERE id = ?').run(entryScore, result.lastInsertRowid);
   }
-  console.log(`[paper] OPEN ${strategy} on ${mintAddress.slice(0, 8)}… @ ${entryPrice.toExponential(3)} SOL/tok (${entrySol.toFixed(4)} SOL${entryScore && entryScore !== 1.0 ? ` · ${entryScore.toFixed(2)}x` : ''})`);
+  console.log(`[paper] OPEN ${strategy} on ${mintAddress.slice(0, 8)}… @ ${fillPrice.toExponential(3)} SOL/tok (drift ${(drift * 100).toFixed(1)}%, ${entrySol.toFixed(4)} SOL${entryScore && entryScore !== 1.0 ? ` · ${entryScore.toFixed(2)}x` : ''})`);
   broadcastEntryToTelegram({ strategy, mintAddress, entryPrice, entrySol, entryMcap, signalDetails });
   return result.lastInsertRowid;
 }
