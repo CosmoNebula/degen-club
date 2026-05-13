@@ -27,7 +27,14 @@ const FIRST_RUN_DELAY_MS = 90 * 1000;
 const FETCH_TIMEOUT_MS = 8000;
 const MIGRATED_WINDOW_HOURS = 72;
 const BATCH_SIZE = 30;                           // poll N mints per tick
-const REFRESH_INTERVAL_MS = 5 * 60 * 1000;       // re-poll same mint every 5min
+const REFRESH_INTERVAL_MS = 5 * 60 * 1000;       // re-poll WARM mints (no open position) every 5min
+
+// 2026-05-13: hot path — mints we currently hold an open paper position on
+// get aggressive polling. Every position-monitor decision (trail/SL/tier exit)
+// reads mints.last_price_sol; stale prices = bad exits. Held mints poll every
+// HOT_TICK_INTERVAL_MS independent of the WARM batch cadence.
+const HOT_TICK_INTERVAL_MS = 10 * 1000;          // every 10s
+const HOT_BATCH_SIZE = 20;                       // typically <10 open at a time, 20 = safety margin
 
 let stmts = null;
 function S() {
@@ -58,6 +65,15 @@ function S() {
       last_amm_refresh_at = ?
       WHERE mint_address = ?`),
     markRefreshed: d.prepare(`UPDATE mints SET last_amm_refresh_at = ? WHERE mint_address = ?`),
+    // 2026-05-13 hot path: mints we hold open positions on. Always polled,
+    // bypasses the WARM REFRESH_INTERVAL_MS cooldown.
+    heldMints: d.prepare(`
+      SELECT DISTINCT m.mint_address
+      FROM paper_positions p
+      JOIN mints m ON m.mint_address = p.mint_address
+      WHERE p.status = 'open' AND m.migrated = 1 AND m.rugged = 0
+      LIMIT ?
+    `),
   };
   return stmts;
 }
@@ -114,15 +130,14 @@ async function pollOne(mintAddress) {
   return true;
 }
 
-let _running = false;
-async function tick() {
-  if (_running) return;
-  _running = true;
+let _runningWarm = false;
+async function tickWarm() {
+  if (_runningWarm) return;
+  _runningWarm = true;
   try {
     const cands = S().candidates.all(MIGRATED_WINDOW_HOURS, REFRESH_INTERVAL_MS, BATCH_SIZE);
     if (cands.length === 0) return;
     let updated = 0;
-    let dexId = '';
     for (const c of cands) {
       try {
         const ok = await pollOne(c.mint_address);
@@ -130,13 +145,39 @@ async function tick() {
       } catch (err) { /* swallow */ }
     }
     if (updated > 0) {
-      console.log(`[mig-tracker] refreshed ${updated}/${cands.length} migrated mints in 72h window`);
+      console.log(`[mig-tracker] WARM refreshed ${updated}/${cands.length} migrated mints in 72h window`);
     }
-  } finally { _running = false; }
+  } finally { _runningWarm = false; }
+}
+
+// 2026-05-13 hot path: aggressive polling for held positions. Runs every 10s
+// and refreshes mints regardless of the WARM cooldown. Bypasses the 5-min
+// refresh gate because every position-monitor decision needs fresh price.
+let _runningHot = false;
+async function tickHot() {
+  if (_runningHot) return;
+  _runningHot = true;
+  try {
+    const cands = S().heldMints.all(HOT_BATCH_SIZE);
+    if (cands.length === 0) return;
+    let updated = 0;
+    for (const c of cands) {
+      try {
+        const ok = await pollOne(c.mint_address);
+        if (ok) updated++;
+      } catch (err) { /* swallow */ }
+    }
+    if (updated > 0) {
+      console.log(`[mig-tracker] HOT refreshed ${updated}/${cands.length} held positions`);
+    }
+  } finally { _runningHot = false; }
 }
 
 export function startMigratedTracker() {
-  setTimeout(tick, FIRST_RUN_DELAY_MS);
-  setInterval(tick, TICK_INTERVAL_MS);
-  console.log(`[mig-tracker] scheduled · DexScreener poll · batch=${BATCH_SIZE} every 60s · refresh interval=${REFRESH_INTERVAL_MS / 1000}s · window=${MIGRATED_WINDOW_HOURS}h`);
+  setTimeout(tickWarm, FIRST_RUN_DELAY_MS);
+  setInterval(tickWarm, TICK_INTERVAL_MS);
+  // Hot path runs alongside, on its own timer
+  setTimeout(tickHot, 30 * 1000);  // first hot run 30s after start
+  setInterval(tickHot, HOT_TICK_INTERVAL_MS);
+  console.log(`[mig-tracker] scheduled · WARM batch=${BATCH_SIZE} every ${TICK_INTERVAL_MS / 1000}s (refresh ${REFRESH_INTERVAL_MS / 1000}s) · HOT held-positions batch=${HOT_BATCH_SIZE} every ${HOT_TICK_INTERVAL_MS / 1000}s · window=${MIGRATED_WINDOW_HOURS}h`);
 }

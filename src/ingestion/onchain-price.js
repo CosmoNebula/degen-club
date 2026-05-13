@@ -14,8 +14,16 @@ import { BondingCurveAccount } from 'pumpdotfun-sdk/dist/esm/bondingCurveAccount
 import { db } from '../db/index.js';
 import { config } from '../config.js';
 
-const RPC_WS = process.env.SOLANA_RPC_WS || 'wss://api.mainnet-beta.solana.com';
-const RPC_HTTP = process.env.SOLANA_RPC_HTTP || 'https://api.mainnet-beta.solana.com';
+// 2026-05-13: Prefer Helius for the held-position price watcher. This is the
+// highest-stakes feed in the system — every position-monitor decision (trail,
+// SL, tier exit) reads mints.last_price_sol which is updated here. Helius
+// has a paid SLA, lower latency, and won't throttle like the public Solana
+// RPC node does under load. Public RPC kept as fallback if no key configured.
+const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '';
+const HELIUS_WS = HELIUS_API_KEY ? `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}` : null;
+const RPC_WS = process.env.SOLANA_RPC_WS || HELIUS_WS || 'wss://api.mainnet-beta.solana.com';
+const RPC_HTTP = process.env.SOLANA_RPC_HTTP
+  || (HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}` : 'https://api.mainnet-beta.solana.com');
 const PRICE_FLOOR_SOL = 1e-9;  // pump.fun bonding curve floor ~2.8e-8 — anything below this is migration-moment garbage
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
