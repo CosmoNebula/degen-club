@@ -114,6 +114,14 @@ async function updateWebhook(webhookID, addresses) {
   return res.json();
 }
 
+async function deleteWebhook(webhookID) {
+  await fetchWithRetry(
+    `https://api.helius.xyz/v0/webhooks/${webhookID}?api-key=${HELIUS_API_KEY}`,
+    { method: 'DELETE' },
+    'delete webhook'
+  );
+}
+
 export async function syncHunterWebhook() {
   if (!HELIUS_API_KEY) { console.warn('[helius-wh] HELIUS_API_KEY missing — skipping'); return; }
   if (!WEBHOOK_URL) { console.warn('[helius-wh] HELIUS_WEBHOOK_URL missing — skipping'); return; }
@@ -125,6 +133,21 @@ export async function syncHunterWebhook() {
     const existing = await listExistingWebhooks().catch(() => []);
     const ours = existing.find(w => w.webhookURL === WEBHOOK_URL);
     if (ours) _webhookId = ours.webhookID;
+    // Orphan cleanup — any webhook on this Helius project whose URL doesn't
+    // match our current WEBHOOK_URL is left over from a previous Quick Tunnel
+    // session that Cloudflare recycled. Helius keeps trying to POST events to
+    // those dead URLs and burns credits on every failure. Delete them.
+    // Safe because: the API key is project-scoped, so listExistingWebhooks
+    // only returns webhooks WE registered — there's nothing else to clobber.
+    const orphans = existing.filter(w => w.webhookURL !== WEBHOOK_URL);
+    for (const orphan of orphans) {
+      try {
+        await deleteWebhook(orphan.webhookID);
+        console.log(`[helius-wh] deleted orphan webhook ${orphan.webhookID} (was: ${orphan.webhookURL})`);
+      } catch (err) {
+        console.warn(`[helius-wh] could not delete orphan ${orphan.webhookID}: ${err.message}`);
+      }
+    }
   }
 
   if (_webhookId) {
