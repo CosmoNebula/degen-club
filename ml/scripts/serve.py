@@ -185,7 +185,8 @@ def predict_mint(payload: MintPayload):
         raise HTTPException(503, 'no models loaded')
     import sqlite3
     cols = next(iter(_models.values()))['feature_cols']
-    db = Path('/Users/karaclaycomb/dev/degen-club/data/degen.db')
+    import os
+    db = Path(os.environ.get('DEGEN_DB_PATH', str(Path(__file__).resolve().parent.parent.parent / 'data' / 'degen.db')))
     conn = sqlite3.connect(str(db))
     q = f"SELECT {','.join(cols)} FROM ml_mint_snapshots WHERE mint_address = ? ORDER BY snapshot_age_sec DESC LIMIT 1"
     row = conn.execute(q, (payload.mint,)).fetchone()

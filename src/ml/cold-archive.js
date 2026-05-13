@@ -18,14 +18,20 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { db } from '../db/index.js';
 
-const MEGA_BIN_DIR = '/Applications/MEGAcmd.app/Contents/MacOS';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+
+// MEGA binary location — Mac vs Linux. Override with MEGA_BIN_DIR env var if needed.
+const MEGA_BIN_DIR = process.env.MEGA_BIN_DIR
+  || (process.platform === 'darwin' ? '/Applications/MEGAcmd.app/Contents/MacOS' : '/usr/bin');
 const MEGA_REMOTE_DIR = '/degen-club-archives';
-const VENV_PYTHON = '/Users/karaclaycomb/dev/degen-club/ml/.venv/bin/python';
-const DUMP_SCRIPT = '/Users/karaclaycomb/dev/degen-club/ml/scripts/dump_trades_parquet.py';
-const DB_PATH = '/Users/karaclaycomb/dev/degen-club/data/degen.db';
-const STAGING_DIR = '/Users/karaclaycomb/dev/degen-club/data/archive/staging';
+const VENV_PYTHON = path.join(PROJECT_ROOT, 'ml', '.venv', 'bin', 'python');
+const DUMP_SCRIPT = path.join(PROJECT_ROOT, 'ml', 'scripts', 'dump_trades_parquet.py');
+const DB_PATH = path.join(PROJECT_ROOT, 'data', 'degen.db');
+const STAGING_DIR = path.join(PROJECT_ROOT, 'data', 'archive', 'staging');
 
 // run-every: archive runs from intelligence-condensate.js's prune tick (every
 // 6h). No independent timer here — we want it tightly coupled to the prune.

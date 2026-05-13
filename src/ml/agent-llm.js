@@ -11,7 +11,7 @@ import path from 'node:path';
 
 // Located via `which claude` on the host. Hardcoded to avoid PATH issues
 // when the bot is run under launchd with a minimal PATH.
-const CLAUDE_BIN = '/Users/karaclaycomb/.nvm/versions/node/v20.20.1/bin/claude';
+const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 
 // Strategy recipe schema — the agent must produce JSON conforming to this.
 // Keep it expressive enough for the agent to be creative, but predictable

@@ -10,7 +10,7 @@ import { db } from '../db/index.js';
 import { spawn } from 'node:child_process';
 import { canConsult, recordConsult } from './agent-rate-limit.js';
 
-const CLAUDE_BIN = '/Users/karaclaycomb/.nvm/versions/node/v20.20.1/bin/claude';
+const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const TICK_INTERVAL_MS = 60 * 60 * 1000;  // hourly
 const MAX_BORDERLINE_FOR_CLAUDE = 60;     // cap one batch
 const FIRST_RUN_DELAY_MS = 20 * 60 * 1000; // 20 min after boot

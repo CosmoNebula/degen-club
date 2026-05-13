@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 
 import os
-DB_PATH = Path(os.environ.get('DEGEN_DB_PATH', '/Users/karaclaycomb/dev/degen-club/data/degen.db'))
+DB_PATH = Path(os.environ.get('DEGEN_DB_PATH', str(Path(__file__).resolve().parent.parent.parent / 'data' / 'degen.db')))
 
 FEATURE_COLS = [
     'snapshot_age_sec',  # which decision moment (60/300/900/3600)
