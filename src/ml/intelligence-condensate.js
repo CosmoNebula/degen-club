@@ -31,8 +31,8 @@ const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 90 * 1000;
 
 // Retention windows
-const TRADES_RETENTION_HOURS = 12;          // 6h label-resolver window + 1h max snapshot age = 7h hard floor. 12h gives 5h margin and a longer "recent activity" window for migrator-stats, kol-dip, copy-trade gating, etc. Older raw trades are archived to MEGA Parquet by cold-archive.js before pruning, so we never lose the source data — and digested forms (ml_mint_snapshots, daily_intelligence, wallet aggregates) carry the durable knowledge.
-const PREDICTIONS_RETENTION_DAYS = 2;        // tightened 2026-05-12 — 1M+ preds/day was bloating the DB; calibration uses LIMIT 50k per target, doesn't need long retention
+const TRADES_RETENTION_HOURS = 48;          // 2026-05-12 (VM): 12h→48h. VM has 160GB disk + better CPU; wider window lets migrator-hunter/KOL/wallet-activity queries see 2-day behavior. Older raw trades are archived to MEGA Parquet by cold-archive.js before pruning, so we never lose source data.
+const PREDICTIONS_RETENTION_DAYS = 7;        // 2026-05-12 (VM): 2d→7d. Calibration uses LIMIT 50k per target so longer retention is cheap; drift monitor benefits from wider outcome-history window.
 const LIVE_CONDITIONS_RETENTION_DAYS = 3;
 const FRICTION_LOG_RETENTION_DAYS = 7;
 const SIGNALS_RETENTION_DAYS = 14;

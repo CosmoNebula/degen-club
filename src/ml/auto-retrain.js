@@ -19,7 +19,7 @@ const SCRIPT = path.join(ML_ROOT, 'scripts', 'retrain_all.py');
 const LAST_TRAIN_META = path.join(ML_ROOT, 'data', '.last_train_meta.json');
 
 const FIRST_RUN_DELAY_MS = 15 * 60 * 1000;   // 15 min after boot
-const REPEAT_INTERVAL_MS = 60 * 60 * 1000;   // hourly backstop
+const REPEAT_INTERVAL_MS = 60 * 60 * 1000;   // hourly. Bot now runs on a DO VM (4 vCPU, 8GB RAM) — retrains finish in ~5 min and don't choke other work. Adaptive trigger below remains disabled per earlier user request (was firing too often + redundant with hourly schedule).
 
 // Adaptive trigger (added 2026-05-11): check every 5min for either
 // (a) NEW_LABELS > N since last retrain AND last retrain ≥ 30min ago, or
@@ -246,8 +246,10 @@ export function startAutoRetrain() {
   ensureBaseline();  // seed metrics history from current models if empty
   setTimeout(runRetrain, FIRST_RUN_DELAY_MS);
   setInterval(runRetrain, REPEAT_INTERVAL_MS);
-  setInterval(adaptiveTick, ADAPTIVE_CHECK_MS);
-  console.log(`[auto-retrain] scheduled · first=+15min · interval=1h · adaptive check every ${ADAPTIVE_CHECK_MS/60000}min (≥${MIN_NEW_LABELS} new labels OR ≥${(-DD_THRESHOLD_PCT*100).toFixed(0)}% drawdown)`);
+  // Adaptive trigger DISABLED per user request — was firing too frequently
+  // (30-60 min cadence) and redundant with the hourly fixed schedule.
+  // setInterval(adaptiveTick, ADAPTIVE_CHECK_MS);
+  console.log(`[auto-retrain] scheduled · first=+15min · interval=${REPEAT_INTERVAL_MS/3600000}h (adaptive trigger disabled)`);
 }
 
 // Manual trigger via API (useful for "retrain now" button)
