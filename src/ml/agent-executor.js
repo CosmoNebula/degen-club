@@ -47,6 +47,23 @@ function S() {
        LIMIT 1`),
     bumpEvaluated: d.prepare(`UPDATE ml_agent_strategies SET last_evaluated_at = ? WHERE id = ?`),
     bumpTrade: d.prepare(`UPDATE ml_agent_strategies SET n_trades = n_trades + 1 WHERE id = ?`),
+    // Section B gates (Phase D, 2026-05-13) — sentiment / narrative / creator lookups.
+    // Each is lazy-fetched only when a recipe condition actually references the kind.
+    mintSentiment: d.prepare(`SELECT bull_mentions, bear_mentions, shill_mentions,
+       fud_mentions, neutral_mentions, total_mentions, sum_confidence, last_updated_at
+       FROM mint_sentiment WHERE mint_address = ? AND window_start = ?`),
+    hotNarrativeThemes: d.prepare(`SELECT theme FROM narrative_sentiment
+       WHERE window_start = ? ORDER BY total_mentions DESC LIMIT 20`),
+    creatorMintMeta: d.prepare(`SELECT name, symbol, creator_wallet, description
+       FROM mints WHERE mint_address = ?`),
+    creatorMigratedCount: d.prepare(`SELECT COUNT(*) AS n FROM mints
+       WHERE creator_wallet = ? AND migrated = 1`),
+    creatorRecentSiblings: d.prepare(`SELECT COUNT(*) AS n FROM mints
+       WHERE creator_wallet = ? AND mint_address != ? AND created_at > ?`),
+    creatorPrevDeath: d.prepare(`SELECT last_trade_at FROM mints
+       WHERE creator_wallet = ? AND mint_address != ? AND last_trade_at IS NOT NULL
+       AND last_trade_at < ?
+       ORDER BY last_trade_at DESC LIMIT 1`),
     paperWallet: d.prepare(`SELECT * FROM paper_wallet WHERE id = 1`),
     paperClosedPnl: d.prepare(`SELECT COALESCE(SUM(realized_pnl_sol), 0) AS pnl
        FROM paper_positions WHERE status = 'closed' AND entered_at >= ?`),
@@ -79,26 +96,102 @@ function getAvailableCash() {
   } catch (err) { return 0; }
 }
 
-// Evaluate one entry condition against features + ML predictions
-function evalCondition(c, features, preds) {
+// Section B context fetchers — lazy, called only when a recipe condition
+// references the kind. Each returns null when no data is available; downstream
+// evalCondition then SKIPS that gate (treated as no-opinion, not a fail).
+function fetchSentimentCtx(mintAddress) {
+  const FOUR_HOURS = 4 * 60 * 60 * 1000;
+  const windowStart = Math.floor(Date.now() / FOUR_HOURS) * FOUR_HOURS;
+  const row = S().mintSentiment.get(mintAddress, windowStart);
+  if (!row || !row.total_mentions) return null;
+  return {
+    bull_mentions_4h: row.bull_mentions || 0,
+    bear_mentions_4h: row.bear_mentions || 0,
+    shill_mentions_4h: row.shill_mentions || 0,
+    fud_mentions_4h: row.fud_mentions || 0,
+    neutral_mentions_4h: row.neutral_mentions || 0,
+    total_mentions_4h: row.total_mentions || 0,
+    avg_confidence: row.total_mentions > 0 ? (row.sum_confidence / row.total_mentions) : 0,
+  };
+}
+
+function fetchNarrativeCtx(mintAddress) {
+  const FOUR_HOURS = 4 * 60 * 60 * 1000;
+  const windowStart = Math.floor(Date.now() / FOUR_HOURS) * FOUR_HOURS;
+  const hot = S().hotNarrativeThemes.all(windowStart);
+  if (!hot.length) return null;
+  const meta = S().creatorMintMeta.get(mintAddress);
+  if (!meta) return null;
+  const haystack = (`${meta.name || ''} ${meta.symbol || ''} ${meta.description || ''}`).toLowerCase();
+  if (!haystack.trim()) return { match_count: 0 };
+  let matchCount = 0;
+  for (const r of hot) {
+    const theme = (r.theme || '').toLowerCase().trim();
+    if (theme.length >= 2 && haystack.includes(theme)) matchCount++;
+  }
+  return { match_count: matchCount };
+}
+
+function fetchCreatorCtx(mintAddress) {
+  const meta = S().creatorMintMeta.get(mintAddress);
+  if (!meta?.creator_wallet) return null;
+  const created = meta.created_at || Date.now();
+  const migratedRow = S().creatorMigratedCount.get(meta.creator_wallet);
+  const siblingsRow = S().creatorRecentSiblings.get(meta.creator_wallet, mintAddress, Date.now() - 3600 * 1000);
+  const prevDeathRow = S().creatorPrevDeath.get(meta.creator_wallet, mintAddress, Date.now());
+  const secondsSincePrevDeath = prevDeathRow?.last_trade_at
+    ? Math.max(0, Math.round((Date.now() - prevDeathRow.last_trade_at) / 1000))
+    : null;
+  return {
+    migrated_count: migratedRow?.n || 0,
+    recent_launch_siblings: siblingsRow?.n || 0,
+    seconds_since_prev_death: secondsSincePrevDeath,  // null if no prior mint died
+  };
+}
+
+const _CMP_OPS = {
+  '>':  (a, b) => a > b,
+  '>=': (a, b) => a >= b,
+  '<':  (a, b) => a < b,
+  '<=': (a, b) => a <= b,
+  '==': (a, b) => a === b,
+};
+
+// Returns: true (gate passes), false (HARD reject — strategy fails entry),
+// or 'skip' (no data, gate has no opinion). Caller treats skip as "pass with
+// caveat" — at least one non-skip gate must evaluate per strategy.
+function evalCondition(c, ctx) {
   let lhs;
-  if (c.kind === 'ml_prediction') {
-    lhs = preds[c.name];
-    if (lhs == null) return false;  // missing prediction = condition fails (be conservative)
-  } else if (c.kind === 'feature') {
-    lhs = features[c.name];
-    if (lhs == null) return false;
-  } else {
-    return false;
+  switch (c.kind) {
+    case 'ml_prediction':
+      lhs = ctx.preds[c.name];
+      if (lhs == null) return false;  // core gate — missing prediction = HARD reject
+      break;
+    case 'feature':
+    case 'snapshot_feature':  // explicit name, same lookup
+      lhs = ctx.features[c.name];
+      if (lhs == null) return false;  // core gate — missing feature = HARD reject
+      break;
+    case 'sentiment':
+      if (!ctx.sentiment) return 'skip';
+      lhs = ctx.sentiment[c.metric];
+      if (lhs == null) return 'skip';
+      break;
+    case 'narrative_match':
+      if (!ctx.narrative) return 'skip';
+      lhs = ctx.narrative.match_count;
+      break;
+    case 'creator_stat':
+      if (!ctx.creator) return 'skip';
+      lhs = ctx.creator[c.name];
+      if (lhs == null) return 'skip';
+      break;
+    default:
+      return false;  // unknown kind — fail closed
   }
-  switch (c.op) {
-    case '>':  return lhs > c.value;
-    case '>=': return lhs >= c.value;
-    case '<':  return lhs < c.value;
-    case '<=': return lhs <= c.value;
-    case '==': return lhs === c.value;
-    default: return false;
-  }
+  const op = _CMP_OPS[c.op];
+  if (!op) return false;
+  return op(lhs, c.value);
 }
 
 function evalEntry(recipe, mintAddress, features, preds) {
@@ -120,9 +213,24 @@ function evalEntry(recipe, mintAddress, features, preds) {
   }
   const conds = entry.conditions || [];
   if (conds.length === 0) return false;  // require at least one condition
+
+  // Section B: lazy-fetch context only for kinds the recipe references.
+  const ctx = { features, preds };
+  if (conds.some(c => c.kind === 'sentiment')) ctx.sentiment = fetchSentimentCtx(mintAddress);
+  if (conds.some(c => c.kind === 'narrative_match')) ctx.narrative = fetchNarrativeCtx(mintAddress);
+  if (conds.some(c => c.kind === 'creator_stat')) ctx.creator = fetchCreatorCtx(mintAddress);
+
+  let evaluated = 0;
   for (const c of conds) {
-    if (!evalCondition(c, features, preds)) return false;
+    const r = evalCondition(c, ctx);
+    if (r === false) return false;       // hard reject
+    if (r === 'skip') continue;          // no data, no opinion
+    if (r === true) evaluated++;
   }
+  // Safety: if EVERY gate skipped (no real signal applied), don't enter.
+  // Strategies must have at least one core gate (ml_prediction / feature) that
+  // actually evaluates so we're never entering on pure absence-of-bad-news.
+  if (evaluated === 0) return false;
   return true;
 }
 
