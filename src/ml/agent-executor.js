@@ -96,6 +96,58 @@ function getAvailableCash() {
   } catch (err) { return 0; }
 }
 
+// Section E (Phase D, 2026-05-13): composite score.
+// Weighted sum of normalized 0-1 signals, output clamped to 0-1. A strategy
+// uses {kind: 'composite_score', op: '>=', value: 0.65} as a single hard gate
+// that captures "any combination of ML/tracker/sentiment/narrative/microstructure
+// that adds up." Complements the strict AND-style ml_prediction/feature gates.
+//
+// Per-strategy override: recipe.entry.composite_weights = {migrated: 0.30, ...}
+// merges over the defaults below. Missing signals (e.g., no sentiment row yet)
+// contribute 0 — gate is still computable, not skipped.
+const DEFAULT_COMPOSITE_WEIGHTS = {
+  // Positive ML signals
+  migrated:                 0.20,
+  hits_5x_within_24h:       0.15,
+  peaked_300:               0.15,
+  peak_pct_max:             0.10,   // capped at 5x = 1.0
+  // Non-ML positive signals
+  tracker_quality:          0.10,   // weighted_buyer_quality normalized
+  narrative_match:          0.05,
+  sentiment_net:            0.05,   // (bull - shill) / 10 capped
+  volume_velocity:          0.05,   // inflow_accel_pct capped (positive only)
+  // Penalties (negative weights)
+  will_die_fast_penalty:   -0.15,
+  rug_within_5min_penalty: -0.10,
+};
+
+function computeComposite(features, preds, sentimentCtx, narrativeCtx, weights) {
+  const w = { ...DEFAULT_COMPOSITE_WEIGHTS, ...(weights || {}) };
+  const cap1 = (x) => Math.max(0, Math.min(1, x));
+  let s = 0;
+  // Positive ML signals
+  s += w.migrated           * cap1(preds.migrated || 0);
+  s += w.hits_5x_within_24h * cap1(preds.hits_5x_within_24h || 0);
+  s += w.peaked_300         * cap1(preds.peaked_300 || 0);
+  s += w.peak_pct_max       * cap1((preds.peak_pct_max || 0) / 5);
+  // Tracker quality — weighted_buyer_quality is a sum of (51 - rank) across
+  // distinct top-50 buyers, so a single rank-1 buyer = 50, max practical ~150.
+  // Normalize by 100 to get a sensible 0-1ish range.
+  s += w.tracker_quality * cap1((features.weighted_buyer_quality || 0) / 100);
+  // Narrative match — fraction of 5 matches captures most cases
+  s += w.narrative_match * cap1((narrativeCtx?.match_count || 0) / 5);
+  // Sentiment net (bull − shill, normalized by 10 mentions)
+  const bull = sentimentCtx?.bull_mentions_4h || 0;
+  const shill = sentimentCtx?.shill_mentions_4h || 0;
+  s += w.sentiment_net * cap1((bull - shill) / 10);
+  // Volume velocity — only positive accel contributes (decel doesn't hurt the score)
+  s += w.volume_velocity * cap1(Math.max(0, features.inflow_accel_pct || 0));
+  // Penalties (weights are negative)
+  s += w.will_die_fast_penalty   * cap1(preds.will_die_fast || 0);
+  s += w.rug_within_5min_penalty * cap1(preds.rug_within_5min || 0);
+  return Math.max(0, Math.min(1, s));
+}
+
 // Section D3 (2026-05-13): counter-evidence smell test. After a strategy's
 // gates pass, this runs a SECOND check for adverse signals. Hard veto if any
 // fire. Applies to ALL strategies — these are universal red flags.
@@ -231,6 +283,12 @@ function evalCondition(c, ctx) {
       lhs = ctx.creator[c.name];
       if (lhs == null) return 'skip';
       break;
+    case 'composite_score':
+      // Section E (2026-05-13): always computable — missing sub-signals just
+      // contribute 0 to the weighted sum. Treated as HARD gate (not skip)
+      // since composite by definition aggregates whatever signal is present.
+      lhs = computeComposite(ctx.features, ctx.preds, ctx.sentiment, ctx.narrative, ctx.compositeWeights);
+      break;
     default:
       return false;  // unknown kind — fail closed
   }
@@ -260,10 +318,23 @@ function evalEntry(recipe, mintAddress, features, preds) {
   if (conds.length === 0) return false;  // require at least one condition
 
   // Section B: lazy-fetch context only for kinds the recipe references.
+  // Section E: composite_score implicitly needs sentiment + narrative too,
+  // so its presence triggers those fetches even without explicit gates.
+  const usesComposite = conds.some(c => c.kind === 'composite_score');
   const ctx = { features, preds };
-  if (conds.some(c => c.kind === 'sentiment')) ctx.sentiment = fetchSentimentCtx(mintAddress);
-  if (conds.some(c => c.kind === 'narrative_match')) ctx.narrative = fetchNarrativeCtx(mintAddress);
+  if (usesComposite || conds.some(c => c.kind === 'sentiment')) {
+    ctx.sentiment = fetchSentimentCtx(mintAddress);
+  }
+  if (usesComposite || conds.some(c => c.kind === 'narrative_match')) {
+    ctx.narrative = fetchNarrativeCtx(mintAddress);
+  }
   if (conds.some(c => c.kind === 'creator_stat')) ctx.creator = fetchCreatorCtx(mintAddress);
+  // Per-strategy composite weight overrides — recipe.entry.composite_weights
+  // merges over DEFAULT_COMPOSITE_WEIGHTS inside computeComposite. Skipped here
+  // if not present; composite gate gets the defaults.
+  if (entry.composite_weights && typeof entry.composite_weights === 'object') {
+    ctx.compositeWeights = entry.composite_weights;
+  }
 
   let evaluated = 0;
   for (const c of conds) {
