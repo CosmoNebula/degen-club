@@ -743,14 +743,15 @@ function takeSnapshot(mint, target, snapshotTs) {
     ? sent.sum_confidence / sent.total_mentions : null;
   const dt = new Date(mint.created_at);
 
-  // A1 (Phase D, 2026-05-13): Universal snapshot eval. Previously this only fired
-  // at the 60s age AND only with tracked buyers present, which capped the bot's
-  // universe at smart-wallet-activated mints (~6% of created mints actually
-  // evaluated). Now: every snapshot at age ≥ 60s fires evaluateMintNow. The
-  // strategies' filters and the 8s evaluateMintNow debounce do the gating; this
-  // just opens the universe. Skip 15s/30s ages — too early to know if sniper
-  // bundle is in/out (per user direction).
-  if (target >= 60) {
+  // A1 (Phase D, 2026-05-13): Universal snapshot eval. Originally fired at
+  // every age ≥ 60s (60/120/300/600/900/1800/3600). Throttled 2026-05-13 PM
+  // to the four core ages (60/300/900/3600) when DO hourly CPU avg crept
+  // above headroom during retrain windows. The 120s/600s/1800s ages were
+  // mostly confirmatory — same mint, similar features, redundant evals
+  // due to the 8s debounce anyway. Cuts eval volume ~40%, no material
+  // signal loss. Skip 15s/30s ages — too early to read sniper/bundle state.
+  const A1_EVAL_AGES = new Set([60, 300, 900, 3600]);
+  if (A1_EVAL_AGES.has(target)) {
     const reasonSuffix = agg.trackedBuyers >= 1 ? `-tracked-${agg.trackedBuyers}` : '';
     import('./agent-executor.js').then(m => {
       m.evaluateMintNow(mint.mint_address, `snap-${target}s${reasonSuffix}`).catch(() => {});
