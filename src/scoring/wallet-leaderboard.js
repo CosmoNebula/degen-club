@@ -31,7 +31,12 @@ import { db } from '../db/index.js';
 const SLOTS = 50;
 const KOL_SLOTS = 10;
 const HIGH_END = 25;
-const RECOMPUTE_INTERVAL_MS = 60 * 60 * 1000;
+const RECOMPUTE_INTERVAL_MS = 30 * 60 * 1000;  // 2026-05-13: 1h → 30min for faster reaction to degradation (D2)
+// Auto-untrack: wallets that fall off top-50 for AUTO_UNTRACK_DROPS consecutive
+// recomputes get tracked=0. At 30-min cadence, 3 drops = ~1.5h sticky window.
+// Prevents single bad hour from kicking out a long-standing high-quality wallet,
+// while still pruning trackers that have genuinely gone cold.
+const AUTO_UNTRACK_DROPS = 3;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const PNL_CAP = 500;
@@ -61,8 +66,14 @@ function tierForRank(rank) {
   return 'TRACKED';
 }
 
-function clearWalletFlags(d) {
-  d.exec(`UPDATE wallets SET tracked = 0, is_kol = 0 WHERE manually_tracked = 0`);
+// Returns the set of addresses currently flagged tracked=1 (non-manual only).
+// We use this snapshot to figure out who's about to "drop off" the new top-50.
+function loadCurrentlyTracked(d) {
+  const rows = d.prepare(`SELECT address, COALESCE(dropped_count, 0) AS dropped_count
+    FROM wallets WHERE tracked = 1 AND manually_tracked = 0`).all();
+  const m = new Map();
+  for (const r of rows) m.set(r.address, r.dropped_count);
+  return m;
 }
 
 function loadCandidatesWithExtraStats() {
@@ -76,19 +87,25 @@ function loadCandidatesWithExtraStats() {
     WITH candidates AS (
       SELECT address FROM wallets
       WHERE COALESCE(closed_30d, 0) >= 20
-        AND COALESCE(sniper_ratio, 0) <= 0.8
-        AND COALESCE(avg_hold_seconds, 0) >= 2
-        -- Disqualify HFT bots. 2026-05-10: top-1 wallet was doing 20k+
-        -- trades/day = 848/hr, which crushed Helius webhook credits.
-        -- 4,500 trades/30d = 150/day average is a sane cap for "active
-        -- human trader". Scalpers do thousands per day.
-        AND COALESCE(trade_count_30d, 0) <= 4500
+        -- 2026-05-13 (D2): tightened from sniper_ratio<=0.8 to <=0.30.
+        -- Humans rarely sniper >30% of their buys; >30% is bot territory.
+        -- The point of trackers is to FOLLOW good hunters, not get front-run by them.
+        AND COALESCE(sniper_ratio, 0) <= 0.30
+        -- First-block buy ratio: humans cannot physically be first-block.
+        -- >20% first-block = bot. (Some legit MEV traders fit this profile
+        -- but we don't want to follow them either — they front-run, we lose.)
+        AND COALESCE(first_block_ratio, 0) <= 0.20
+        -- Hold time: humans hold at least a minute. <60s = scalper/sniper.
+        AND COALESCE(avg_hold_seconds, 0) >= 60
+        -- Trade volume cap: 1500/30d = 50/day average. Humans rarely pick
+        -- more than 50 distinct mints/day. Was 4500 (150/day) — too permissive.
+        AND COALESCE(trade_count_30d, 0) <= 1500
         -- Explicit category filter: the bot's own classification flags
         -- SCALPER/BOT/BUNDLE based on multi-feature heuristics. Trust it.
         AND COALESCE(category, 'NOT_SURE') NOT IN ('SCALPER', 'BOT', 'BUNDLE')
-        -- Trades-per-position is a strong scalper tell — they buy/sell same
-        -- mint many times. >5 trades per position = HFT.
-        AND COALESCE(trades_per_position, 0) <= 5
+        -- Trades-per-position: bots churn the same mint many times.
+        -- Humans buy once, sell once or in stages. Lowered cap 5 → 3.
+        AND COALESCE(trades_per_position, 0) <= 3
         AND COALESCE(bundle_cluster_id, '') = ''
     ),
     first_buy AS (
@@ -280,14 +297,30 @@ export function recomputeLeaderboard({ verbose = false } = {}) {
     WHERE address = ?`);
 
   const now = Date.now();
+  const finalAddrs = new Set(final.map(c => c.address));
+  const incrementDropped = d.prepare(`UPDATE wallets SET dropped_count = COALESCE(dropped_count,0) + 1 WHERE address = ?`);
+  const setUntracked = d.prepare(`UPDATE wallets SET tracked = 0, is_kol = 0 WHERE address = ? AND manually_tracked = 0`);
+  const resetDropped = d.prepare(`UPDATE wallets SET dropped_count = 0 WHERE address = ?`);
+
   const tx = d.transaction(() => {
     d.exec('DELETE FROM wallet_leaderboard');
-    clearWalletFlags(d);
+    // STICKY auto-untrack (2026-05-13 / D2): wallets falling off top-50 don't
+    // immediately lose tracked=1. They increment dropped_count. After
+    // AUTO_UNTRACK_DROPS consecutive drops (~1.5h at 30min cadence) they're
+    // demoted. Wallets back on the board reset to dropped_count=0.
+    const prevTracked = loadCurrentlyTracked(d);
+    for (const [addr, droppedCount] of prevTracked) {
+      if (!finalAddrs.has(addr)) {
+        const nextDrop = droppedCount + 1;
+        incrementDropped.run(addr);
+        if (nextDrop >= AUTO_UNTRACK_DROPS) {
+          setUntracked.run(addr);
+        }
+        // else: still tracked=1 (probationary), score not in top-50 this round
+      }
+    }
     final.forEach((c, i) => {
       const rank = i + 1;
-      // Tier from floor passage (assigned above), not from rank position.
-      // Fallback to tierForRank only if address wasn't categorized (shouldn't
-      // happen but defensive).
       const tier = tierByAddress.get(c.address) || tierForRank(rank);
       const isKol = tier === 'KOL' ? 1 : 0;
       const label = fetchLabel.get(c.address)?.label || null;
@@ -299,6 +332,7 @@ export function recomputeLeaderboard({ verbose = false } = {}) {
         JSON.stringify(c.components), label, now,
       );
       setTrackedKol.run(1, isKol, now, isKol ? now : null, c.address);
+      resetDropped.run(c.address);
     });
   });
   tx();

@@ -93,6 +93,13 @@ function runMigrations(d) {
   ensureCol(d, 'wallets', 'migrator_stats_updated_at', `INTEGER`);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_wallets_migrator_score ON wallets(migrator_score DESC) WHERE migrator_score > 0`);
 
+  // Section D / 2026-05-13: dropped_count tracks consecutive leaderboard
+  // recomputes a wallet was OFF the top-50. Reset to 0 when it re-enters.
+  // After AUTO_UNTRACK_DROPS (=3 at 30-min cadence = 1.5h), tracked=0.
+  // Prevents single bad hour from kicking out a long-standing high-quality
+  // wallet, while still pruning trackers that have genuinely gone cold.
+  ensureCol(d, 'wallets', 'dropped_count', `INTEGER DEFAULT 0`);
+
   // Wallet rings: groups of wallets that buy the same mints together.
   // Detected by mint co-occurrence; aggregate W/L pulled from paper_positions.
   ensureCol(d, 'wallets', 'ring_id', `TEXT`);
