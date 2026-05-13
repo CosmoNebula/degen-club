@@ -907,7 +907,14 @@ function checkPosition(p) {
   const beActive = (breakevenArmed || beStandalone) && peakFromEntry >= beArmPct;
   const postT1TrailPct = strat.tp_trail_pct || 0;
   const postT1ArmPct = strat.tp_trail_arm_pct || 0;
-  const trailArmed = breakevenArmed && postT1TrailPct > 0 && peakFromEntry >= postT1ArmPct;
+  // 2026-05-13: removed `breakevenArmed &&` prerequisite. Original gating tied
+  // trail to "tier1 has locked profit" which made the trail INERT for any
+  // strategy with breakeven_after_tier1=0 OR whose runners peaked above
+  // arm_pct but below T1 trigger. Caught when alive-migrator-v1 round-tripped
+  // 5 positions that peaked +100-145% back down to TIME_EXIT at -50-70%
+  // because the trail never armed. peakFromEntry >= postT1ArmPct is itself
+  // the correct gate — once peak crosses the arm threshold, protect it.
+  const trailArmed = postT1TrailPct > 0 && peakFromEntry >= postT1ArmPct;
   const postT1TrailFloor = trailArmed
     ? Math.max(0, peakFromEntry - postT1TrailPct)
     : null;
