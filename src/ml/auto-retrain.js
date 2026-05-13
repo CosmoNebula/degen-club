@@ -19,7 +19,7 @@ const SCRIPT = path.join(ML_ROOT, 'scripts', 'retrain_all.py');
 const LAST_TRAIN_META = path.join(ML_ROOT, 'data', '.last_train_meta.json');
 
 const FIRST_RUN_DELAY_MS = 15 * 60 * 1000;   // 15 min after boot
-const REPEAT_INTERVAL_MS = 60 * 60 * 1000;   // hourly. Bot now runs on a DO VM (4 vCPU, 8GB RAM) — retrains finish in ~5 min and don't choke other work. Adaptive trigger below remains disabled per earlier user request (was firing too often + redundant with hourly schedule).
+const REPEAT_INTERVAL_MS = 2 * 60 * 60 * 1000;   // 2026-05-13: dropped hourly→2h. Observed DO hourly-avg CPU pegged at 96% with hourly retrains AND A1/A2 universal eval running. Retrain alone takes ~18 min wall-time and dominates the hour. 2h cadence + nice/ionice (see below) restores ~75-80% steady-state. Models still retrain 12x/day, plenty for label-resolve rate. Adaptive trigger remains disabled.
 
 // Adaptive trigger (added 2026-05-11): check every 5min for either
 // (a) NEW_LABELS > N since last retrain AND last retrain ≥ 30min ago, or
@@ -122,7 +122,14 @@ async function runRetrain() {
   // on Intel Mac and the Node event loop starves, pushing RPC probes from
   // 200ms into 4s+ (verified 2026-05-11). 2 threads keeps training fast
   // enough (~15 min full retrain) while leaving the bot responsive.
-  const proc = spawn(PYTHON, [SCRIPT], {
+  //
+  // 2026-05-13: prefixed launch with `nice -n 10` + `ionice -c 3` (idle I/O class)
+  // so the retrain is preempted whenever the bot needs CPU or disk. Previously
+  // we did `renice` AFTER spawning — there was a brief race window where the
+  // first ~100ms of Python work ran at default priority and could spike load.
+  // Idle ionice means retrain only does disk I/O when nothing else competes;
+  // SQLite contention drops materially.
+  const proc = spawn('nice', ['-n', '10', 'ionice', '-c', '3', PYTHON, SCRIPT], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
@@ -133,11 +140,6 @@ async function runRetrain() {
       DEGEN_DB_PATH: livePath,
     },
   });
-  // Set lower priority (nice) so the bot's Node process wins CPU
-  // contention when the system is busy.
-  try {
-    spawn('renice', ['+10', '-p', String(proc.pid)], { stdio: 'ignore' });
-  } catch {}
   let stdoutBuf = '';
   proc.stdout.on('data', d => {
     const s = d.toString();
