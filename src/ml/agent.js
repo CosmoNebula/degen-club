@@ -627,6 +627,7 @@ function S() {
       SELECT timestamp, price_sol, market_cap_sol, sol_amount, is_buy
       FROM trades WHERE mint_address = ?
         AND timestamp BETWEEN ? AND ?
+        AND is_junk = 0
       ORDER BY timestamp ASC
     `),
     // Tracked-wallet activity during a hold window
@@ -645,6 +646,7 @@ function S() {
       SELECT MAX(price_sol) AS max_price, MAX(market_cap_sol) AS max_mcap
       FROM trades WHERE mint_address = ? AND timestamp > ?
         AND timestamp <= ? + 7200000
+        AND is_junk = 0
     `),
     // === CROSS-STRATEGY OVERLAP ===
     // For mints both strategies could have seen (entered or skipped), who fired

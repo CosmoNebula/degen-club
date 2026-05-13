@@ -74,7 +74,7 @@ function simulatePosition(strat, signal) {
   const fwd = d.prepare(`
     SELECT timestamp, price_sol, market_cap_sol, is_buy
     FROM trades
-    WHERE mint_address = ? AND timestamp >= ? AND price_sol IS NOT NULL
+    WHERE mint_address = ? AND timestamp >= ? AND price_sol IS NOT NULL AND is_junk = 0
     ORDER BY timestamp ASC LIMIT 5000
   `).all(signal.mint_address, signal.ts);
   if (fwd.length < 1) return null;

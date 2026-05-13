@@ -60,7 +60,7 @@ function S() {
       FROM trades t
       LEFT JOIN wallets w ON w.address = t.wallet
       LEFT JOIN wallet_leaderboard wl ON wl.address = t.wallet
-      WHERE t.mint_address = ? AND t.timestamp <= ? ORDER BY t.timestamp ASC
+      WHERE t.mint_address = ? AND t.timestamp <= ? AND t.is_junk = 0 ORDER BY t.timestamp ASC
     `),
     // Creator self-trades on THIS mint (Tier 2 #3). Cheap aggregation off
     // the trades table — captures dev support/dump from their main wallet.
@@ -69,7 +69,7 @@ function S() {
         SUM(CASE WHEN is_buy = 1 THEN 1 ELSE 0 END) AS buys,
         SUM(CASE WHEN is_buy = 0 THEN 1 ELSE 0 END) AS sells
       FROM trades
-      WHERE mint_address = ? AND wallet = ? AND timestamp <= ?
+      WHERE mint_address = ? AND wallet = ? AND timestamp <= ? AND is_junk = 0
     `),
     // Creator heat-map (Tier 3 #7): count of OTHER mints by the same creator
     // in the hour before this one. Mass-launchers split attention and rarely
@@ -104,7 +104,7 @@ function S() {
         COUNT(*) AS total
       FROM (
         SELECT is_buy FROM trades
-        WHERE mint_address = ? AND timestamp <= ?
+        WHERE mint_address = ? AND timestamp <= ? AND is_junk = 0
         ORDER BY timestamp DESC LIMIT 60
       )
     `),

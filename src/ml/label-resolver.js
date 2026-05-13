@@ -116,48 +116,48 @@ function S() {
     mintInfo: d.prepare(`SELECT migrated, migrated_at FROM mints WHERE mint_address = ?`),
     // Returns peak price + the timestamp at which peak occurred (regression targets)
     peakRow: d.prepare(`SELECT price_sol AS max_price, timestamp AS peak_ts
-       FROM trades WHERE mint_address = ? AND timestamp > ? AND price_sol > 0
+       FROM trades WHERE mint_address = ? AND timestamp > ? AND price_sol > 0 AND is_junk = 0
        ORDER BY price_sol DESC LIMIT 1`),
     maxPriceWithin: d.prepare(`SELECT MAX(price_sol) AS max_price, MAX(timestamp) AS last_ts
-       FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ? AND price_sol > 0`),
+       FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ? AND price_sol > 0 AND is_junk = 0`),
     // Min price within a window — used for rug_within_5min label.
     minPriceWithin: d.prepare(`SELECT MIN(price_sol) AS min_price
-       FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ? AND price_sol > 0`),
+       FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ? AND price_sol > 0 AND is_junk = 0`),
     // Min price AFTER the peak — for drawdown_from_peak_pct.
     minPriceAfter: d.prepare(`SELECT MIN(price_sol) AS min_price
-       FROM trades WHERE mint_address = ? AND timestamp >= ? AND price_sol > 0`),
+       FROM trades WHERE mint_address = ? AND timestamp >= ? AND price_sol > 0 AND is_junk = 0`),
     // hits_2x_within_1h: just need max_price in the 60min window after snapshot.
     // Already covered by maxPriceWithin — passed window=60min.
     // time_to_peak_5x: find first trade where price crossed the +50% threshold,
     // then peak price+ts AFTER that threshold. Two queries combined.
     firstCrossing: d.prepare(`SELECT timestamp FROM trades
-       WHERE mint_address = ? AND timestamp > ? AND price_sol >= ?
+       WHERE mint_address = ? AND timestamp > ? AND price_sol >= ? AND is_junk = 0
        ORDER BY timestamp ASC LIMIT 1`),
     peakAfter: d.prepare(`SELECT MAX(price_sol) AS max_price, timestamp AS peak_ts
-       FROM trades WHERE mint_address = ? AND timestamp >= ? AND price_sol > 0
+       FROM trades WHERE mint_address = ? AND timestamp >= ? AND price_sol > 0 AND is_junk = 0
        ORDER BY price_sol DESC LIMIT 1`),
     // Long-horizon hold queries (added 2026-05-12).
     // priceAtOrBefore: returns the most recent valid trade price ≤ target_ts.
     // Used for hold_Xh_pct — we want "what was the price at exactly X hours
     // after snapshot" and trades aren't sampled at exact moments.
     priceAtOrBefore: d.prepare(`SELECT price_sol FROM trades
-       WHERE mint_address = ? AND timestamp <= ? AND price_sol > 0
+       WHERE mint_address = ? AND timestamp <= ? AND price_sol > 0 AND is_junk = 0
        ORDER BY timestamp DESC LIMIT 1`),
     // tradeInWindow: just check if ANY trade exists in [start_ts, end_ts].
     // Used for alive_at_Xh — mint is alive if it traded in the 5-min window
     // ending at horizon. LIMIT 1 + index makes this cheap.
     tradeInWindow: d.prepare(`SELECT 1 FROM trades
-       WHERE mint_address = ? AND timestamp BETWEEN ? AND ? LIMIT 1`),
+       WHERE mint_address = ? AND timestamp BETWEEN ? AND ? AND is_junk = 0 LIMIT 1`),
     // maxPriceInWindow: max price AND its timestamp, bounded above. Used
     // for hits_Nx_within_24h, peak_pct_within_24h, and max_drawdown_within_24h_pct.
     maxPriceInWindow: d.prepare(`SELECT price_sol AS max_price, timestamp AS peak_ts
-       FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ? AND price_sol > 0
+       FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ? AND price_sol > 0 AND is_junk = 0
        ORDER BY price_sol DESC LIMIT 1`),
     // minPriceInWindowRange: min price in [start_ts, end_ts]. Used after we
     // know the peak ts in the 24h window — we look for the min AFTER the peak,
     // still bounded by the 24h horizon.
     minPriceInWindowRange: d.prepare(`SELECT MIN(price_sol) AS min_price
-       FROM trades WHERE mint_address = ? AND timestamp >= ? AND timestamp <= ? AND price_sol > 0`),
+       FROM trades WHERE mint_address = ? AND timestamp >= ? AND timestamp <= ? AND price_sol > 0 AND is_junk = 0`),
     update: d.prepare(`UPDATE ml_mint_snapshots SET
        migrated = ?, peaked_30 = ?, peaked_100 = ?, peaked_300 = ?, peaked_500 = ?,
        peak_pct_max = ?, time_to_peak_sec = ?, will_die_fast = ?,

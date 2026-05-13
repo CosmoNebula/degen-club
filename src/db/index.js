@@ -139,6 +139,14 @@ function runMigrations(d) {
 
   ensureCol(d, 'trades', 'is_first_block', `INTEGER DEFAULT 0`);
   ensureCol(d, 'trades', 'buyer_rank', `INTEGER`);
+  // 2026-05-13: is_junk flag for trade rows whose price/mcap was rejected
+  // from updating mint state (spike-up/spike-down/floor/peak-jump/dust).
+  // Downstream consumers (label-resolver, snapshot-sweeper, analytics)
+  // filter `WHERE is_junk = 0` to exclude phantom ticks. Row still stored
+  // for on-chain audit. Count any time via `SELECT COUNT(*) FROM trades
+  // WHERE is_junk = 1`. See processor.js for the junk-detection logic.
+  ensureCol(d, 'trades', 'is_junk', `INTEGER DEFAULT 0`);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_trades_junk ON trades(is_junk) WHERE is_junk = 1`);
 
   ensureCol(d, 'wallet_holdings', 'is_first_block', `INTEGER DEFAULT 0`);
   ensureCol(d, 'wallet_holdings', 'buyer_rank', `INTEGER`);

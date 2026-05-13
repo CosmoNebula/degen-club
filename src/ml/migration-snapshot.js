@@ -83,11 +83,11 @@ function S() {
     intelVerdict: d.prepare(`SELECT verdict FROM ml_mint_intel WHERE mint_address = ?`),
     migAnchorPrice: d.prepare(`
       SELECT price_sol, market_cap_sol FROM trades
-      WHERE mint_address = ? AND timestamp >= ? ORDER BY timestamp ASC LIMIT 1
+      WHERE mint_address = ? AND timestamp >= ? AND is_junk = 0 ORDER BY timestamp ASC LIMIT 1
     `),
     peakSinceMig: d.prepare(`
       SELECT MAX(price_sol) AS peak_price, MAX(market_cap_sol) AS peak_mcap
-      FROM trades WHERE mint_address = ? AND timestamp BETWEEN ? AND ?
+      FROM trades WHERE mint_address = ? AND timestamp BETWEEN ? AND ? AND is_junk = 0
     `),
     insertSnapshot: d.prepare(`INSERT OR IGNORE INTO ml_migration_snapshots
       (mint_address, snapshot_age_min, migrated_at, snapshot_ts,
@@ -120,7 +120,7 @@ function S() {
     `),
     earlyDumpCheck: d.prepare(`
       SELECT MIN(price_sol) AS min_price FROM trades
-      WHERE mint_address = ? AND timestamp BETWEEN ? AND ?
+      WHERE mint_address = ? AND timestamp BETWEEN ? AND ? AND is_junk = 0
     `),
     aliveCheck: d.prepare(`
       SELECT COUNT(*) AS n FROM trades WHERE mint_address = ? AND timestamp BETWEEN ? AND ?

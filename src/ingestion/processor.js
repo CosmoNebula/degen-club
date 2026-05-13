@@ -61,8 +61,8 @@ function S() {
     walletAlreadyBought: d.prepare('SELECT 1 FROM trades WHERE mint_address = ? AND wallet = ? AND is_buy = 1 LIMIT 1'),
     insertTrade: d.prepare(`INSERT OR IGNORE INTO trades
       (signature, mint_address, wallet, is_buy, sol_amount, token_amount, price_sol, market_cap_sol,
-       seconds_from_creation, is_sniper, is_first_block, buyer_rank, wallet_label, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+       seconds_from_creation, is_sniper, is_first_block, buyer_rank, wallet_label, timestamp, is_junk)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     updateMintOnTrade: d.prepare(`UPDATE mints SET
         current_market_cap_sol = ?,
         last_price_sol = ?,
@@ -221,17 +221,16 @@ function onTrade(e) {
       mcapSol = priceSol * PUMP_FUN_TOTAL_SUPPLY;
     }
 
-    s.insertTrade.run(
-      e.signature || null, e.mint, wallet, isBuy, solAmount, tokenAmount, priceSol,
-      mcapSol, secondsFromCreation, isSniper, isFirstBlock, buyerRank, label, now
-    );
-
+    // 2026-05-13: junk-detection moved BEFORE the trade insert so we can stamp
+    // is_junk=1 on the row itself. Downstream consumers (label-resolver,
+    // snapshot-sweeper, analytics) can then filter `WHERE is_junk = 0` to
+    // exclude phantom ticks from their computations. Trade row still inserted
+    // for audit (on-chain provenance), just flagged.
     // SANITY: pump.fun bonding-curve math says min price ≈ 2.8e-8 SOL/token.
     // Trades arriving with priceSol below 1e-8 on a non-migrated mint are
     // junk. Migrated mints get a relaxed floor (1e-9) — they CAN crater on
     // AMM but a 100x drop in seconds is migration-moment garbage (2026-05-11
     // Goblinjak: 4.3e-7 → 3.5e-9 in one tick, corrupted last_price_sol).
-    // Keep the trade row (audit) but DON'T poison mints.last_price_sol.
     const PRICE_FLOOR = 1e-8;
     const MIGRATED_PRICE_FLOOR = 1e-9;
     const px = priceSol || 0;
@@ -294,11 +293,17 @@ function onTrade(e) {
       (!mint.migrated && px < PRICE_FLOOR) ||
       (mint.migrated && px < MIGRATED_PRICE_FLOOR)
     );
+    // Insert with the is_junk flag stamped on the row itself.
+    s.insertTrade.run(
+      e.signature || null, e.mint, wallet, isBuy, solAmount, tokenAmount, priceSol,
+      mcapSol, secondsFromCreation, isSniper, isFirstBlock, buyerRank, label, now,
+      isJunkPrice ? 1 : 0
+    );
     if (isJunkPrice) {
       _junkDropCount++;
       const sinceLog = now - _junkDropLastLog;
       if (sinceLog >= JUNK_DROP_LOG_INTERVAL_MS) {
-        console.log(`[processor] DROPPED ${_junkDropCount} sub-floor mint-state updates in last ${Math.round(sinceLog/1000)}s — trade rows stored, mints.last_price_sol preserved`);
+        console.log(`[processor] FLAGGED ${_junkDropCount} junk trade rows in last ${Math.round(sinceLog/1000)}s — is_junk=1, mints.last_price_sol preserved`);
         _junkDropCount = 0;
         _junkDropLastLog = now;
       }
