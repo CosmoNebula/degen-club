@@ -21,7 +21,7 @@ from pathlib import Path
 import os
 import pandas as pd
 
-DB_PATH = Path(os.environ.get('DEGEN_DB_PATH', '/Users/karaclaycomb/dev/degen-club/data/degen.db'))
+DB_PATH = Path(os.environ.get('DEGEN_DB_PATH', str(Path(__file__).resolve().parent.parent.parent / 'data' / 'degen.db')))
 
 FEATURE_COLS = [
     'snapshot_age_min',
