@@ -384,5 +384,5 @@ export function startWalletLeaderboard() {
     try { recomputeLeaderboard({ verbose: true }); }
     catch (err) { console.error('[leaderboard] tick', err.message); }
   }, RECOMPUTE_AUTO_INTERVAL_MS);
-  console.log('[leaderboard] started · top-50 recompute every 2h (humans-only filter, ~3s)');
+  console.log(`[leaderboard] started · top-50 recompute every ${RECOMPUTE_INTERVAL_MS / 60000}min (humans-only filter, sticky auto-untrack ${AUTO_UNTRACK_DROPS} drops)`);
 }
