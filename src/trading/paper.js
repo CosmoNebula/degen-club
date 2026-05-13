@@ -763,6 +763,21 @@ function checkMoonbag(p, m) {
   s.updateMoonbagPeak.run(moonbagPeak, totalUnrealized, totalUnrealizedPct, now, p.id);
 }
 
+// 2026-05-13: Migration grace window. During the 90 seconds after a mint
+// migrates, four different price-writers compete for mints.last_price_sol
+// (bonding-curve PDA emitting final state, AMM router quoting before
+// liquidity stabilizes, DexScreener picking up the new pool, etc.). Phantom
+// values get through and trigger bad price-driven exits — caught NUBBIX,
+// CUPPY, BALLSACKDORKL, others exiting at fake 4.108e-07. Freezing price-
+// driven exits for 90s lets the dust settle and the HOT DexScreener poll
+// (10s cadence) get ~9 fresh quotes before we trust the data again.
+//
+// What still fires during grace: RUGGED (the rug flag is set independently
+// from price-monitor logic, so it's trustworthy). What does NOT fire: every
+// price-driven exit (TARGET, SL, TRAIL, FAKE_PUMP, etc.). Max-hold also
+// keeps firing because it's time-based.
+const MIGRATION_GRACE_MS = 90 * 1000;
+
 function checkPosition(p) {
   const s = S();
   const now = Date.now();
@@ -771,6 +786,19 @@ function checkPosition(p) {
   if (_pendingPaperSells.has(p.id)) return;
   const m = s.getMint.get(p.mint_address);
   if (!m) return;
+
+  // Migration grace: freeze price-driven exits for 90s after migration.
+  // Only the RUGGED check fires inside the window (rugged isn't price-driven
+  // and is the only condition where we'd want immediate action regardless).
+  if (m.migrated && m.migrated_at && (now - m.migrated_at) < MIGRATION_GRACE_MS) {
+    if (m.rugged) {
+      // Even during grace, a rugged mint should exit immediately
+      // (RUGGED flag is set by independent rug-detection logic).
+    } else {
+      // Skip this poll cycle entirely — let the AMM pool stabilize.
+      return;
+    }
+  }
 
   if (p.is_moonbag) {
     return checkMoonbag(p, m);
