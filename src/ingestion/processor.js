@@ -247,17 +247,33 @@ function onTrade(e) {
     // 2026-05-11 NICHEBABY: 6.5-SOL sell reported 6105 SOL mcap, 15x the
     // prior trade 2 min before. Real price was ~$160k, displayed showed
     // $589k peak. Same class of corruption as dust ticks, but bigger trade.
+    // 2026-05-12 audit: the original guard was migrated-only, so 2083 non-mig
+    // mints had polluted peaks (avg 240x inflation, worst 241kx). Extended to
+    // ALL mints, with a 60s carve-out for brand-new mints where bonding-curve
+    // math legitimately moves fast at launch.
+    // Also added a hard sanity check: never accept a tick whose mcap is more
+    // than 20x the existing peak (legitimate moves don't make THAT jump in
+    // a single trade).
     const SPIKE_MAX_RATIO = 5;
     const SPIKE_WINDOW_MS = 5 * 60 * 1000;
+    const PEAK_RATIO_CAP = 20;
+    const PEAK_GUARD_MIN_SOL = 10;
+    const FRESH_MINT_GRACE_MS = 60 * 1000;
     const priorPx = mint.last_price_sol || 0;
     const priorTradeAt = mint.last_trade_at || 0;
-    const isSpikeUp = mint.migrated &&
+    const mintAge = now - (mint.created_at || now);
+    const isMatureEnough = mint.migrated || mintAge > FRESH_MINT_GRACE_MS;
+    const isSpikeUp = isMatureEnough &&
                      priorPx > 0 &&
                      px > priorPx * SPIKE_MAX_RATIO &&
                      (now - priorTradeAt) < SPIKE_WINDOW_MS;
+    const priorPeak = mint.peak_market_cap_sol || 0;
+    const isAbsurdPeakJump = priorPeak > PEAK_GUARD_MIN_SOL &&
+                             mcapSol > priorPeak * PEAK_RATIO_CAP;
     const isJunkPrice = !mint.rugged && (
       isDustOnAmm ||
       isSpikeUp ||
+      isAbsurdPeakJump ||
       (!mint.migrated && px < PRICE_FLOOR) ||
       (mint.migrated && px < MIGRATED_PRICE_FLOOR)
     );
