@@ -275,6 +275,22 @@ function S() {
        WHERE analyzed_at > strftime('%s','now')*1000 - 86400000 GROUP BY verdict`),
     // === CULTURAL PULSE — news + flags + meta synthesis ===
     latestSynthesis: d.prepare(`SELECT ts, summary FROM agent_meta_synthesis ORDER BY ts DESC LIMIT 1`),
+    // Phase C — top mints + narratives by current-4h-window sentiment volume.
+    // Fed into context so the agent can reason about which mints have social
+    // attention right now ("$X is being shilled, fade it" vs "$Y is organic
+    // bullish, favor entry").
+    topSentimentMints: d.prepare(`SELECT s.mint_address, m.symbol, m.name,
+       s.bull_mentions, s.bear_mentions, s.shill_mentions, s.total_mentions,
+       (s.sum_confidence / NULLIF(s.total_mentions, 0)) AS avg_conf
+       FROM mint_sentiment s LEFT JOIN mints m ON m.mint_address = s.mint_address
+       WHERE s.window_start = ?
+       ORDER BY s.total_mentions DESC LIMIT 10`),
+    topSentimentNarratives: d.prepare(`SELECT theme,
+       bull_mentions, bear_mentions, shill_mentions, total_mentions,
+       (sum_confidence / NULLIF(total_mentions, 0)) AS avg_conf
+       FROM narrative_sentiment
+       WHERE window_start = ?
+       ORDER BY total_mentions DESC LIMIT 10`),
     activeFlags: d.prepare(`SELECT flag, note, created_at FROM manual_flags
        WHERE active=1 AND (expires_at IS NULL OR expires_at > strftime('%s','now')*1000)
        ORDER BY created_at DESC LIMIT 10`),
@@ -806,6 +822,35 @@ function buildContext() {
     lines.push('');
     lines.push(`=== CURRENT CULTURAL META (synthesized ${ageHr}h ago by your news layer — read carefully) ===`);
     lines.push(synth.summary);
+  }
+
+  // Phase C — live sentiment scores from the per-post worker (15-min cycles).
+  // Higher resolution than the 4h cultural-meta synthesis: shows WHICH MINTS
+  // and WHICH NARRATIVES are getting talked about RIGHT NOW with bull/bear/shill
+  // breakdown. The agent should weigh shill_mentions skeptically and
+  // bull_mentions positively, especially with high confidence.
+  const FOUR_HOURS = 4 * 60 * 60 * 1000;
+  const sentWindow = Math.floor(Date.now() / FOUR_HOURS) * FOUR_HOURS;
+  const topSentMints = s.topSentimentMints.all(sentWindow);
+  const topSentNarr = s.topSentimentNarratives.all(sentWindow);
+  if (topSentMints.length > 0 || topSentNarr.length > 0) {
+    lines.push('');
+    lines.push('=== LIVE SENTIMENT (current 4h window, per-post Claude scoring) ===');
+    if (topSentMints.length > 0) {
+      lines.push('Top mints by mention count:');
+      for (const m of topSentMints) {
+        const sym = m.symbol || '?';
+        const conf = m.avg_conf != null ? (m.avg_conf * 100).toFixed(0) + '%' : '—';
+        lines.push(`  • $${sym} (${(m.name || '').slice(0, 30)}) · ${m.total_mentions} mentions · ▲${m.bull_mentions || 0} ▼${m.bear_mentions || 0} ⚠shill${m.shill_mentions || 0} · conf ${conf}`);
+      }
+    }
+    if (topSentNarr.length > 0) {
+      lines.push('Top narratives:');
+      for (const n of topSentNarr) {
+        const conf = n.avg_conf != null ? (n.avg_conf * 100).toFixed(0) + '%' : '—';
+        lines.push(`  • [${n.theme}] · ${n.total_mentions} mentions · ▲${n.bull_mentions || 0} ▼${n.bear_mentions || 0} ⚠shill${n.shill_mentions || 0} · conf ${conf}`);
+      }
+    }
   }
 
   // === ANOMALIES (predictive — what's happening RIGHT NOW that's unusual) ===

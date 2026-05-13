@@ -607,6 +607,17 @@ function runMigrations(d) {
   ensureCol(d, 'ml_mint_snapshots', 'peak_pct_within_24h', `REAL`);
   ensureCol(d, 'ml_mint_snapshots', 'max_drawdown_within_24h_pct', `REAL`);
 
+  // Phase C sentiment features (added 2026-05-13). Each snapshot reads from
+  // mint_sentiment for the current 4h window and stores the bull/bear/shill
+  // counts + total mentions + avg confidence. NULL when no mentions exist
+  // (model handles NaN natively as a split signal — "no social attention"
+  // is itself information).
+  ensureCol(d, 'ml_mint_snapshots', 'sentiment_bull_4h', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'sentiment_bear_4h', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'sentiment_shill_4h', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'sentiment_total_4h', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'sentiment_avg_confidence', `REAL`);
+
   // Per-mint Telegram cache so the snapshot sweeper doesn't re-fetch on
   // every snapshot age. Worker fetches once per mint with a long TTL; the
   // snapshot just reads the cached value.

@@ -117,6 +117,12 @@ FEATURE_COLS = [
     # Network features (per snapshot)
     'rpc_latency_p90_ms',
     'priority_fee_p90',
+    # Phase C sentiment features (per snapshot, 4h-window)
+    'sentiment_bull_4h',
+    'sentiment_bear_4h',
+    'sentiment_shill_4h',
+    'sentiment_total_4h',
+    'sentiment_avg_confidence',
 ]
 
 LABEL_COLS = [

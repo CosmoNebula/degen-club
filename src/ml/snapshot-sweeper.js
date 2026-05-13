@@ -134,6 +134,11 @@ function S() {
         AND last_trade_at < ?
       ORDER BY last_trade_at DESC LIMIT 1
     `),
+    // Phase C — sentiment for the mint in the current 4h window. Returns NULL
+    // if no mention has landed yet, which the model handles natively (NaN).
+    mintSentiment: d.prepare(`SELECT bull_mentions, bear_mentions, shill_mentions,
+       total_mentions, sum_confidence
+       FROM mint_sentiment WHERE mint_address = ? AND window_start = ?`),
     microstructure: d.prepare(`SELECT volatility_pct, sandwich_risk, reaction_speed_ms FROM mint_microstructure WHERE mint_address = ?`),
     // priority_fee_p99 captures the *contested-slot* fee, not the median.
     // Most pump.fun slots have 0 fee competition so p50/p90 are always 0;
@@ -171,8 +176,10 @@ function S() {
       bot_sniper_buyer_count, fast_human_sniper_count,
       seconds_since_prev_creator_death,
       trade_count, trades_per_min, volatility_pct, sandwich_risk, reaction_speed_ms,
-      rpc_latency_p90_ms, priority_fee_p90, network_status
-    ) VALUES (${Array(93).fill('?').join(',')})`),
+      rpc_latency_p90_ms, priority_fee_p90, network_status,
+      sentiment_bull_4h, sentiment_bear_4h, sentiment_shill_4h,
+      sentiment_total_4h, sentiment_avg_confidence
+    ) VALUES (${Array(98).fill('?').join(',')})`),
   };
   return stmts;
 }
@@ -728,6 +735,12 @@ function takeSnapshot(mint, target, snapshotTs) {
   }
   const ms = s.microstructure.get(mint.mint_address);
   const lc = s.latestConditions.get();
+  // Phase C — current-4h sentiment for this mint (NULL if no mentions yet).
+  const FOUR_HOURS = 4 * 60 * 60 * 1000;
+  const currentSentWindow = Math.floor(snapshotTs / FOUR_HOURS) * FOUR_HOURS;
+  const sent = s.mintSentiment.get(mint.mint_address, currentSentWindow);
+  const sentAvgConf = (sent && sent.total_mentions > 0)
+    ? sent.sum_confidence / sent.total_mentions : null;
   const dt = new Date(mint.created_at);
 
   // EVENT: trigger agent eval when a mint first becomes scoring-eligible (60s age)
@@ -786,6 +799,11 @@ function takeSnapshot(mint, target, snapshotTs) {
     lc?.rpc_helius_p90 ?? null,
     lc?.priority_fee_p99 ?? null,  // see latestConditions comment — p99 is the real signal
     lc?.network_status ?? null,
+    sent?.bull_mentions ?? null,
+    sent?.bear_mentions ?? null,
+    sent?.shill_mentions ?? null,
+    sent?.total_mentions ?? null,
+    sentAvgConf,
   );
 }
 
