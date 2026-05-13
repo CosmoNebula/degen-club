@@ -2,6 +2,7 @@ import { db } from '../db/index.js';
 import { config } from '../config.js';
 import { getSolUsd } from '../price.js';
 import { heliusWS } from './helius.js';
+import { pickPool } from './pool-picker.js';
 
 let stmts = null;
 function S() {
@@ -26,15 +27,15 @@ function S() {
   return stmts;
 }
 
-export async function fetchDexscreenerPrice(mintAddress) {
+export async function fetchDexscreenerPrice(mintAddress, preferredPoolAddress = null) {
   const url = `${config.dexscreener.apiBase}/tokens/v1/solana/${mintAddress}`;
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(config.dexscreener.timeoutMs) });
     if (!res.ok) return null;
     const data = await res.json();
     if (!Array.isArray(data) || !data.length) return null;
-    const pool = data.reduce((best, p) =>
-      (p.liquidity?.usd || 0) > (best.liquidity?.usd || 0) ? p : best, data[0]);
+    const pool = pickPool(data, preferredPoolAddress);
+    if (!pool) return null;
     return {
       priceUsd: parseFloat(pool.priceUsd) || 0,
       priceNative: parseFloat(pool.priceNative) || 0,
@@ -52,7 +53,14 @@ export async function fetchDexscreenerPrice(mintAddress) {
 const PRICE_FLOOR_SOL = 1e-9;
 
 async function refreshMintPrice(mintAddress) {
-  const data = await fetchDexscreenerPrice(mintAddress);
+  // Look up any pinned pool from open moonbags so the picker can keep us on
+  // the same venue across refreshes (avoids the "flip-flop between pump-amm
+  // and raydium" problem we hit during migration handoffs).
+  const pinnedRow = db().prepare(
+    "SELECT pool_address FROM paper_positions WHERE mint_address = ? AND is_moonbag = 1 AND status = 'open' AND pool_address IS NOT NULL AND pool_address != '' LIMIT 1"
+  ).get(mintAddress);
+  const preferred = pinnedRow?.pool_address || null;
+  const data = await fetchDexscreenerPrice(mintAddress, preferred);
   if (!data || !data.priceNative || data.priceNative <= 0) return null;
   if (data.priceNative < PRICE_FLOOR_SOL) return null;
   const solUsd = getSolUsd() || 1;

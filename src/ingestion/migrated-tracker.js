@@ -21,6 +21,7 @@
 
 import { db } from '../db/index.js';
 import { getSolUsd } from '../price.js';
+import { pickPool } from './pool-picker.js';
 
 const TICK_INTERVAL_MS = 60 * 1000;             // every 60s — poll a fresh batch
 const FIRST_RUN_DELAY_MS = 90 * 1000;
@@ -80,7 +81,7 @@ function S() {
   return stmts;
 }
 
-async function fetchPool(mintAddress) {
+async function fetchPool(mintAddress, preferredPoolAddress = null) {
   const url = `https://api.dexscreener.com/tokens/v1/solana/${mintAddress}`;
   try {
     const ctrl = new AbortController();
@@ -93,14 +94,18 @@ async function fetchPool(mintAddress) {
     if (!r.ok) return null;
     const data = await r.json();
     if (!Array.isArray(data) || !data.length) return null;
-    // Pick the highest-liquidity pool
-    return data.reduce((best, p) =>
-      (p.liquidity?.usd || 0) > (best.liquidity?.usd || 0) ? p : best, data[0]);
+    return pickPool(data, preferredPoolAddress);
   } catch { return null; }
 }
 
 async function pollOne(mintAddress) {
-  const pool = await fetchPool(mintAddress);
+  // Pin to amm_pool_address once selected so we don't flip venues between
+  // refreshes (each flip causes a price gap that fires our spike guards).
+  const pinnedRow = db().prepare(
+    'SELECT amm_pool_address FROM mints WHERE mint_address = ?'
+  ).get(mintAddress);
+  const preferred = pinnedRow?.amm_pool_address || null;
+  const pool = await fetchPool(mintAddress, preferred);
   if (!pool) {
     // Mark refreshed even on miss so we don't hammer DexScreener
     S().markRefreshed.run(Date.now(), mintAddress);
