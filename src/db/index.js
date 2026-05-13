@@ -100,6 +100,12 @@ function runMigrations(d) {
   // wallet, while still pruning trackers that have genuinely gone cold.
   ensureCol(d, 'wallets', 'dropped_count', `INTEGER DEFAULT 0`);
 
+  // Section D1 / 2026-05-13: per-entry tracker attribution. JSON array of
+  // tracker wallets that bought this mint in the 60s window before our entry
+  // fired. Used by tracker-concentration to compute rolling per-wallet credit
+  // and mute over-represented wallets.
+  ensureCol(d, 'paper_positions', 'tracker_wallets_json', `TEXT`);
+
   // Wallet rings: groups of wallets that buy the same mints together.
   // Detected by mint co-occurrence; aggregate W/L pulled from paper_positions.
   ensureCol(d, 'wallets', 'ring_id', `TEXT`);

@@ -7,6 +7,7 @@ import { trackHunterBuy } from '../scoring/migrator-hunter.js';
 import { notifyTradeForMint } from '../trading/paper.js';
 import { evaluateMintNow, isCopyTradeTarget } from '../ml/agent-executor.js';
 import { isMlConvictionMint } from '../ml/ml-conviction-watcher.js';
+import { isMuted as isTrackerMuted } from '../scoring/tracker-concentration.js';
 import { config } from '../config.js';
 import { checkCashbackFlag } from './helius.js';
 import { trackBuyer, checkVelocityRunnerProfile, markFired } from '../scoring/coin-velocity.js';
@@ -342,9 +343,14 @@ function onTrade(e) {
     if (isBuy && label === 'SMART') {
       try { checkCopySignal(e.mint); } catch (err) { console.error('[copy-signal]', err.message); }
       try { onSmartTrade({ wallet, is_buy: 1 }, mint); } catch (err) { console.error('[strategy]', err.message); }
-      // EVENT: tracked/SMART wallet just bought — strongest possible signal.
-      // Fire agent evaluation immediately, don't wait for the 60s sweep.
-      evaluateMintNow(e.mint, 'tracked-wallet-buy').catch(() => {});
+      // D1 (2026-05-13): tracker concentration cap. If this wallet has driven
+      // ≥25% of recent entries in the last 4h, mute its trigger contribution.
+      // The wallet keeps trading, we just don't evaluate JUST because they
+      // bought — other triggers (A1 snapshot eval, A2 ML conviction, whale)
+      // still apply if the mint is interesting on its own.
+      if (!isTrackerMuted(wallet)) {
+        evaluateMintNow(e.mint, 'tracked-wallet-buy').catch(() => {});
+      }
     }
 
     // EVENT: agent copy-trade target wallet bought. Fires for ANY wallet the

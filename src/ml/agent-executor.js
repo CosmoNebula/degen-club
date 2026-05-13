@@ -96,6 +96,51 @@ function getAvailableCash() {
   } catch (err) { return 0; }
 }
 
+// Section D3 (2026-05-13): counter-evidence smell test. After a strategy's
+// gates pass, this runs a SECOND check for adverse signals. Hard veto if any
+// fire. Applies to ALL strategies — these are universal red flags.
+const SMELL_VETO_SHILL_MENTIONS = 5;
+const SMELL_VETO_BUNDLE_FRAC = 0.30;
+const SMELL_VETO_TOP1_BUYER_FRAC = 0.50;
+const SMELL_VETO_CREATOR_SELLS = 3;
+
+function smellTestVeto(features, sentimentCtx) {
+  if (sentimentCtx && (sentimentCtx.shill_mentions_4h || 0) >= SMELL_VETO_SHILL_MENTIONS) {
+    return `shill=${sentimentCtx.shill_mentions_4h}`;
+  }
+  const bundleBuyers = features.bundle_buyers || 0;
+  const uniqueBuyers = features.unique_buyers || 0;
+  if (uniqueBuyers >= 5 && (bundleBuyers / uniqueBuyers) >= SMELL_VETO_BUNDLE_FRAC) {
+    return `bundle=${((bundleBuyers / uniqueBuyers) * 100).toFixed(0)}%`;
+  }
+  if ((features.top1_buyer_sol_pct || 0) >= SMELL_VETO_TOP1_BUYER_FRAC) {
+    return `top1=${((features.top1_buyer_sol_pct) * 100).toFixed(0)}%`;
+  }
+  if ((features.creator_sells_post_launch || 0) >= SMELL_VETO_CREATOR_SELLS) {
+    return `creator_sells=${features.creator_sells_post_launch}`;
+  }
+  return null;
+}
+
+// Section D1 (2026-05-13): identify tracker wallets that bought this mint in
+// the 60s window before our entry. Both for entry attribution writeback AND
+// for the tracker-concentration cap that mutes over-represented wallets.
+let _attribStmt = null;
+function attributeTrackers(mintAddress) {
+  try {
+    if (!_attribStmt) {
+      _attribStmt = db().prepare(`
+        SELECT DISTINCT t.wallet FROM trades t
+        JOIN wallets w ON w.address = t.wallet
+        WHERE t.mint_address = ? AND t.is_buy = 1
+          AND t.timestamp >= ? AND w.tracked = 1
+      `);
+    }
+    const since = Date.now() - 60 * 1000;
+    return _attribStmt.all(mintAddress, since).map(r => r.wallet);
+  } catch { return []; }
+}
+
 // Section B context fetchers — lazy, called only when a recipe condition
 // references the kind. Each returns null when no data is available; downstream
 // evalCondition then SKIPS that gate (treated as no-opinion, not a fail).
@@ -346,6 +391,20 @@ async function evaluateOneMint(strategy, mintAddress) {
   const preds = await getAllPredictions(mintAddress, `agent_eval:${strategy.id}`);
   if (!preds) return false;
   if (!evalEntry(recipe, mintAddress, features, preds)) return false;
+  // D3 smell test (2026-05-13): after the strategy's own gates pass, apply
+  // a universal counter-evidence veto. Catches adverse signals (shill, bundle,
+  // whale capture, dev dumping) that strategies might miss because they don't
+  // explicitly gate on them.
+  const sentForVeto = fetchSentimentCtx(mintAddress);
+  const vetoReason = smellTestVeto(features, sentForVeto);
+  if (vetoReason) {
+    db().prepare(`INSERT INTO ml_agent_log (timestamp, level, category, strategy_id, message, data_json)
+       VALUES (?, 'thought', 'execute', ?, ?, ?)`).run(
+      Date.now(), strategy.id,
+      `smell-test veto · ${vetoReason}`,
+      JSON.stringify({ mint: mintAddress, veto: vetoReason }));
+    return false;
+  }
   // Hard dedup: never double up on a mint we already hold on this strategy.
   const alreadyHeld = S().openOnMint.get(strategy.id, mintAddress);
   if (alreadyHeld) return false;
@@ -379,6 +438,16 @@ async function evaluateOneMint(strategy, mintAddress) {
   });
   if (positionId) {
     S().bumpTrade.run(strategy.id);
+    // D1 attribution (2026-05-13): write which tracker wallets were active in
+    // the 60s window before this entry. tracker-concentration uses this to
+    // compute rolling per-wallet contribution and mute over-represented ones.
+    try {
+      const trackerWallets = attributeTrackers(mintAddress);
+      if (trackerWallets.length > 0) {
+        db().prepare('UPDATE paper_positions SET tracker_wallets_json = ? WHERE id = ?')
+          .run(JSON.stringify(trackerWallets), positionId);
+      }
+    } catch (err) { /* swallow — attribution is nice-to-have */ }
     logTrade(strategy.id, mintAddress, sol, preds);
     return true;
   }
