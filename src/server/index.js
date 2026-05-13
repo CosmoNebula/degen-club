@@ -2278,9 +2278,18 @@ export function startServer(getIngestionStatus) {
         WHERE window_start = ?
         ORDER BY total_mentions DESC LIMIT 30
       `).all(currentWindow);
+      // Recent per-post Claude scores — most-recent first. Lets you spot-check
+      // whether the worker is producing sane sentiment + ticker extraction.
+      const items = d.prepare(`
+        SELECT scored_at, source, post_text, tickers_json, sentiment,
+               confidence, themes_json
+        FROM sentiment_items
+        WHERE scored_at > ?
+        ORDER BY scored_at DESC LIMIT 50
+      `).all(dayAgo);
       res.json({
         now, current_window: currentWindow,
-        totals, runs, mints, narratives,
+        totals, runs, mints, narratives, items,
       });
     } catch (err) {
       console.error('[api] /api/sentiment/overview err:', err.message);

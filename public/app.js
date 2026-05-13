@@ -1486,6 +1486,27 @@ function renderSentimentPanels(data) {
     </div>`;
   }).join('') : '<div style="padding:14px;color:var(--muted);font-style:italic;font-size:12px;">no narratives in current 4h window yet</div>';
 
+  const items = data.items || [];
+  const sentBadge = (sent) => {
+    const map = { bullish: ['#22c55e', '▲ BULL'], bearish: ['#ef4444', '▼ BEAR'], shill: ['#f59e0b', '⚠ SHILL'], fud: ['#a855f7', '☢ FUD'], neutral: ['#6b7280', '· NEUTRAL'] };
+    const [color, label] = map[sent] || ['#6b7280', sent || '?'];
+    return `<span style="color:${color};font-weight:bold;font-size:10px;letter-spacing:1px;">${label}</span>`;
+  };
+  document.getElementById('sent-items').innerHTML = items.length ? items.map(it => {
+    let tickers = []; try { tickers = JSON.parse(it.tickers_json || '[]'); } catch {}
+    let themes = []; try { themes = JSON.parse(it.themes_json || '[]'); } catch {}
+    const tickersStr = tickers.length ? tickers.map(t => `<span style="color:var(--cyan);font-weight:bold;">$${t}</span>`).join(' ') : '';
+    const themesStr = themes.length ? themes.map(t => `<span style="color:#a855f7;font-size:10px;background:#1a0d2e;padding:1px 5px;border-radius:3px;">${t}</span>`).join(' ') : '';
+    const conf = typeof it.confidence === 'number' ? (it.confidence * 100).toFixed(0) + '%' : '—';
+    return `<div style="padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+        <div>${sentBadge(it.sentiment)} <span style="color:var(--muted);font-size:10px;">conf ${conf}</span> ${tickersStr} ${themesStr}</div>
+        <div style="color:var(--muted);font-size:10px;">${it.source || '?'} · ${ago(it.scored_at)} ago</div>
+      </div>
+      <div style="color:#aaa;font-size:11px;line-height:1.4;">${(it.post_text || '').replace(/</g, '&lt;').slice(0, 280)}${(it.post_text || '').length > 280 ? '…' : ''}</div>
+    </div>`;
+  }).join('') : '<div style="padding:14px;color:var(--muted);font-style:italic;font-size:12px;">no per-post scores yet — populates after first cycle</div>';
+
   const runs = data.runs || [];
   const tableRows = runs.map(r => {
     const statusColor = r.status === 'ok' ? '#22c55e' : r.status === 'skipped' ? '#6b7280' : r.status === 'cap-hit' ? '#f59e0b' : '#ef4444';

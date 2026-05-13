@@ -90,6 +90,24 @@ function ensureSchema(d) {
     );
     CREATE INDEX IF NOT EXISTS idx_narr_sent_window ON narrative_sentiment(window_start DESC);
 
+    -- Per-post raw Claude scores. Lets the dashboard show "Claude said this
+    -- post = bullish $TICKER" so we can verify the worker is doing sane things.
+    -- Stores both the scored fields and a snippet of the source post for context.
+    CREATE TABLE IF NOT EXISTS sentiment_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL,
+      news_id INTEGER,
+      scored_at INTEGER NOT NULL,
+      source TEXT,
+      post_text TEXT,
+      tickers_json TEXT,
+      sentiment TEXT,
+      confidence REAL,
+      themes_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_sent_items_scored ON sentiment_items(scored_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_sent_items_run ON sentiment_items(run_id);
+
     CREATE TABLE IF NOT EXISTS sentiment_runs (
       run_id INTEGER PRIMARY KEY AUTOINCREMENT,
       started_at INTEGER NOT NULL,
@@ -164,6 +182,12 @@ function S() {
         total_mentions = total_mentions + excluded.total_mentions,
         sum_confidence = sum_confidence + excluded.sum_confidence,
         last_updated_at = excluded.last_updated_at
+    `),
+    insertItem: d.prepare(`
+      INSERT INTO sentiment_items
+        (run_id, news_id, scored_at, source, post_text,
+         tickers_json, sentiment, confidence, themes_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     insertRun: d.prepare(`
       INSERT INTO sentiment_runs (started_at, status) VALUES (?, 'running')
@@ -245,7 +269,7 @@ function buildPrompt(batch) {
   return `Score these ${batch.length} posts:\n\n${lines.join('\n')}`;
 }
 
-function storeBatch(scored, batch) {
+function storeBatch(scored, batch, runId) {
   const s = S();
   const windowStart = currentWindowStart();
   const now = Date.now();
@@ -258,6 +282,27 @@ function storeBatch(scored, batch) {
     const shill = sent === 'shill' ? 1 : 0;
     const fud = sent === 'fud' ? 1 : 0;
     const neutral = sent === 'neutral' ? 1 : 0;
+    // Lookup the source post by idx (claude returns idx matching input order)
+    const sourcePost = (typeof item.idx === 'number' && item.idx >= 0 && item.idx < batch.length)
+      ? batch[item.idx] : null;
+    const postText = sourcePost
+      ? `${sourcePost.title || ''} ${sourcePost.summary || ''}`.replace(/\s+/g, ' ').trim().slice(0, 400)
+      : null;
+    // Persist the raw scored item so the dashboard can show "Claude said X
+    // about this post". This is what makes the worker verifiable.
+    try {
+      s.insertItem.run(
+        runId,
+        sourcePost?.id ?? null,
+        now,
+        sourcePost?.source ?? null,
+        postText,
+        JSON.stringify(item.tickers || []),
+        sent || null,
+        conf,
+        JSON.stringify(item.themes || []),
+      );
+    } catch (err) { /* swallow per-row insert errors */ }
     // Mint mentions
     for (const ticker of (item.tickers || []).slice(0, 5)) {
       if (typeof ticker !== 'string' || ticker.length < 2 || ticker.length > 12) continue;
@@ -310,7 +355,7 @@ async function runCycle() {
           callsThisRun++;
           inputCharsTotal += inputChars;
           outputCharsTotal += outputChars;
-          const { mintHits, themeHits } = storeBatch(parsed, batch);
+          const { mintHits, themeHits } = storeBatch(parsed, batch, runId);
           itemsScored += (parsed?.items?.length || 0);
           console.log(`[sentiment] returned · scored=${parsed?.items?.length || 0} · mint_hits=${mintHits} · theme_hits=${themeHits} · out_chars=${outputChars} · ${durationMs}ms`);
         } catch (err) {
