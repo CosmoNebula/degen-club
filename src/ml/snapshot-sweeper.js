@@ -743,11 +743,17 @@ function takeSnapshot(mint, target, snapshotTs) {
     ? sent.sum_confidence / sent.total_mentions : null;
   const dt = new Date(mint.created_at);
 
-  // EVENT: trigger agent eval when a mint first becomes scoring-eligible (60s age)
-  // and shows interesting tracked-buyer activity. Async fire-and-forget.
-  if (target === 60 && agg.trackedBuyers >= 1) {
+  // A1 (Phase D, 2026-05-13): Universal snapshot eval. Previously this only fired
+  // at the 60s age AND only with tracked buyers present, which capped the bot's
+  // universe at smart-wallet-activated mints (~6% of created mints actually
+  // evaluated). Now: every snapshot at age ≥ 60s fires evaluateMintNow. The
+  // strategies' filters and the 8s evaluateMintNow debounce do the gating; this
+  // just opens the universe. Skip 15s/30s ages — too early to know if sniper
+  // bundle is in/out (per user direction).
+  if (target >= 60) {
+    const reasonSuffix = agg.trackedBuyers >= 1 ? `-tracked-${agg.trackedBuyers}` : '';
     import('./agent-executor.js').then(m => {
-      m.evaluateMintNow(mint.mint_address, `60s-age-tracked-${agg.trackedBuyers}`).catch(() => {});
+      m.evaluateMintNow(mint.mint_address, `snap-${target}s${reasonSuffix}`).catch(() => {});
     }).catch(() => {});
   }
 

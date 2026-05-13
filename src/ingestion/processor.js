@@ -6,6 +6,7 @@ import { onSmartTrade, onCoinVelocity, onMigratorHunter } from '../trading/strat
 import { trackHunterBuy } from '../scoring/migrator-hunter.js';
 import { notifyTradeForMint } from '../trading/paper.js';
 import { evaluateMintNow, isCopyTradeTarget } from '../ml/agent-executor.js';
+import { isMlConvictionMint } from '../ml/ml-conviction-watcher.js';
 import { config } from '../config.js';
 import { checkCashbackFlag } from './helius.js';
 import { trackBuyer, checkVelocityRunnerProfile, markFired } from '../scoring/coin-velocity.js';
@@ -357,6 +358,17 @@ function onTrade(e) {
     // routinely fires 0.5-1 SOL on pump.fun; 3+ SOL is whale territory.
     if (isBuy && solAmount >= 3.0) {
       evaluateMintNow(e.mint, `whale-buy-${solAmount.toFixed(2)}sol`).catch(() => {});
+    }
+
+    // A2 (Phase D, 2026-05-13): ML-conviction trade reactivity.
+    // If this mint has a recent high-confidence ML prediction (refreshed every
+    // 30s by ml-conviction-watcher), every trade event re-fires evaluation —
+    // catches the "trade just landed AND the ML conditions are aligned" moment
+    // that would otherwise be missed between 60-3600s snapshot ticks.
+    // The 8s eval-debounce in evaluateMintNow keeps this from flooding on hot
+    // coins.
+    if (isBuy && isMlConvictionMint(e.mint)) {
+      evaluateMintNow(e.mint, 'ml-conviction-trade').catch(() => {});
     }
 
     // EVENT: mcap crossing migration-approach zone (40-70 SOL window) — about
