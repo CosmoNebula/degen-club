@@ -7,9 +7,9 @@
 *-keypair.json
 
 # Runtime data (let teammates build their own)
-data/
+/data/
 logs/
-data/runtime-limits.json
+/data/runtime-limits.json
 
 # Dependencies
 node_modules/
