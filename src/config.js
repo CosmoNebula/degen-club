@@ -169,7 +169,14 @@ volumeSurge: {
   },
 
   moonbag: {
-    enabled: true,
+    // 2026-05-13: DISABLED. The global auto-convert-on-migration was overriding
+    // every strategy with one hard-coded rule (sell 75% at migration, ride 25%).
+    // For an alive-migrator strategy whose thesis is "this will migrate and run,"
+    // dumping 75% at migration was the opposite of the trade. Each strategy now
+    // owns its full lifecycle via its own tier/trail/SL params in strategy_state.
+    // Existing open positions with is_moonbag=1 continue under checkMoonbag —
+    // only NEW migrations skip the conversion.
+    enabled: false,
     sellPctAtMigration: 0.75,
     hardTargetPct: 5.0,
     trailPct: 0.50,
