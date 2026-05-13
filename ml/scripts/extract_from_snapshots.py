@@ -130,6 +130,13 @@ LABEL_COLS = [
     'drawdown_from_peak_pct',
     'hits_2x_within_1h',
     'time_to_peak_5x_sec',
+    # Long-horizon "hold-to-maturity" labels (added 2026-05-12). Pre-mig labels
+    # above all resolve within 1h — these answer "is this worth holding?".
+    # Resolved 25h+ after snapshot via the label resolver's stale-backfill pass.
+    'alive_at_1h', 'alive_at_4h', 'alive_at_24h',
+    'hits_5x_within_24h', 'hits_10x_within_24h',
+    'hold_1h_pct', 'hold_4h_pct', 'hold_24h_pct',
+    'peak_pct_within_24h', 'max_drawdown_within_24h_pct',
 ]
 
 

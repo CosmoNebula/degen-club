@@ -21,6 +21,10 @@ const CHECK_INTERVAL_MS = 60 * 60 * 1000;  // hourly check
 const TARGETS = [
   'peaked_30', 'peaked_100', 'peaked_300', 'migrated', 'will_die_fast',
   'rug_within_5min', 'hits_2x_within_1h',
+  // Long-horizon "hold-to-maturity" binary targets (added 2026-05-12).
+  // All live on ml_mint_snapshots so they fit the same calibration-query shape.
+  'alive_at_1h', 'alive_at_4h', 'alive_at_24h',
+  'hits_5x_within_24h', 'hits_10x_within_24h',
 ];
 
 let stmts = null;

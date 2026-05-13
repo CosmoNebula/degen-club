@@ -57,6 +57,25 @@ const PEAK_PCT_MAX_CAP = 1000;
 // a stale or zero-amount trade.
 const MIN_SNAPSHOT_PRICE = 1e-9;
 
+// Long-horizon "hold-to-maturity" label constants (added 2026-05-12).
+const HOLD_1H_MS = 1 * 60 * 60 * 1000;
+const HOLD_4H_MS = 4 * 60 * 60 * 1000;
+const HOLD_24H_MS = 24 * 60 * 60 * 1000;
+// "Alive at horizon X" = at least one trade in the 5-minute window ending at
+// snapshot+X. 5min is wide enough to forgive sparse-trading mints but tight
+// enough that mints that genuinely died register as 0.
+const ALIVE_PROBE_WINDOW_MS = 5 * 60 * 1000;
+const HITS_5X_RATIO = 5.0;
+const HITS_10X_RATIO = 10.0;
+// hold_Xh_pct ratios use the same cap as peak_pct_max — dust-price snapshots
+// can produce absurd ratios. 1000 = 100,000% preserves real runners.
+const HOLD_RETURN_CAP = 1000;
+const DRAWDOWN_24H_CAP = 0.99;
+// Backfill cutoff for stale-pass: only re-scan rows older than this. We don't
+// want to scan freshly-resolved rows where every long label is guaranteed
+// still pending (snapshot < 1h old → none of these can be computed yet).
+const STALE_BACKFILL_AGE_MS = 70 * 60 * 1000; // 70 min — bit older than hold_1h window
+
 let stmts = null;
 function S() {
   if (stmts) return stmts;
@@ -69,9 +88,14 @@ function S() {
     findStaleResolved: d.prepare(`SELECT mint_address, snapshot_age_sec, snapshot_ts, last_price_sol
        FROM ml_mint_snapshots
        WHERE labels_resolved_at IS NOT NULL
+         AND snapshot_ts < ?
          AND (will_die_fast IS NULL OR rug_within_5min IS NULL
               OR migrates_within_15min IS NULL OR drawdown_from_peak_pct IS NULL
-              OR hits_2x_within_1h IS NULL OR time_to_peak_5x_sec IS NULL)
+              OR hits_2x_within_1h IS NULL OR time_to_peak_5x_sec IS NULL
+              OR alive_at_1h IS NULL OR alive_at_4h IS NULL OR alive_at_24h IS NULL
+              OR hits_5x_within_24h IS NULL OR hits_10x_within_24h IS NULL
+              OR hold_1h_pct IS NULL OR hold_4h_pct IS NULL OR hold_24h_pct IS NULL
+              OR peak_pct_within_24h IS NULL OR max_drawdown_within_24h_pct IS NULL)
        ORDER BY snapshot_ts ASC LIMIT ?`),
     mintInfo: d.prepare(`SELECT migrated, migrated_at FROM mints WHERE mint_address = ?`),
     // Returns peak price + the timestamp at which peak occurred (regression targets)
@@ -96,11 +120,43 @@ function S() {
     peakAfter: d.prepare(`SELECT MAX(price_sol) AS max_price, timestamp AS peak_ts
        FROM trades WHERE mint_address = ? AND timestamp >= ? AND price_sol > 0
        ORDER BY price_sol DESC LIMIT 1`),
+    // Long-horizon hold queries (added 2026-05-12).
+    // priceAtOrBefore: returns the most recent valid trade price ≤ target_ts.
+    // Used for hold_Xh_pct — we want "what was the price at exactly X hours
+    // after snapshot" and trades aren't sampled at exact moments.
+    priceAtOrBefore: d.prepare(`SELECT price_sol FROM trades
+       WHERE mint_address = ? AND timestamp <= ? AND price_sol > 0
+       ORDER BY timestamp DESC LIMIT 1`),
+    // tradeInWindow: just check if ANY trade exists in [start_ts, end_ts].
+    // Used for alive_at_Xh — mint is alive if it traded in the 5-min window
+    // ending at horizon. LIMIT 1 + index makes this cheap.
+    tradeInWindow: d.prepare(`SELECT 1 FROM trades
+       WHERE mint_address = ? AND timestamp BETWEEN ? AND ? LIMIT 1`),
+    // maxPriceInWindow: max price AND its timestamp, bounded above. Used
+    // for hits_Nx_within_24h, peak_pct_within_24h, and max_drawdown_within_24h_pct.
+    maxPriceInWindow: d.prepare(`SELECT price_sol AS max_price, timestamp AS peak_ts
+       FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ? AND price_sol > 0
+       ORDER BY price_sol DESC LIMIT 1`),
+    // minPriceInWindowRange: min price in [start_ts, end_ts]. Used after we
+    // know the peak ts in the 24h window — we look for the min AFTER the peak,
+    // still bounded by the 24h horizon.
+    minPriceInWindowRange: d.prepare(`SELECT MIN(price_sol) AS min_price
+       FROM trades WHERE mint_address = ? AND timestamp >= ? AND timestamp <= ? AND price_sol > 0`),
     update: d.prepare(`UPDATE ml_mint_snapshots SET
        migrated = ?, peaked_30 = ?, peaked_100 = ?, peaked_300 = ?, peaked_500 = ?,
        peak_pct_max = ?, time_to_peak_sec = ?, will_die_fast = ?,
        rug_within_5min = ?, migrates_within_15min = ?, drawdown_from_peak_pct = ?,
        hits_2x_within_1h = ?, time_to_peak_5x_sec = ?,
+       alive_at_1h = COALESCE(?, alive_at_1h),
+       alive_at_4h = COALESCE(?, alive_at_4h),
+       alive_at_24h = COALESCE(?, alive_at_24h),
+       hits_5x_within_24h = COALESCE(?, hits_5x_within_24h),
+       hits_10x_within_24h = COALESCE(?, hits_10x_within_24h),
+       hold_1h_pct = COALESCE(?, hold_1h_pct),
+       hold_4h_pct = COALESCE(?, hold_4h_pct),
+       hold_24h_pct = COALESCE(?, hold_24h_pct),
+       peak_pct_within_24h = COALESCE(?, peak_pct_within_24h),
+       max_drawdown_within_24h_pct = COALESCE(?, max_drawdown_within_24h_pct),
        labels_resolved_at = ?
        WHERE mint_address = ? AND snapshot_age_sec = ?`),
     updateDieFastOnly: d.prepare(`UPDATE ml_mint_snapshots SET will_die_fast = ?
@@ -185,6 +241,83 @@ function computeTimeToPeak5xSec(mintAddress, snapshotTs, snapshotPrice) {
   return Math.min(deltaSec, TIME_TO_PEAK_CAP_SEC);
 }
 
+// alive_at_Xh: 1 if ANY trade occurred in the 5-min window ending at
+// snapshot_ts + ageMs. Returns null if the window hasn't passed yet OR if the
+// horizon hasn't arrived in wall-clock time. The stale-backfill pass will
+// fill these in later as snapshots age past each horizon.
+function computeAliveAt(mintAddress, snapshotTs, ageMs) {
+  const target = snapshotTs + ageMs;
+  if (Date.now() < target) return null;
+  const row = S().tradeInWindow.get(
+    mintAddress, target - ALIVE_PROBE_WINDOW_MS, target
+  );
+  return row ? 1 : 0;
+}
+
+// hold_Xh_pct: return achieved if you held from snapshot to snapshot+ageMs.
+// (price_at_horizon - snapshot_price) / snapshot_price. NULL when horizon
+// hasn't arrived yet, or when no trade exists at-or-before the horizon (mint
+// died before that point), or when snapshot price is junk.
+function computeHoldPct(mintAddress, snapshotTs, snapshotPrice, ageMs) {
+  if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
+  const target = snapshotTs + ageMs;
+  if (Date.now() < target) return null;
+  // Require the candidate trade to be AFTER the snapshot so we don't read the
+  // snapshot's own price back as the "hold" value when the mint dies right after.
+  const row = S().priceAtOrBefore.get(mintAddress, target);
+  if (!row?.price_sol || row.price_sol <= 0) return null;
+  let pct = (row.price_sol - snapshotPrice) / snapshotPrice;
+  return Math.min(pct, HOLD_RETURN_CAP);
+}
+
+// hits_Nx_within_24h: 1 if max price in (snapshot, snapshot+24h] reached
+// ratio × snapshot_price. NULL until horizon passes or snapshot price is junk.
+function computeHitsRatioWithin24h(mintAddress, snapshotTs, snapshotPrice, ratio) {
+  if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
+  const target = snapshotTs + HOLD_24H_MS;
+  if (Date.now() < target) return null;
+  const row = S().maxPriceInWindow.get(mintAddress, snapshotTs, target);
+  const maxPrice = row?.max_price;
+  if (maxPrice == null || maxPrice <= 0) return 0;
+  return maxPrice >= snapshotPrice * ratio ? 1 : 0;
+}
+
+// peak_pct_within_24h: max return achievable if exited at the peak inside the
+// 24h window. Bounded version of peak_pct_max (which scans forever) — keeps
+// the model from rewarding mints whose peak is, e.g., 3 days post-snapshot.
+function computePeakPctWithin24h(mintAddress, snapshotTs, snapshotPrice) {
+  if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
+  const target = snapshotTs + HOLD_24H_MS;
+  if (Date.now() < target) return null;
+  const row = S().maxPriceInWindow.get(mintAddress, snapshotTs, target);
+  const maxPrice = row?.max_price;
+  if (maxPrice == null || maxPrice <= 0) return 0;
+  let pct = (maxPrice - snapshotPrice) / snapshotPrice;
+  return Math.min(pct, HOLD_RETURN_CAP);
+}
+
+// max_drawdown_within_24h_pct: worst drawdown experienced inside the 24h
+// window, computed from the in-window peak to the min AFTER that peak (still
+// inside the window). Different from drawdown_from_peak_pct which is unbounded.
+// Drives risk-modeling: a mint that 5x'd then bled to 0 has very different
+// hold-PnL than one that 5x'd and held steady — both same peak_pct_within_24h
+// but very different max_drawdown.
+function computeMaxDrawdownWithin24h(mintAddress, snapshotTs, snapshotPrice) {
+  if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
+  const target = snapshotTs + HOLD_24H_MS;
+  if (Date.now() < target) return null;
+  const peakRow = S().maxPriceInWindow.get(mintAddress, snapshotTs, target);
+  if (!peakRow?.max_price || peakRow.max_price <= 0 || !peakRow.peak_ts) return 0;
+  const minRow = S().minPriceInWindowRange.get(
+    mintAddress, peakRow.peak_ts, target
+  );
+  const minPrice = minRow?.min_price;
+  if (minPrice == null || minPrice <= 0) return 0;
+  const dd = (peakRow.max_price - minPrice) / peakRow.max_price;
+  if (dd < 0) return 0;  // shouldn't happen but defensive
+  return Math.min(dd, DRAWDOWN_24H_CAP);
+}
+
 function resolveBatch(rows, label = 'resolve') {
   const s = S();
   const now = Date.now();
@@ -215,6 +348,19 @@ function resolveBatch(rows, label = 'resolve') {
       const drawdown = computeDrawdownFromPeak(r.mint_address, r.snapshot_ts, r.last_price_sol, peakPrice, peakTs);
       const hits2x = computeHits2xWithin1h(r.mint_address, r.snapshot_ts, r.last_price_sol);
       const ttp5x = computeTimeToPeak5xSec(r.mint_address, r.snapshot_ts, r.last_price_sol);
+      // Long-horizon hold-to-maturity labels. Each returns NULL if the
+      // horizon hasn't arrived yet — UPDATE uses COALESCE so prior values
+      // are preserved on partial backfill.
+      const alive1h = computeAliveAt(r.mint_address, r.snapshot_ts, HOLD_1H_MS);
+      const alive4h = computeAliveAt(r.mint_address, r.snapshot_ts, HOLD_4H_MS);
+      const alive24h = computeAliveAt(r.mint_address, r.snapshot_ts, HOLD_24H_MS);
+      const hits5x24h = computeHitsRatioWithin24h(r.mint_address, r.snapshot_ts, r.last_price_sol, HITS_5X_RATIO);
+      const hits10x24h = computeHitsRatioWithin24h(r.mint_address, r.snapshot_ts, r.last_price_sol, HITS_10X_RATIO);
+      const hold1h = computeHoldPct(r.mint_address, r.snapshot_ts, r.last_price_sol, HOLD_1H_MS);
+      const hold4h = computeHoldPct(r.mint_address, r.snapshot_ts, r.last_price_sol, HOLD_4H_MS);
+      const hold24h = computeHoldPct(r.mint_address, r.snapshot_ts, r.last_price_sol, HOLD_24H_MS);
+      const peakPct24h = computePeakPctWithin24h(r.mint_address, r.snapshot_ts, r.last_price_sol);
+      const maxDd24h = computeMaxDrawdownWithin24h(r.mint_address, r.snapshot_ts, r.last_price_sol);
       s.update.run(
         migrated,
         peakPct >= 0.30 ? 1 : 0,
@@ -229,6 +375,10 @@ function resolveBatch(rows, label = 'resolve') {
         drawdown,
         hits2x,
         ttp5x,
+        alive1h, alive4h, alive24h,
+        hits5x24h, hits10x24h,
+        hold1h, hold4h, hold24h,
+        peakPct24h, maxDd24h,
         now,
         r.mint_address,
         r.snapshot_age_sec,
@@ -250,8 +400,11 @@ function resolve() {
   // First pass: resolve fresh snapshots
   const fresh = s.findUnresolved.all(cutoff, BATCH_LIMIT);
   if (fresh.length > 0) resolveBatch(fresh, 'fresh');
-  // Second pass: backfill new label columns on previously-resolved rows
-  const stale = s.findStaleResolved.all(BATCH_LIMIT);
+  // Second pass: backfill new label columns on previously-resolved rows.
+  // Filter to snapshots at least STALE_BACKFILL_AGE_MS old — no point scanning
+  // rows where every long label is guaranteed to still return NULL.
+  const staleCutoff = now - STALE_BACKFILL_AGE_MS;
+  const stale = s.findStaleResolved.all(staleCutoff, BATCH_LIMIT);
   if (stale.length > 0) resolveBatch(stale, 'backfill');
 }
 

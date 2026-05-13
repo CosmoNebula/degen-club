@@ -1390,7 +1390,11 @@ export function startServer(getIngestionStatus) {
   // (are the absolute probabilities honest).
   app.get('/api/ml/lift-profile', async (req, res) => {
     try {
-      const TARGETS = ['peaked_30', 'peaked_100', 'peaked_300', 'migrated', 'will_die_fast'];
+      const TARGETS = [
+        'peaked_30', 'peaked_100', 'peaked_300', 'migrated', 'will_die_fast',
+        // Long-horizon hold-to-maturity binary targets (2026-05-12)
+        'alive_at_4h', 'alive_at_24h', 'hits_5x_within_24h', 'hits_10x_within_24h',
+      ];
       const out = {};
       for (const target of TARGETS) {
         const rows = db().prepare(`

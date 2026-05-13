@@ -587,6 +587,26 @@ function runMigrations(d) {
   // Trench wisdom: these hit harder than cold-start launches.
   ensureCol(d, 'ml_mint_snapshots', 'seconds_since_prev_creator_death', `REAL`);
 
+  // Long-horizon "hold-to-maturity" labels (added 2026-05-12). The pre-mig
+  // labels above all resolve within 1h — peaked_30, hits_2x_within_1h,
+  // rug_within_5min, etc. answer "did this pump fast?". These new targets
+  // answer "is this worth holding?": 1h/4h/24h hold returns, liveness flags,
+  // bounded-horizon multiples, and bounded-horizon max-drawdown. Models trained
+  // on these let the agent propose buy-and-hold strategies, not just flips.
+  // Resolved later than other labels — the 24h-bound ones need 25h of trade
+  // history. The label resolver returns NULL until the window is ready, and
+  // the stale-backfill pass fills them in as snapshots age past each horizon.
+  ensureCol(d, 'ml_mint_snapshots', 'alive_at_1h', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'alive_at_4h', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'alive_at_24h', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'hits_5x_within_24h', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'hits_10x_within_24h', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'hold_1h_pct', `REAL`);
+  ensureCol(d, 'ml_mint_snapshots', 'hold_4h_pct', `REAL`);
+  ensureCol(d, 'ml_mint_snapshots', 'hold_24h_pct', `REAL`);
+  ensureCol(d, 'ml_mint_snapshots', 'peak_pct_within_24h', `REAL`);
+  ensureCol(d, 'ml_mint_snapshots', 'max_drawdown_within_24h_pct', `REAL`);
+
   // Per-mint Telegram cache so the snapshot sweeper doesn't re-fetch on
   // every snapshot age. Worker fetches once per mint with a long TTL; the
   // snapshot just reads the cached value.

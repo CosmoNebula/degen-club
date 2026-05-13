@@ -49,6 +49,25 @@ TARGETS = [
     # WHEN to tighten trailing stop on a running position. Existing
     # time_to_peak_sec is from snapshot — different semantics, different use.
     {'name': 'time_to_peak_5x_sec',    'out': 'models/time_to_peak_5x_sec_v1.pkl',    'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
+    # ---------- LONG-HORIZON "HOLD-TO-MATURITY" (added 2026-05-12) ----------
+    # The labels above all answer "did this pump fast?" — these answer "is this
+    # worth holding?". Models trained on these let the agent propose buy-and-
+    # hold strategies, not just flip strategies. Each needs 25h+ of trade
+    # history to compute; resolver backfills as snapshots age past 24h.
+    {'name': 'alive_at_1h',            'out': 'models/alive_at_1h_v1.pkl',            'min_pos': 50,  'kind': 'binary',     'mode': 'pre'},
+    {'name': 'alive_at_4h',            'out': 'models/alive_at_4h_v1.pkl',            'min_pos': 50,  'kind': 'binary',     'mode': 'pre'},
+    {'name': 'alive_at_24h',           'out': 'models/alive_at_24h_v1.pkl',           'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
+    {'name': 'hits_5x_within_24h',     'out': 'models/hits_5x_within_24h_v1.pkl',     'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
+    {'name': 'hits_10x_within_24h',    'out': 'models/hits_10x_within_24h_v1.pkl',    'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
+    # The unlock: literal "if held N hours, what was the PnL?" regressions.
+    {'name': 'hold_1h_pct',            'out': 'models/hold_1h_pct_v1.pkl',            'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
+    {'name': 'hold_4h_pct',            'out': 'models/hold_4h_pct_v1.pkl',            'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
+    {'name': 'hold_24h_pct',           'out': 'models/hold_24h_pct_v1.pkl',           'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
+    # Bounded peak (vs peak_pct_max which is unbounded — peak 3 days later
+    # isn't actionable). Bounded max-drawdown for risk modeling: same peak
+    # can have very different hold-PnL depending on drawdown along the way.
+    {'name': 'peak_pct_within_24h',           'out': 'models/peak_pct_within_24h_v1.pkl',           'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
+    {'name': 'max_drawdown_within_24h_pct',   'out': 'models/max_drawdown_within_24h_pct_v1.pkl',   'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
     # ---------- POST-MIGRATION (csv=training_postmig.csv, features-mode=post) ----------
     {'name': 'post_mig_hits_2x',  'out': 'models/post_mig_hits_2x_v1.pkl',  'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
     {'name': 'post_mig_rugs_1h',  'out': 'models/post_mig_rugs_1h_v1.pkl',  'min_pos': 30,  'kind': 'binary',     'mode': 'post'},
