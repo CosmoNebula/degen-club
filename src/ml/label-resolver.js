@@ -71,14 +71,15 @@ const HITS_10X_RATIO = 10.0;
 // can produce absurd ratios. 1000 = 100,000% preserves real runners.
 const HOLD_RETURN_CAP = 1000;
 const DRAWDOWN_24H_CAP = 0.99;
-// Stale-backfill window. Snapshots in this age range have their resolution-
-// window trades still inside the trades-table retention (currently 48h, see
-// intelligence-condensate.js) AND are old enough for at least one long label
-// to compute (past hold_1h). Outside this window the compute always returns
-// NULL forever, so we'd loop endlessly. Tune both ends if trade retention
-// shifts. Buffer to stay safely inside boundaries.
+// Stale-backfill cutoff. Rows must be at least past the shortest long-label
+// horizon (hold_1h) to be worth scanning. The "already tried" guard below in
+// the SQL filter handles the upper bound dynamically: if a row was last
+// resolved AFTER its 24h window passed, retrying won't help (trades for that
+// window have likely been pruned), so we skip it. This means we don't have
+// to hard-code a "max age" tied to trade retention.
 const STALE_BACKFILL_MIN_AGE_MS = 70 * 60 * 1000;       // past hold_1h horizon
-const STALE_BACKFILL_MAX_AGE_MS = 46 * 60 * 60 * 1000;  // 46h — stays inside 48h trade retention
+// 25h × 3600 × 1000 = 90000000 — used as a literal in the SQL filter below.
+const POST_WINDOW_MS = 25 * 60 * 60 * 1000;
 
 let stmts = null;
 function S() {
@@ -89,17 +90,21 @@ function S() {
        FROM ml_mint_snapshots
        WHERE labels_resolved_at IS NULL AND snapshot_ts < ?
        ORDER BY snapshot_ts ASC LIMIT ?`),
-    // Stale-backfill query — finds previously-resolved rows missing any label
-    // column. Bound on snapshot_ts: the upper bound is "old enough that long
-    // labels can attempt resolution" (now - 70min, past hold_1h horizon). The
-    // lower bound is "trades for this snapshot's resolution window are still
-    // in retention" — beyond it, hold_X_pct compute returns NULL forever and
-    // we'd loop endlessly on the same dead rows. Configured for 48h trade
-    // retention with a small buffer to avoid the boundary.
+    // Stale-backfill query — finds previously-resolved rows missing any label.
+    // Two filters protect against the "infinite loop on hopeless rows" bug:
+    //   1. snapshot_ts < ?: row must be past the hold_1h horizon (otherwise
+    //      compute always returns NULL and we waste cycles).
+    //   2. labels_resolved_at < snapshot_ts + 25h: row was last resolved
+    //      BEFORE its 24h window finished playing out. If we've already
+    //      resolved it AFTER the 24h mark and the labels are STILL NULL,
+    //      that means trade data was pruned — retrying won't fix it.
+    //      Once we touch the row and set labels_resolved_at = now (where
+    //      now > snapshot_ts + 25h), this filter excludes it next time.
     findStaleResolved: d.prepare(`SELECT mint_address, snapshot_age_sec, snapshot_ts, last_price_sol
        FROM ml_mint_snapshots
        WHERE labels_resolved_at IS NOT NULL
-         AND snapshot_ts BETWEEN ? AND ?
+         AND snapshot_ts < ?
+         AND labels_resolved_at < snapshot_ts + 90000000  /* 25h in ms */
          AND (will_die_fast IS NULL OR rug_within_5min IS NULL
               OR migrates_within_15min IS NULL OR drawdown_from_peak_pct IS NULL
               OR hits_2x_within_1h IS NULL OR time_to_peak_5x_sec IS NULL
@@ -107,7 +112,7 @@ function S() {
               OR hits_5x_within_24h IS NULL OR hits_10x_within_24h IS NULL
               OR hold_1h_pct IS NULL OR hold_4h_pct IS NULL OR hold_24h_pct IS NULL
               OR peak_pct_within_24h IS NULL OR max_drawdown_within_24h_pct IS NULL)
-       ORDER BY snapshot_ts ASC LIMIT ?`),
+       ORDER BY snapshot_ts DESC LIMIT ?`),
     mintInfo: d.prepare(`SELECT migrated, migrated_at FROM mints WHERE mint_address = ?`),
     // Returns peak price + the timestamp at which peak occurred (regression targets)
     peakRow: d.prepare(`SELECT price_sol AS max_price, timestamp AS peak_ts
@@ -412,11 +417,14 @@ function resolve() {
   const fresh = s.findUnresolved.all(cutoff, BATCH_LIMIT);
   if (fresh.length > 0) resolveBatch(fresh, 'fresh');
   // Second pass: backfill new label columns on previously-resolved rows.
-  // Filter to the sweet spot: old enough for at least hold_1h to compute,
-  // but young enough that the resolution-window trades aren't pruned.
-  const staleFloor = now - STALE_BACKFILL_MAX_AGE_MS;  // oldest still-resolvable
-  const staleCeil = now - STALE_BACKFILL_MIN_AGE_MS;   // youngest worth scanning
-  const stale = s.findStaleResolved.all(staleFloor, staleCeil, BATCH_LIMIT);
+  // Filter is past hold_1h horizon. The labels_resolved_at < snapshot_ts+25h
+  // guard inside the SQL prevents infinite re-scan of rows where trades
+  // for the resolution window have been pruned (after one update they no
+  // longer match the filter). Processed newest-first so the most-useful
+  // rows fill in first; stale-but-doomed older rows get touched once and
+  // dropped out of subsequent queries.
+  const staleCeil = now - STALE_BACKFILL_MIN_AGE_MS;
+  const stale = s.findStaleResolved.all(staleCeil, BATCH_LIMIT);
   if (stale.length > 0) resolveBatch(stale, 'backfill');
 }
 
