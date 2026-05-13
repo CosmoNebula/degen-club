@@ -993,7 +993,12 @@ function checkPosition(p) {
   const peakFloorExit = armedLevel ? armedLevel.exit : 0;
 
   if (m.rugged) exitReason = 'RUGGED';
-  else if (m.migrated) exitReason = 'MIGRATED';
+  // 2026-05-13: removed `else if (m.migrated)` auto-exit. With config.moonbag
+  // disabled, this line was firing on EVERY migrated position — CUPPY entered
+  // and exited within 1 second of migration. The strategy's tier/trail/SL
+  // should own post-migration behavior. AMM pollers (dexscreener.js, etc.)
+  // keep price ticking; smart-SL + spike-guard already defend against
+  // migration-moment phantom prices.
   else if ((p.tokens_remaining || 0) <= 0) exitReason = ((strat.tier2_sell_pct || 0) > 0) ? 'TIERED_FULL' : 'TARGET_HIT';
   else if (t3Armed && peakPctRaw <= tier3TrailFloor) exitReason = 'TP_TRAIL';
   else if (postT1TrailFloor !== null && peakPctRaw <= postT1TrailFloor) exitReason = 'POST_T1_TRAIL';
