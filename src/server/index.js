@@ -2287,9 +2287,65 @@ export function startServer(getIngestionStatus) {
         WHERE scored_at > ?
         ORDER BY scored_at DESC LIMIT 50
       `).all(dayAgo);
+      // System-wide Claude usage. Each row is a logical Claude caller
+      // (subsystem or category) with its last-24h call count and most-recent
+      // timestamp. The sentiment-scorer logs to its own sentiment_runs table;
+      // every other agent module logs into ml_agent_log under a category.
+      const agentLogStats = d.prepare(`
+        SELECT category, COUNT(*) AS n, MAX(timestamp) AS most_recent
+        FROM ml_agent_log
+        WHERE timestamp > ?
+          AND category IN ('consult','mint-intel','post-mortem','market-regime',
+                           'daily-report','calibration-review','news-synth',
+                           'concentration-check')
+        GROUP BY category
+      `).all(dayAgo);
+      const agentMap = Object.fromEntries(agentLogStats.map(r => [r.category, r]));
+      const sentTotals = totals;
+      const claudeCallers = [
+        { module: 'sentiment-scorer', label: 'Sentiment scoring',
+          cadence: 'every 15min · cap 300/day',
+          calls_24h: sentTotals.calls_24h || 0,
+          last_at: (runs[0]?.started_at) || null },
+        { module: 'agent.consult', label: 'Strategy consult (propose/retire/keep)',
+          cadence: 'every 30min · cap 55/day',
+          calls_24h: agentMap['consult']?.n || 0,
+          last_at: agentMap['consult']?.most_recent || null },
+        { module: 'agent.mint-intel', label: 'Mint intel — deep dive per coin',
+          cadence: 'hourly batch',
+          calls_24h: agentMap['mint-intel']?.n || 0,
+          last_at: agentMap['mint-intel']?.most_recent || null },
+        { module: 'agent.post-mortem', label: 'Post-mortem — analyze losing trades',
+          cadence: 'every 30min if positions ready',
+          calls_24h: agentMap['post-mortem']?.n || 0,
+          last_at: agentMap['post-mortem']?.most_recent || null },
+        { module: 'agent.market-regime', label: 'Market regime detection',
+          cadence: 'noon + midnight ET',
+          calls_24h: agentMap['market-regime']?.n || 0,
+          last_at: agentMap['market-regime']?.most_recent || null },
+        { module: 'agent.news-synth', label: 'News meta-synthesis',
+          cadence: 'every ~4h',
+          calls_24h: agentMap['news-synth']?.n || 0,
+          last_at: agentMap['news-synth']?.most_recent || null },
+        { module: 'agent.concentration-check', label: 'Concentration / exit-risk audit',
+          cadence: 'every 6h if threshold met',
+          calls_24h: agentMap['concentration-check']?.n || 0,
+          last_at: agentMap['concentration-check']?.most_recent || null },
+        { module: 'agent.daily-report', label: 'Daily report',
+          cadence: 'once per 24h',
+          calls_24h: agentMap['daily-report']?.n || 0,
+          last_at: agentMap['daily-report']?.most_recent || null },
+        { module: 'agent.calibration-review', label: 'Model calibration review',
+          cadence: 'once per 24h',
+          calls_24h: agentMap['calibration-review']?.n || 0,
+          last_at: agentMap['calibration-review']?.most_recent || null },
+      ];
+      const claudeTotal24h = claudeCallers.reduce((s, c) => s + (c.calls_24h || 0), 0);
       res.json({
         now, current_window: currentWindow,
         totals, runs, mints, narratives, items,
+        claude_callers: claudeCallers,
+        claude_total_24h: claudeTotal24h,
       });
     } catch (err) {
       console.error('[api] /api/sentiment/overview err:', err.message);

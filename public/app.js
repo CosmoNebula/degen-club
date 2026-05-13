@@ -1530,6 +1530,30 @@ function renderSentimentPanels(data) {
       <th style="padding:6px 10px;text-align:right;font-size:10px;color:var(--muted);text-transform:uppercase;">Out</th>
       <th style="padding:6px 10px;text-align:right;font-size:10px;color:var(--muted);text-transform:uppercase;">Time</th>
     </tr></thead><tbody>${tableRows}</tbody></table>` : '<div style="padding:14px;color:var(--muted);font-style:italic;font-size:12px;">no cycles yet — first one fires 15 min after bot start</div>';
+
+  // System-wide Claude usage table — every module that calls Claude, with
+  // last-24h count + most-recent call time. Lets you see at a glance whether
+  // sentiment is dominating budget or if some other module is firing more
+  // than expected.
+  const callers = data.claude_callers || [];
+  const callerRows = callers.map(c => {
+    const lastAgo = c.last_at ? `${ago(c.last_at)} ago` : '—';
+    const noCalls = (c.calls_24h || 0) === 0;
+    return `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:6px 10px;font-size:12px;"><b style="color:var(--cyan);">${c.module}</b><br><span style="color:var(--muted);font-size:10px;">${c.label}</span></td>
+      <td style="padding:6px 10px;font-size:11px;color:var(--muted);">${c.cadence}</td>
+      <td style="padding:6px 10px;font-size:14px;font-weight:bold;text-align:right;color:${noCalls ? 'var(--muted)' : 'var(--cyan)'};">${c.calls_24h || 0}</td>
+      <td style="padding:6px 10px;font-size:11px;color:var(--muted);text-align:right;">${lastAgo}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('sent-claude-callers').innerHTML = `<table style="width:100%;border-collapse:collapse;">
+    <thead><tr style="border-bottom:1px solid var(--border);">
+      <th style="padding:6px 10px;text-align:left;font-size:10px;color:var(--muted);text-transform:uppercase;">Module</th>
+      <th style="padding:6px 10px;text-align:left;font-size:10px;color:var(--muted);text-transform:uppercase;">Cadence</th>
+      <th style="padding:6px 10px;text-align:right;font-size:10px;color:var(--muted);text-transform:uppercase;">Calls 24h</th>
+      <th style="padding:6px 10px;text-align:right;font-size:10px;color:var(--muted);text-transform:uppercase;">Last Call</th>
+    </tr></thead><tbody>${callerRows}</tbody></table>`;
+  document.getElementById('sent-claude-total').textContent = data.claude_total_24h || 0;
 }
 
 function renderSystemPanels(data) {
