@@ -2228,6 +2228,66 @@ export function startServer(getIngestionStatus) {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
+  // Phase C sentiment dashboard endpoints — read-only views over data the
+  // sentiment-scorer worker writes every 15 min. /api/sentiment/overview is
+  // the single round-trip the dashboard uses; the others are convenience.
+  app.get('/api/sentiment/overview', (req, res) => {
+    try {
+      const d = db();
+      const now = Date.now();
+      const dayAgo = now - 24 * 60 * 60 * 1000;
+      const FOUR_HOURS = 4 * 60 * 60 * 1000;
+      const currentWindow = Math.floor(now / FOUR_HOURS) * FOUR_HOURS;
+      // Run history: last 24h
+      const runs = d.prepare(`
+        SELECT run_id, started_at, finished_at, items_in, items_scored,
+               claude_calls, input_chars, output_chars, duration_ms, status, error
+        FROM sentiment_runs
+        WHERE started_at > ?
+        ORDER BY started_at DESC LIMIT 50
+      `).all(dayAgo);
+      // Usage totals
+      const totals = d.prepare(`
+        SELECT
+          COALESCE(SUM(claude_calls), 0) AS calls_24h,
+          COALESCE(SUM(items_scored), 0) AS items_scored_24h,
+          COALESCE(SUM(input_chars), 0) AS in_chars_24h,
+          COALESCE(SUM(output_chars), 0) AS out_chars_24h
+        FROM sentiment_runs
+        WHERE started_at > ?
+      `).get(dayAgo);
+      // Top mints in current 4h window (with mint metadata)
+      const mints = d.prepare(`
+        SELECT s.mint_address, m.symbol, m.name,
+               s.bull_mentions, s.bear_mentions, s.shill_mentions,
+               s.fud_mentions, s.neutral_mentions, s.total_mentions,
+               s.sum_confidence, s.last_updated_at,
+               m.current_market_cap_sol, m.peak_market_cap_sol
+        FROM mint_sentiment s
+        LEFT JOIN mints m ON m.mint_address = s.mint_address
+        WHERE s.window_start = ?
+        ORDER BY s.total_mentions DESC LIMIT 50
+      `).all(currentWindow);
+      // Top narratives in current 4h window
+      const narratives = d.prepare(`
+        SELECT theme,
+               bull_mentions, bear_mentions, shill_mentions,
+               fud_mentions, neutral_mentions, total_mentions,
+               sum_confidence, last_updated_at
+        FROM narrative_sentiment
+        WHERE window_start = ?
+        ORDER BY total_mentions DESC LIMIT 30
+      `).all(currentWindow);
+      res.json({
+        now, current_window: currentWindow,
+        totals, runs, mints, narratives,
+      });
+    } catch (err) {
+      console.error('[api] /api/sentiment/overview err:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/api/system', (req, res) => {
     try {
       const d = db();

@@ -190,7 +190,7 @@ let labFilter = 'all';
 // trigger can show as active when a sub-tab is selected).
 const TAB_GROUP = {
   mints: 'research', devs: 'research', traders: 'research', rings: 'research', lab: 'research',
-  system: 'system', ticker: 'system', builder: 'system',
+  system: 'system', ticker: 'system', sentiment: 'system', builder: 'system',
 };
 
 function setActiveTab(name) {
@@ -1447,6 +1447,70 @@ function renderBoostStatus(data) {
   `;
 }
 
+function renderSentimentPanels(data) {
+  if (!data) return;
+  const t = data.totals || {};
+  const fmt = (n) => Number(n || 0).toLocaleString();
+  const fmtKb = (n) => (Number(n || 0) / 1000).toFixed(1) + 'k';
+  document.getElementById('sent-calls-24h').textContent = fmt(t.calls_24h);
+  document.getElementById('sent-items-24h').textContent = fmt(t.items_scored_24h);
+  document.getElementById('sent-in-24h').textContent = fmtKb(t.in_chars_24h);
+  document.getElementById('sent-out-24h').textContent = fmtKb(t.out_chars_24h);
+  const ago = (ts) => { if (!ts) return '—'; const s = Math.floor((Date.now() - ts) / 1000); return s < 60 ? s+'s' : s < 3600 ? Math.floor(s/60)+'m' : Math.floor(s/3600)+'h'; };
+
+  const sentDot = (sent) => {
+    const colors = { bullish: '#22c55e', bearish: '#ef4444', shill: '#f59e0b', fud: '#a855f7', neutral: '#6b7280' };
+    return colors[sent] || '#6b7280';
+  };
+
+  const mints = data.mints || [];
+  document.getElementById('sent-mints').innerHTML = mints.length ? mints.map(m => {
+    const avgConf = m.total_mentions > 0 ? (m.sum_confidence / m.total_mentions) : 0;
+    const bar = (bull, bear, total) => {
+      const bullPct = total > 0 ? (bull / total) * 100 : 0;
+      const bearPct = total > 0 ? (bear / total) * 100 : 0;
+      return `<div style="display:inline-flex;gap:2px;align-items:center;font-size:11px;"><span style="color:#22c55e;">▲${bull}</span><span style="color:#ef4444;">▼${bear}</span><span style="color:#f59e0b;">⚠${m.shill_mentions||0}</span></div>`;
+    };
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px;">
+      <div style="flex:1;min-width:0;"><b style="color:var(--cyan);">${m.symbol || '—'}</b> <span style="color:var(--muted);font-size:10px;">${(m.mint_address || '').slice(0,8)}…</span><br><span style="color:var(--muted);font-size:10px;">${(m.name || '').slice(0,30)}</span></div>
+      <div style="text-align:right;"><div>${bar(m.bull_mentions, m.bear_mentions, m.total_mentions)}</div><div style="color:var(--muted);font-size:10px;">${m.total_mentions} mentions · conf ${(avgConf*100).toFixed(0)}%</div></div>
+    </div>`;
+  }).join('') : '<div style="padding:14px;color:var(--muted);font-style:italic;font-size:12px;">no mint mentions in current 4h window yet</div>';
+
+  const nars = data.narratives || [];
+  document.getElementById('sent-narratives').innerHTML = nars.length ? nars.map(n => {
+    const avgConf = n.total_mentions > 0 ? (n.sum_confidence / n.total_mentions) : 0;
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px;">
+      <div><b style="color:var(--cyan);">${n.theme}</b></div>
+      <div style="text-align:right;"><div style="font-size:11px;"><span style="color:#22c55e;">▲${n.bull_mentions}</span> <span style="color:#ef4444;">▼${n.bear_mentions}</span> <span style="color:#f59e0b;">⚠${n.shill_mentions||0}</span></div><div style="color:var(--muted);font-size:10px;">${n.total_mentions} · conf ${(avgConf*100).toFixed(0)}%</div></div>
+    </div>`;
+  }).join('') : '<div style="padding:14px;color:var(--muted);font-style:italic;font-size:12px;">no narratives in current 4h window yet</div>';
+
+  const runs = data.runs || [];
+  const tableRows = runs.map(r => {
+    const statusColor = r.status === 'ok' ? '#22c55e' : r.status === 'skipped' ? '#6b7280' : r.status === 'cap-hit' ? '#f59e0b' : '#ef4444';
+    return `<tr>
+      <td style="padding:4px 10px;font-size:11px;color:var(--muted);">${ago(r.started_at)} ago</td>
+      <td style="padding:4px 10px;font-size:12px;color:${statusColor};font-weight:bold;">${r.status}</td>
+      <td style="padding:4px 10px;font-size:12px;text-align:right;">${r.claude_calls || 0}</td>
+      <td style="padding:4px 10px;font-size:12px;text-align:right;">${r.items_in || 0} → ${r.items_scored || 0}</td>
+      <td style="padding:4px 10px;font-size:12px;text-align:right;color:var(--muted);">${fmtKb(r.input_chars)} in</td>
+      <td style="padding:4px 10px;font-size:12px;text-align:right;color:var(--muted);">${fmtKb(r.output_chars)} out</td>
+      <td style="padding:4px 10px;font-size:12px;text-align:right;color:var(--muted);">${r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + 's' : '—'}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('sent-runs').innerHTML = runs.length ? `<table style="width:100%;border-collapse:collapse;">
+    <thead><tr style="border-bottom:1px solid var(--border);">
+      <th style="padding:6px 10px;text-align:left;font-size:10px;color:var(--muted);text-transform:uppercase;">When</th>
+      <th style="padding:6px 10px;text-align:left;font-size:10px;color:var(--muted);text-transform:uppercase;">Status</th>
+      <th style="padding:6px 10px;text-align:right;font-size:10px;color:var(--muted);text-transform:uppercase;">Calls</th>
+      <th style="padding:6px 10px;text-align:right;font-size:10px;color:var(--muted);text-transform:uppercase;">Items</th>
+      <th style="padding:6px 10px;text-align:right;font-size:10px;color:var(--muted);text-transform:uppercase;">In</th>
+      <th style="padding:6px 10px;text-align:right;font-size:10px;color:var(--muted);text-transform:uppercase;">Out</th>
+      <th style="padding:6px 10px;text-align:right;font-size:10px;color:var(--muted);text-transform:uppercase;">Time</th>
+    </tr></thead><tbody>${tableRows}</tbody></table>` : '<div style="padding:14px;color:var(--muted);font-style:italic;font-size:12px;">no cycles yet — first one fires 15 min after bot start</div>';
+}
+
 function renderSystemPanels(data) {
   if (!data) return;
   const k = data.kpis || {};
@@ -2341,6 +2405,9 @@ async function tick() {
     } else if (currentView === 'system') {
       const data = await fetchJson(`/api/system?window=${systemWindow}`);
       renderSystemPanels(data);
+    } else if (currentView === 'sentiment') {
+      const data = await fetchJson('/api/sentiment/overview');
+      renderSentimentPanels(data);
     } else if (currentView === 'lab') {
       const [data, leaderboard] = await Promise.all([
         fetchJson(`/api/coins/lifecycle?window=${labWindow}&filter=${labFilter}`),

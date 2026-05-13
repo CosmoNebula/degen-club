@@ -234,6 +234,7 @@
       <div class="tab-dropdown" data-dropdown="system" hidden>
         <button class="tab tab-sub" data-tab="system">📈 <span>HEALTH &amp; STATS</span></button>
         <button class="tab tab-sub" data-tab="ticker">⚡ <span>TICKER</span></button>
+        <button class="tab tab-sub" data-tab="sentiment">🧠 <span>SENTIMENT</span></button>
         <button class="tab tab-sub" data-tab="builder">🛠 <span>BUILD</span></button>
       </div>
     </div>
@@ -891,6 +892,28 @@
           <tbody id="wallet-trades-table"><tr><td colspan="8" class="empty">No trades.</td></tr></tbody>
         </table>
       </div>
+    </section>
+
+    <section class="tab-pane" data-pane="sentiment">
+      <div class="pane-header"><h1>🧠 SENTIMENT</h1><div style="color:var(--muted);font-size:12px;">Claude sentiment scoring · 15-min cycles · current 4h window</div></div>
+      <div id="sent-usage" style="display:flex;gap:24px;margin:0 0 16px;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:#0d0d1a;">
+        <div style="flex:1;"><div style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1px;">Claude calls 24h</div><div id="sent-calls-24h" style="font-size:18px;font-weight:bold;margin-top:2px;">—</div></div>
+        <div style="flex:1;"><div style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1px;">Items scored 24h</div><div id="sent-items-24h" style="font-size:18px;font-weight:bold;margin-top:2px;">—</div></div>
+        <div style="flex:1;"><div style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1px;">Chars in 24h</div><div id="sent-in-24h" style="font-size:18px;font-weight:bold;margin-top:2px;">—</div></div>
+        <div style="flex:1;"><div style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1px;">Chars out 24h</div><div id="sent-out-24h" style="font-size:18px;font-weight:bold;margin-top:2px;">—</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+        <div>
+          <h2 style="font-size:11px;color:var(--muted);margin:0 0 6px;letter-spacing:2px;">TOP MINTS (CURRENT 4H)</h2>
+          <div id="sent-mints" style="border:1px solid var(--border);border-radius:6px;background:#0d0d1a;min-height:200px;"></div>
+        </div>
+        <div>
+          <h2 style="font-size:11px;color:var(--muted);margin:0 0 6px;letter-spacing:2px;">TOP NARRATIVES (CURRENT 4H)</h2>
+          <div id="sent-narratives" style="border:1px solid var(--border);border-radius:6px;background:#0d0d1a;min-height:200px;"></div>
+        </div>
+      </div>
+      <h2 style="font-size:11px;color:var(--muted);margin:0 0 6px;letter-spacing:2px;">RECENT CLAUDE CALLS (LAST 24H)</h2>
+      <div id="sent-runs" style="border:1px solid var(--border);border-radius:6px;background:#0d0d1a;"></div>
     </section>
 
     <section class="tab-pane" data-pane="ticker">
