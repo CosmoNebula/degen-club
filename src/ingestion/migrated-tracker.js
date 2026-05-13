@@ -37,6 +37,17 @@ const REFRESH_INTERVAL_MS = 5 * 60 * 1000;       // re-poll WARM mints (no open 
 const HOT_TICK_INTERVAL_MS = 10 * 1000;          // every 10s
 const HOT_BATCH_SIZE = 20;                       // typically <10 open at a time, 20 = safety margin
 
+// 2026-05-13: FRESH path — mints that migrated within the last FRESH_WINDOW
+// get aggressive polling regardless of whether we hold them. This is the
+// fragile zone where DexScreener is just starting to index the pump-amm
+// pool, helius-tx is sporadic (only fires on tracked-wallet trades), and
+// price visibility is poor. Bridges the data gap without subscribing
+// pump-amm WSS for every migrated coin (which would be expensive).
+const FRESH_WINDOW_MINUTES = 30;
+const FRESH_REFRESH_INTERVAL_MS = 30 * 1000;     // re-poll fresh mints every 30s
+const FRESH_TICK_INTERVAL_MS = 30 * 1000;
+const FRESH_BATCH_SIZE = 30;
+
 let stmts = null;
 function S() {
   if (stmts) return stmts;
@@ -46,6 +57,18 @@ function S() {
       SELECT mint_address FROM mints
       WHERE migrated = 1
         AND migrated_at > strftime('%s','now')*1000 - ? * 3600000
+        AND (last_amm_refresh_at IS NULL OR last_amm_refresh_at < strftime('%s','now')*1000 - ?)
+      ORDER BY COALESCE(last_amm_refresh_at, 0) ASC
+      LIMIT ?
+    `),
+    // FRESH candidates: migrated <FRESH_WINDOW_MINUTES ago, refreshed >30s ago.
+    // Tight cadence captures the post-mig price action while DexScreener is
+    // still catching up indexing the pump-amm pool.
+    candidatesFresh: d.prepare(`
+      SELECT mint_address FROM mints
+      WHERE migrated = 1
+        AND rugged = 0
+        AND migrated_at > strftime('%s','now')*1000 - ? * 60 * 1000
         AND (last_amm_refresh_at IS NULL OR last_amm_refresh_at < strftime('%s','now')*1000 - ?)
       ORDER BY COALESCE(last_amm_refresh_at, 0) ASC
       LIMIT ?
@@ -94,7 +117,9 @@ async function fetchPool(mintAddress, preferredPoolAddress = null) {
     if (!r.ok) return null;
     const data = await r.json();
     if (!Array.isArray(data) || !data.length) return null;
-    return pickPool(data, preferredPoolAddress);
+    // migrated-tracker only ever runs on migrated mints, so always exclude
+    // the dead BC pumpfun pool.
+    return pickPool(data, preferredPoolAddress, { isMigrated: true });
   } catch { return null; }
 }
 
@@ -182,11 +207,38 @@ async function tickHot() {
   } finally { _runningHot = false; }
 }
 
+// FRESH path: any mint that migrated within FRESH_WINDOW_MINUTES gets polled
+// every FRESH_REFRESH_INTERVAL_MS regardless of whether we hold it. Bridges
+// the visibility gap during the fragile post-migration window where DexScreener
+// is still indexing the new AMM pool and helius-tx events are sparse.
+let _runningFresh = false;
+async function tickFresh() {
+  if (_runningFresh) return;
+  _runningFresh = true;
+  try {
+    const cands = S().candidatesFresh.all(FRESH_WINDOW_MINUTES, FRESH_REFRESH_INTERVAL_MS, FRESH_BATCH_SIZE);
+    if (cands.length === 0) return;
+    let updated = 0;
+    for (const c of cands) {
+      try {
+        const ok = await pollOne(c.mint_address);
+        if (ok) updated++;
+      } catch (err) { /* swallow */ }
+    }
+    if (updated > 0) {
+      console.log(`[mig-tracker] FRESH refreshed ${updated}/${cands.length} just-migrated mints (<${FRESH_WINDOW_MINUTES}min)`);
+    }
+  } finally { _runningFresh = false; }
+}
+
 export function startMigratedTracker() {
   setTimeout(tickWarm, FIRST_RUN_DELAY_MS);
   setInterval(tickWarm, TICK_INTERVAL_MS);
   // Hot path runs alongside, on its own timer
   setTimeout(tickHot, 30 * 1000);  // first hot run 30s after start
   setInterval(tickHot, HOT_TICK_INTERVAL_MS);
-  console.log(`[mig-tracker] scheduled · WARM batch=${BATCH_SIZE} every ${TICK_INTERVAL_MS / 1000}s (refresh ${REFRESH_INTERVAL_MS / 1000}s) · HOT held-positions batch=${HOT_BATCH_SIZE} every ${HOT_TICK_INTERVAL_MS / 1000}s · window=${MIGRATED_WINDOW_HOURS}h`);
+  // Fresh path: just-migrated mints get 30s polling for 30 min
+  setTimeout(tickFresh, 15 * 1000);  // first fresh run 15s after start
+  setInterval(tickFresh, FRESH_TICK_INTERVAL_MS);
+  console.log(`[mig-tracker] scheduled · WARM batch=${BATCH_SIZE} every ${TICK_INTERVAL_MS / 1000}s (refresh ${REFRESH_INTERVAL_MS / 1000}s) · HOT held=${HOT_BATCH_SIZE} every ${HOT_TICK_INTERVAL_MS / 1000}s · FRESH <${FRESH_WINDOW_MINUTES}min every ${FRESH_TICK_INTERVAL_MS / 1000}s · window=${MIGRATED_WINDOW_HOURS}h`);
 }

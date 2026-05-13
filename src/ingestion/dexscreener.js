@@ -27,14 +27,14 @@ function S() {
   return stmts;
 }
 
-export async function fetchDexscreenerPrice(mintAddress, preferredPoolAddress = null) {
+export async function fetchDexscreenerPrice(mintAddress, preferredPoolAddress = null, opts = {}) {
   const url = `${config.dexscreener.apiBase}/tokens/v1/solana/${mintAddress}`;
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(config.dexscreener.timeoutMs) });
     if (!res.ok) return null;
     const data = await res.json();
     if (!Array.isArray(data) || !data.length) return null;
-    const pool = pickPool(data, preferredPoolAddress);
+    const pool = pickPool(data, preferredPoolAddress, opts);
     if (!pool) return null;
     return {
       priceUsd: parseFloat(pool.priceUsd) || 0,
@@ -60,7 +60,9 @@ async function refreshMintPrice(mintAddress) {
     "SELECT pool_address FROM paper_positions WHERE mint_address = ? AND is_moonbag = 1 AND status = 'open' AND pool_address IS NOT NULL AND pool_address != '' LIMIT 1"
   ).get(mintAddress);
   const preferred = pinnedRow?.pool_address || null;
-  const data = await fetchDexscreenerPrice(mintAddress, preferred);
+  // Moonbag positions are always migrated by definition (the position only
+  // becomes a moonbag after migration), so isMigrated=true.
+  const data = await fetchDexscreenerPrice(mintAddress, preferred, { isMigrated: true });
   if (!data || !data.priceNative || data.priceNative <= 0) return null;
   if (data.priceNative < PRICE_FLOOR_SOL) return null;
   const solUsd = getSolUsd() || 1;

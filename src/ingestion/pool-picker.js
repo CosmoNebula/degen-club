@@ -13,7 +13,17 @@
 //   3. Active any-dex, highest liquidity.
 //   4. Fallback: highest liquidity even if quiet (better than nothing).
 
-const isPumpDex = (p) => /^pump/i.test(p.dexId || '');
+// pumpfun = pump.fun bonding curve (PRE-migration). Once a coin migrates,
+// the BC pool drains and DexScreener may still list it with stale/$0 data.
+// Picking it post-migration gives us frozen migration-moment price. Excluding
+// it forces us to wait for the real AMM pool to be indexed (pumpswap,
+// pumpfun-amm, raydium, etc.) or fall back to helius-tx.
+const DEAD_BC_DEX = new Set(['pumpfun']);
+const isAmmDex = (p) => p.dexId && !DEAD_BC_DEX.has(p.dexId.toLowerCase());
+const isPumpAmmDex = (p) => {
+  const id = (p.dexId || '').toLowerCase();
+  return id !== 'pumpfun' && id.startsWith('pump');
+};
 
 function hasRecentActivity(p) {
   const h1Vol = p.volume?.h1 || 0;
@@ -27,13 +37,17 @@ function pickBestByLiquidity(pools) {
     (p.liquidity?.usd || 0) > (best.liquidity?.usd || 0) ? p : best, pools[0]);
 }
 
-export function pickPool(pools, preferredPoolAddress = null) {
+export function pickPool(pools, preferredPoolAddress = null, opts = {}) {
+  const { isMigrated = false } = opts;
   if (!Array.isArray(pools) || !pools.length) return null;
-  const valid = pools.filter(p => {
+  let valid = pools.filter(p => {
     const liq = p.liquidity?.usd || 0;
     const price = parseFloat(p.priceNative);
     return liq > 0 && Number.isFinite(price) && price > 0;
   });
+  // For migrated coins, the dead BC pool is poison — its prices are
+  // frozen at the migration moment. Hard-exclude it from selection.
+  if (isMigrated) valid = valid.filter(isAmmDex);
   if (!valid.length) return null;
 
   if (preferredPoolAddress) {
@@ -45,7 +59,7 @@ export function pickPool(pools, preferredPoolAddress = null) {
     }
   }
 
-  const pumpActive = valid.filter(p => isPumpDex(p) && hasRecentActivity(p));
+  const pumpActive = valid.filter(p => isPumpAmmDex(p) && hasRecentActivity(p));
   if (pumpActive.length) return pickBestByLiquidity(pumpActive);
 
   const active = valid.filter(hasRecentActivity);
