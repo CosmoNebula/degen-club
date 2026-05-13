@@ -733,6 +733,19 @@ table.data .neg { color: var(--pink); text-shadow: 0 0 4px rgba(255,42,109,0.5);
   background: rgba(5,217,232,0.06);
   border-radius: 2px;
 }
+.src-pip {
+  display: inline-block; padding: 0 4px;
+  font-size: 8px; letter-spacing: 0.5px; text-transform: uppercase;
+  margin-left: 6px;
+  color: var(--muted); border: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+  border-radius: 2px; vertical-align: middle;
+}
+.src-pumpportal { color: #ffb43d; border-color: #ffb43d; }
+.src-heliustx { color: #56e1ff; border-color: #56e1ff; }
+.src-onchaincurve { color: #b388ff; border-color: #b388ff; }
+.src-dexscreener { color: #5ce17a; border-color: #5ce17a; }
+.src-dexscreenermig { color: #5ce17a; border-color: #2a8540; }
 
 .strategy-edit {
   display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 12px;

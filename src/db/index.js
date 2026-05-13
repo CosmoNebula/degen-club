@@ -162,6 +162,15 @@ function runMigrations(d) {
   ensureCol(d, 'mints', 'runner_fired', `INTEGER DEFAULT 0`);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_mints_runner_score ON mints(runner_score DESC) WHERE runner_score IS NOT NULL`);
 
+  // Price-source provenance: which writer last touched last_price_sol /
+  // current_market_cap_sol. Values: 'pumpportal' (WSS firehose), 'helius-tx'
+  // (Helius parse-tx webhook), 'onchain-curve' (Solana WSS curve decoder),
+  // 'dexscreener' (live AMM polling), 'dexscreener-mig' (migrated tracker
+  // AMM refresh). Lets us audit migration-handoff price source mismatches
+  // and see which writer is dominating for held positions.
+  ensureCol(d, 'mints', 'last_price_source', `TEXT`);
+  ensureCol(d, 'mints', 'last_price_source_at', `INTEGER`);
+
   ensureCol(d, 'paper_positions', 'strategy', `TEXT`);
   ensureCol(d, 'paper_positions', 'entry_mcap_sol', `REAL DEFAULT 0`);
   ensureCol(d, 'paper_positions', 'exit_mcap_sol', `REAL`);

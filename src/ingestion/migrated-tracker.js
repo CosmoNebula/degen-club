@@ -62,7 +62,9 @@ function S() {
       amm_sells_h24 = ?,
       amm_price_change_h1 = ?,
       amm_price_change_h24 = ?,
-      last_amm_refresh_at = ?
+      last_amm_refresh_at = ?,
+      last_price_source = 'dexscreener-mig',
+      last_price_source_at = ?
       WHERE mint_address = ?`),
     markRefreshed: d.prepare(`UPDATE mints SET last_amm_refresh_at = ? WHERE mint_address = ?`),
     // 2026-05-13 hot path: mints we hold open positions on. Always polled,
@@ -113,6 +115,7 @@ async function pollOne(mintAddress) {
     S().markRefreshed.run(Date.now(), mintAddress);
     return false;
   }
+  const _now = Date.now();
   S().update.run(
     mcapSol, priceNative, mcapSol,
     pool.pairAddress || null,
@@ -124,7 +127,8 @@ async function pollOne(mintAddress) {
     pool.txns?.h24?.sells || 0,
     pool.priceChange?.h1 || 0,
     pool.priceChange?.h24 || 0,
-    Date.now(),
+    _now,
+    _now,
     mintAddress,
   );
   return true;

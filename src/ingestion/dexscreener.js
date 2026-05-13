@@ -15,7 +15,9 @@ function S() {
     updateMint: d.prepare(`UPDATE mints SET
       last_price_sol = ?, current_market_cap_sol = ?,
       peak_market_cap_sol = MAX(peak_market_cap_sol, ?),
-      last_trade_at = ?
+      last_trade_at = ?,
+      last_price_source = 'dexscreener',
+      last_price_source_at = ?
       WHERE mint_address = ?`),
     setPoolAddress: d.prepare('UPDATE paper_positions SET pool_address = ? WHERE id = ?'),
     findByPool: d.prepare('SELECT mint_address FROM paper_positions WHERE pool_address = ? AND status = \'open\' AND is_moonbag = 1 LIMIT 1'),
@@ -66,7 +68,8 @@ async function refreshMintPrice(mintAddress) {
     return null;
   }
   try {
-    S().updateMint.run(data.priceNative, mcapSol, mcapSol, Date.now(), mintAddress);
+    const _now = Date.now();
+    S().updateMint.run(data.priceNative, mcapSol, mcapSol, _now, _now, mintAddress);
     if (data.poolAddress) {
       const positions = db().prepare("SELECT id, pool_address FROM paper_positions WHERE mint_address = ? AND is_moonbag = 1 AND status = 'open'").all(mintAddress);
       for (const p of positions) {

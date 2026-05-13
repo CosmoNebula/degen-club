@@ -60,11 +60,14 @@ function decodeAndUpdate(mintAddress, accountInfoData) {
     const supplyTokens = Number(curve.tokenTotalSupply) / 1e6;
     const priceSol = supplyTokens > 0 ? mcapSol / supplyTokens : 0;
     if (priceSol < PRICE_FLOOR_SOL) return;
+    const _now = Date.now();
     db().prepare(`UPDATE mints SET
       current_market_cap_sol = ?,
       last_price_sol = ?,
-      last_trade_at = ?
-      WHERE mint_address = ?`).run(mcapSol, priceSol, Date.now(), mintAddress);
+      last_trade_at = ?,
+      last_price_source = ?,
+      last_price_source_at = ?
+      WHERE mint_address = ?`).run(mcapSol, priceSol, _now, 'onchain-curve', _now, mintAddress);
   } catch (err) {
     // Self-healing: per-mint failure counter. After N decode failures, blacklist
     // the mint to stop log spam and avoid wasted work. Some pump.fun bonding

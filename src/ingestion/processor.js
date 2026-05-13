@@ -70,7 +70,9 @@ function S() {
         v_tokens_in_curve = ?,
         trade_count = trade_count + 1,
         last_trade_at = ?,
-        peak_market_cap_sol = MAX(peak_market_cap_sol, ?)
+        peak_market_cap_sol = MAX(peak_market_cap_sol, ?),
+        last_price_source = ?,
+        last_price_source_at = ?
       WHERE mint_address = ?`),
     bumpUniqueBuyers: d.prepare('UPDATE mints SET unique_buyer_count = ? WHERE mint_address = ?'),
     holdingBuy: d.prepare(`INSERT INTO wallet_holdings
@@ -136,6 +138,7 @@ export function ingestExternalTrade(p) {
     marketCapSol: 0, // unknown from webhook — leave 0, on-chain feed has the truth
     vSolInBondingCurve: 0,
     vTokensInBondingCurve: 0,
+    source: 'helius-tx',
   });
 }
 
@@ -310,7 +313,7 @@ function onTrade(e) {
     } else {
       s.updateMintOnTrade.run(
         mcapSol, priceSol || 0, e.vSolInBondingCurve || 0, e.vTokensInBondingCurve || 0,
-        now, mcapSol, e.mint
+        now, mcapSol, e.source || 'pumpportal', now, e.mint
       );
     }
 

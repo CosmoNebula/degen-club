@@ -911,6 +911,9 @@ function renderPositionsTables({ open, recent }) {
       const entryMc = p.entry_mcap_sol || 0;
       const nowMc = p.current_market_cap_sol || 0;
       const mcChange = entryMc > 0 ? (nowMc - entryMc) / entryMc : 0;
+      const srcTag = p.last_price_source
+        ? ` <span class="src-pip src-${p.last_price_source.replace(/[^a-z0-9]/gi,'')}" title="last price written by ${p.last_price_source}${p.last_price_source_at ? ' · ' + fmt.age(p.last_price_source_at) : ''}">${p.last_price_source}</span>`
+        : '';
       return `<tr class="clickable" ${coinLink(p.mint_address)}>
         <td class="addr">${fmt.dt(p.entered_at)}</td>
         <td>${strategyBadge(p.strategy)}</td>
@@ -918,7 +921,7 @@ function renderPositionsTables({ open, recent }) {
         <td>${tierBadges(p.tiers_hit, p.is_moonbag, p.moonbag_peak_pct)}${p.breakeven_armed ? ' <span class="be-pip">BE</span>' : ''}</td>
         <td class="num">${fmt.sol(p.entry_sol)}</td>
         <td class="num">${fmt.usd(entryMc)}</td>
-        <td class="num ${mcChange >= 0 ? 'pos' : 'neg'}">${fmt.usd(nowMc)}</td>
+        <td class="num ${mcChange >= 0 ? 'pos' : 'neg'}">${fmt.usd(nowMc)}${srcTag}</td>
         <td class="num pos">${realized > 0 ? fmt.solSigned(realized) : '—'}</td>
         <td class="num ${un >= 0 ? 'pos' : 'neg'}">${fmt.solSigned(un)}</td>
         <td class="num ${unPct >= 0 ? 'pos' : 'neg'}">${(unPct * 100).toFixed(1)}%</td>

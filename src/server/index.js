@@ -634,7 +634,8 @@ export function startServer(getIngestionStatus) {
   app.get('/api/positions', (req, res) => {
     const d = db();
     const open = d.prepare(`
-      SELECT pp.*, m.symbol, m.name, m.image_uri, m.current_market_cap_sol, m.last_price_sol, m.migrated, m.rugged
+      SELECT pp.*, m.symbol, m.name, m.image_uri, m.current_market_cap_sol, m.last_price_sol,
+             m.migrated, m.rugged, m.last_price_source, m.last_price_source_at
       FROM paper_positions pp
       LEFT JOIN mints m ON m.mint_address = pp.mint_address
       WHERE pp.status = 'open'
