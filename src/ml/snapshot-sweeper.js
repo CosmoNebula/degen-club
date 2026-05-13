@@ -1,19 +1,37 @@
 // ML Snapshot Sweeper — captures forward-looking training data.
 //
-// Every 30s, finds mints whose age is within ±15s of a target age (60s, 5m,
-// 15m, 60m) and that haven't been snapshotted at that target yet. For each,
-// computes ~25 features from data available at that exact moment and writes
-// a row to ml_mint_snapshots. Labels (migrated, peaked_N) get filled in
-// later by the label resolver once the mint's trajectory has played out.
+// Every 10s, finds mints whose age falls within a per-target tolerance band of
+// a TARGET age (15s, 30s, 60s, 2m, 5m, 10m, 15m, 30m, 60m) and that haven't
+// been snapshotted at that target yet. For each, computes ~90 features from
+// data available at that exact moment and writes a row to ml_mint_snapshots.
+// Labels (migrated, peaked_N, hold_24h_pct, etc.) get filled in later by the
+// label resolver once the mint's trajectory has played out.
 //
-// This is what we'll train the migration classifier on (Phase 2C+).
+// Phase 2B (2026-05-12): expanded from 4 to 9 target ages with per-target
+// tolerance + 10s sweep cadence. Earlier 30s sweep + ±30s tolerance was fine
+// for 60s+ targets but couldn't reliably catch sub-30s windows. Sub-minute
+// targets capture pump.fun's competitive launch dynamics — sniper bots,
+// first-block buys, KOL discovery — that the 60s baseline blurs over.
 
 import { db } from '../db/index.js';
 import { maybeFetchCreatorActivity, getCreatorActivity } from './creator-activity.js';
 
-const TARGETS_SEC = [60, 300, 900, 3600];
-const SWEEP_INTERVAL_MS = 30 * 1000;
-const TOLERANCE_SEC = 30; // mint age must fall within target ± 30s
+// Each entry: { age: target snapshot age in sec, tolerance: ±sec window }.
+// Tolerance widens with age — early windows must be tight to avoid overlap
+// between adjacent ages (e.g., 15 vs 30); older windows can be lazier because
+// nothing else competes nearby. Bands are non-overlapping by design.
+const TARGETS = [
+  { age: 15,   tolerance: 7   },
+  { age: 30,   tolerance: 7   },
+  { age: 60,   tolerance: 15  },
+  { age: 120,  tolerance: 30  },
+  { age: 300,  tolerance: 30  },
+  { age: 600,  tolerance: 60  },
+  { age: 900,  tolerance: 60  },
+  { age: 1800, tolerance: 120 },
+  { age: 3600, tolerance: 300 },
+];
+const SWEEP_INTERVAL_MS = 10 * 1000;
 
 let stmts = null;
 function S() {
@@ -775,13 +793,13 @@ function sweep() {
   const s = S();
   const now = Date.now();
   let total = 0;
-  for (const target of TARGETS_SEC) {
-    const minCreated = now - (target + TOLERANCE_SEC) * 1000;
-    const maxCreated = now - (target - TOLERANCE_SEC) * 1000;
-    const candidates = s.findCandidates.all(target, minCreated, maxCreated);
+  for (const t of TARGETS) {
+    const minCreated = now - (t.age + t.tolerance) * 1000;
+    const maxCreated = now - (t.age - t.tolerance) * 1000;
+    const candidates = s.findCandidates.all(t.age, minCreated, maxCreated);
     for (const m of candidates) {
       try {
-        takeSnapshot(m, target, now);
+        takeSnapshot(m, t.age, now);
         total++;
       } catch (err) { console.error('[ml-snap] err:', err.message); }
     }
@@ -793,5 +811,6 @@ export function startSnapshotSweeper() {
   setInterval(() => {
     try { sweep(); } catch (err) { console.error('[ml-snap] sweep error:', err.message); }
   }, SWEEP_INTERVAL_MS);
-  console.log('[ml-snap] snapshot sweeper started · targets=' + TARGETS_SEC.join('s,') + 's · interval=30s');
+  const ages = TARGETS.map(t => `${t.age}s±${t.tolerance}`).join(',');
+  console.log(`[ml-snap] snapshot sweeper started · targets=[${ages}] · interval=${SWEEP_INTERVAL_MS/1000}s`);
 }

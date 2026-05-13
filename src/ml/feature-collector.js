@@ -487,13 +487,15 @@ function aggregate(trades, ctx = {}) {
   };
 }
 
-// Training ages — must mirror TARGETS_SEC in snapshot-sweeper.js. Every row in
+// Training ages — must mirror TARGETS in snapshot-sweeper.js. Every row in
 // ml_mint_snapshots has snapshot_age_sec set to exactly one of these values,
 // so the models have never seen any other age. Live inference must snap to
 // the closest of these to avoid feeding an out-of-distribution age feature
 // (e.g. snapshot_age_sec=237 — which the model has never seen and may not
 // handle gracefully on splits keyed by age).
-const TRAINING_AGES_SEC = [60, 300, 900, 3600];
+// Expanded 2026-05-12 (Phase B) — added 15, 30, 120, 600, 1800 for finer
+// resolution on early-mint dynamics + mid-horizon coverage.
+const TRAINING_AGES_SEC = [15, 30, 60, 120, 300, 600, 900, 1800, 3600];
 function snapToTrainingAge(actualSec) {
   if (actualSec < TRAINING_AGES_SEC[0]) return TRAINING_AGES_SEC[0];
   let best = TRAINING_AGES_SEC[0];
