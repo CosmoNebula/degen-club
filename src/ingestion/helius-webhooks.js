@@ -40,6 +40,25 @@ function topWallets() {
   return [...new Set([...top50, ...manual])];
 }
 
+// Mint addresses we currently hold open positions on. Subscribing the mint
+// to the webhook makes Helius push EVERY trade on it (not just trades by
+// our tracked wallets). Closes the data gap during fast-moving migrated
+// coin holds where DexScreener hasn't indexed pump-amm yet.
+function heldMintAddresses() {
+  return db().prepare(`
+    SELECT DISTINCT m.mint_address
+    FROM paper_positions p
+    JOIN mints m ON m.mint_address = p.mint_address
+    WHERE p.status = 'open' AND m.rugged = 0
+  `).all().map(r => r.mint_address);
+}
+
+function subscriptionAddresses() {
+  const wallets = topWallets();
+  const heldMints = heldMintAddresses();
+  return { combined: [...new Set([...wallets, ...heldMints])], wallets, heldMints };
+}
+
 // Retry wrapper for Helius API calls. Network blips + transient 5xx errors
 // are common; without retry we'd wait 60 min for the next sync. We retry up
 // to 3 times on 5xx + network errors only — 4xx (auth, bad request) won't
@@ -126,8 +145,8 @@ export async function syncHunterWebhook() {
   if (!HELIUS_API_KEY) { console.warn('[helius-wh] HELIUS_API_KEY missing — skipping'); return; }
   if (!WEBHOOK_URL) { console.warn('[helius-wh] HELIUS_WEBHOOK_URL missing — skipping'); return; }
 
-  const addresses = topWallets();
-  if (!addresses.length) { console.log('[helius-wh] no leaderboard wallets yet — skipping'); return; }
+  const { combined: addresses, wallets, heldMints } = subscriptionAddresses();
+  if (!addresses.length) { console.log('[helius-wh] no addresses to subscribe — skipping'); return; }
 
   if (!_webhookId) {
     const existing = await listExistingWebhooks().catch(() => []);
@@ -152,18 +171,31 @@ export async function syncHunterWebhook() {
 
   if (_webhookId) {
     if (!addressesChanged(_lastSyncedAddresses, addresses)) {
-      console.log(`[helius-wh] skip — address list unchanged (${addresses.length} wallets)`);
+      console.log(`[helius-wh] skip — address list unchanged (${addresses.length} addrs · ${wallets.length} wallets · ${heldMints.length} held mints)`);
       return;
     }
     await updateWebhook(_webhookId, addresses);
     _lastSyncedAddresses = addresses;
-    console.log(`[helius-wh] updated webhook ${_webhookId} · ${addresses.length} top-50+manual`);
+    console.log(`[helius-wh] updated webhook ${_webhookId} · ${addresses.length} addrs (${wallets.length} wallets + ${heldMints.length} held mints)`);
   } else {
     const created = await createWebhook(addresses);
     _webhookId = created.webhookID;
     _lastSyncedAddresses = addresses;
-    console.log(`[helius-wh] created webhook ${_webhookId} · ${addresses.length} top-50+manual`);
+    console.log(`[helius-wh] created webhook ${_webhookId} · ${addresses.length} addrs (${wallets.length} wallets + ${heldMints.length} held mints)`);
   }
+}
+
+// Debounced re-sync triggered when positions open/close. Multiple position
+// changes within a short window batch into one Helius API call. The webhook
+// PUT itself costs 100 credits — debouncing prevents burst opens from
+// hammering the API.
+let _debounceTimer = null;
+export function triggerWebhookResync() {
+  if (_debounceTimer) clearTimeout(_debounceTimer);
+  _debounceTimer = setTimeout(() => {
+    _debounceTimer = null;
+    syncHunterWebhook().catch(err => console.error('[helius-wh] resync', err.message));
+  }, 3000);
 }
 
 export function startHeliusWebhookSync() {
