@@ -71,10 +71,14 @@ const HITS_10X_RATIO = 10.0;
 // can produce absurd ratios. 1000 = 100,000% preserves real runners.
 const HOLD_RETURN_CAP = 1000;
 const DRAWDOWN_24H_CAP = 0.99;
-// Backfill cutoff for stale-pass: only re-scan rows older than this. We don't
-// want to scan freshly-resolved rows where every long label is guaranteed
-// still pending (snapshot < 1h old → none of these can be computed yet).
-const STALE_BACKFILL_AGE_MS = 70 * 60 * 1000; // 70 min — bit older than hold_1h window
+// Stale-backfill window. Snapshots in this age range have their resolution-
+// window trades still inside the trades-table retention (currently 48h, see
+// intelligence-condensate.js) AND are old enough for at least one long label
+// to compute (past hold_1h). Outside this window the compute always returns
+// NULL forever, so we'd loop endlessly. Tune both ends if trade retention
+// shifts. Buffer to stay safely inside boundaries.
+const STALE_BACKFILL_MIN_AGE_MS = 70 * 60 * 1000;       // past hold_1h horizon
+const STALE_BACKFILL_MAX_AGE_MS = 46 * 60 * 60 * 1000;  // 46h — stays inside 48h trade retention
 
 let stmts = null;
 function S() {
@@ -85,10 +89,17 @@ function S() {
        FROM ml_mint_snapshots
        WHERE labels_resolved_at IS NULL AND snapshot_ts < ?
        ORDER BY snapshot_ts ASC LIMIT ?`),
+    // Stale-backfill query — finds previously-resolved rows missing any label
+    // column. Bound on snapshot_ts: the upper bound is "old enough that long
+    // labels can attempt resolution" (now - 70min, past hold_1h horizon). The
+    // lower bound is "trades for this snapshot's resolution window are still
+    // in retention" — beyond it, hold_X_pct compute returns NULL forever and
+    // we'd loop endlessly on the same dead rows. Configured for 48h trade
+    // retention with a small buffer to avoid the boundary.
     findStaleResolved: d.prepare(`SELECT mint_address, snapshot_age_sec, snapshot_ts, last_price_sol
        FROM ml_mint_snapshots
        WHERE labels_resolved_at IS NOT NULL
-         AND snapshot_ts < ?
+         AND snapshot_ts BETWEEN ? AND ?
          AND (will_die_fast IS NULL OR rug_within_5min IS NULL
               OR migrates_within_15min IS NULL OR drawdown_from_peak_pct IS NULL
               OR hits_2x_within_1h IS NULL OR time_to_peak_5x_sec IS NULL
@@ -401,10 +412,11 @@ function resolve() {
   const fresh = s.findUnresolved.all(cutoff, BATCH_LIMIT);
   if (fresh.length > 0) resolveBatch(fresh, 'fresh');
   // Second pass: backfill new label columns on previously-resolved rows.
-  // Filter to snapshots at least STALE_BACKFILL_AGE_MS old — no point scanning
-  // rows where every long label is guaranteed to still return NULL.
-  const staleCutoff = now - STALE_BACKFILL_AGE_MS;
-  const stale = s.findStaleResolved.all(staleCutoff, BATCH_LIMIT);
+  // Filter to the sweet spot: old enough for at least hold_1h to compute,
+  // but young enough that the resolution-window trades aren't pruned.
+  const staleFloor = now - STALE_BACKFILL_MAX_AGE_MS;  // oldest still-resolvable
+  const staleCeil = now - STALE_BACKFILL_MIN_AGE_MS;   // youngest worth scanning
+  const stale = s.findStaleResolved.all(staleFloor, staleCeil, BATCH_LIMIT);
   if (stale.length > 0) resolveBatch(stale, 'backfill');
 }
 
