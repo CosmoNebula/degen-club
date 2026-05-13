@@ -244,14 +244,41 @@ function adaptiveTick() {
   }
 }
 
+// 2026-05-13: wall-clock-aligned schedule. Previously: "15 min after boot, then
+// every 2h on whatever cadence that creates." That meant every bot restart
+// re-fired a retrain and the schedule drifted. Now: retrains fire at even-hour
+// wall-clock slots in local TZ (00:00, 02:00, 04:00, ... 22:00). Bot restarts
+// no longer trigger retrains; we just wait for the next aligned slot.
+// TZ is set via systemd Environment=TZ=America/New_York so "wall clock" = ET.
+function nextAlignedRetrainAt(fromMs = Date.now()) {
+  const d = new Date(fromMs);
+  const hour = d.getHours();
+  // Round up to the next even hour. If we're EXACTLY on an even hour, take
+  // the NEXT one to avoid double-firing if startup races the boundary.
+  const nextEvenHour = (hour % 2 === 0) ? hour + 2 : hour + 1;
+  const target = new Date(d);
+  target.setHours(nextEvenHour, 0, 0, 0);
+  return target;
+}
+
+function scheduleNextRetrain() {
+  const target = nextAlignedRetrainAt();
+  const delayMs = target.getTime() - Date.now();
+  const localStr = target.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
+  console.log(`[auto-retrain] next retrain at ${localStr} ET (in ${(delayMs / 60000).toFixed(1)} min)`);
+  setTimeout(() => {
+    runRetrain();
+    scheduleNextRetrain();  // chain to the next aligned slot regardless of how long this run takes
+  }, delayMs);
+}
+
 export function startAutoRetrain() {
   ensureBaseline();  // seed metrics history from current models if empty
-  setTimeout(runRetrain, FIRST_RUN_DELAY_MS);
-  setInterval(runRetrain, REPEAT_INTERVAL_MS);
+  scheduleNextRetrain();
   // Adaptive trigger DISABLED per user request — was firing too frequently
-  // (30-60 min cadence) and redundant with the hourly fixed schedule.
+  // (30-60 min cadence) and redundant with the fixed schedule.
   // setInterval(adaptiveTick, ADAPTIVE_CHECK_MS);
-  console.log(`[auto-retrain] scheduled · first=+15min · interval=${REPEAT_INTERVAL_MS/3600000}h (adaptive trigger disabled)`);
+  console.log(`[auto-retrain] scheduled · wall-clock 2h slots (00,02,04,..,22 ET) · NO retrain-on-restart · adaptive disabled`);
 }
 
 // Manual trigger via API (useful for "retrain now" button)
