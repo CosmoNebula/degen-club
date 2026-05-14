@@ -409,7 +409,7 @@ function resolveBatch(rows, label = 'resolve') {
   return resolved;
 }
 
-function resolve() {
+export function resolve() {
   const s = S();
   const now = Date.now();
   const cutoff = now - MIN_SNAPSHOT_AGE_MS;
@@ -429,10 +429,8 @@ function resolve() {
 }
 
 export function startLabelResolver() {
-  // Run immediately on boot to catch any pending labels from prior runs
-  setTimeout(resolve, 60 * 1000);
-  setInterval(() => {
-    try { resolve(); } catch (err) { console.error('[ml-label] resolve err:', err.message); }
-  }, RESOLVE_INTERVAL_MS);
-  console.log('[ml-label] label resolver started · interval=5min · resolve_age=6hr · backfills NULL labels');
+  // 2026-05-14: scheduler moved off main thread to label-resolver-worker.js.
+  // resolve() stays exported for the worker. No-op here so index.js
+  // doesn't need a wiring change; worker is started separately.
+  console.log('[ml-label] in-process scheduler disabled — resolve owned by label-worker thread');
 }

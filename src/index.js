@@ -33,6 +33,7 @@ import { startWalletLeaderboardWorker } from './scoring/wallet-leaderboard-worke
 import { startDevsWorker } from './scoring/devs-worker.js';
 import { startBundleWorker } from './scoring/bundle-worker.js';
 import { startMaintenanceWorker } from './maintenance-worker.js';
+import { startLabelResolverWorker } from './ml/label-resolver-worker.js';
 import { startRunnerScoreSweep } from './scoring/runner-score.js';
 import { startWhaleSpawnSweep } from './scoring/whale-spawn.js';
 import { startKolDipSweep } from './scoring/kol-dip.js';
@@ -119,6 +120,7 @@ startWalletLeaderboardWorker();
 startDevsWorker();
 startBundleWorker();
 startMaintenanceWorker();
+startLabelResolverWorker();
 startRunnerScoreSweep();
 startWhaleSpawnSweep();
 startKolDipSweep();
