@@ -32,6 +32,7 @@ import WebSocket from 'ws';
 import { EventEmitter } from 'node:events';
 import { config } from '../config.js';
 import { db } from '../db/index.js';
+import { shadowSubscribeAmm, shadowUnsubscribeAmm } from './public-wss-shadow.js';
 
 const HELIUS_API_KEY = () => config.heliusApiKey || process.env.HELIUS_API_KEY || '';
 const HELIUS_RPC = () => `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY()}`;
@@ -271,6 +272,7 @@ class OnchainAmmClient extends EventEmitter {
     });
     this._sendAccountSubscribe(mintAddress, 'base', vaults.baseVault);
     this._sendAccountSubscribe(mintAddress, 'quote', vaults.quoteVault);
+    try { shadowSubscribeAmm(mintAddress, vaults.baseVault, vaults.quoteVault); } catch {}
     console.log(`[onchain-amm] subscribed ${mintAddress.slice(0,8)}… pool=${poolAddress.slice(0,8)}…`);
   }
 
@@ -280,6 +282,7 @@ class OnchainAmmClient extends EventEmitter {
     if (s.baseSubId != null) this._sendAccountUnsubscribe(s.baseSubId);
     if (s.quoteSubId != null) this._sendAccountUnsubscribe(s.quoteSubId);
     this.state.delete(mintAddress);
+    try { shadowUnsubscribeAmm(mintAddress); } catch {}
     console.log(`[onchain-amm] unsubscribed ${mintAddress.slice(0,8)}…`);
   }
 }

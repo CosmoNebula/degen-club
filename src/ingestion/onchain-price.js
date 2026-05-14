@@ -13,6 +13,8 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { BondingCurveAccount } from 'pumpdotfun-sdk/dist/esm/bondingCurveAccount.js';
 import { db } from '../db/index.js';
 import { config } from '../config.js';
+import { isMintHeld } from '../trading/held-mints.js';
+import { shadowSubscribeBc, shadowUnsubscribeBc } from './public-wss-shadow.js';
 
 // 2026-05-13: Prefer Helius for the held-position price watcher. This is the
 // highest-stakes feed in the system — every position-monitor decision (trail,
@@ -146,6 +148,11 @@ function subscribe(mintAddress, bondingCurveKey) {
     jsonrpc: '2.0', id: reqId, method: 'accountSubscribe',
     params: [bondingCurveKey, { encoding: 'base64', commitment: 'processed' }],
   });
+  // Shadow on free public WSS — held mints only (public WSS can't handle the
+  // full pre-mig watchlist of hundreds of accounts).
+  if (isMintHeld(mintAddress)) {
+    try { shadowSubscribeBc(mintAddress, bondingCurveKey); } catch {}
+  }
 }
 
 function unsubscribe(mintAddress) {
@@ -157,6 +164,7 @@ function unsubscribe(mintAddress) {
     send({ jsonrpc: '2.0', id: reqId, method: 'accountUnsubscribe', params: [s.subId] });
   }
   _subs.delete(mintAddress);
+  try { shadowUnsubscribeBc(mintAddress); } catch {}
 }
 
 // Mints that need a live price feed right now.

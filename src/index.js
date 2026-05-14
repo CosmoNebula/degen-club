@@ -71,6 +71,7 @@ import { startPositionMonitor, recoverLivePositions, recoverPaperPositions } fro
 import { startMoonbagPriceFeed, startOpenPositionPriceFeed } from './ingestion/dexscreener.js';
 import { startOnchainPriceFeed } from './ingestion/onchain-price.js';
 import { startOnchainAmm } from './ingestion/onchain-amm-price.js';
+import { startShadowWss } from './ingestion/public-wss-shadow.js';
 import { startHeliusWebhookSync } from './ingestion/helius-webhooks.js';
 import { startTelegramMemberWatcher } from './ingestion/telegram-members.js';
 import { startTelegramCallsBroadcaster } from './ingestion/telegram-calls.js';
@@ -92,6 +93,7 @@ recoverLivePositions()
 heliusWS.start();
 startMoonbagPriceFeed();
 startOpenPositionPriceFeed();
+startShadowWss();
 startOnchainPriceFeed();
 startOnchainAmm();
 startHeliusWebhookSync();
