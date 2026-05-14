@@ -15,6 +15,7 @@ import { getIngestionPaused } from '../ml/disk-monitor.js';
 import { updateMigratorStatsForMint } from '../scoring/migrator-stats.js';
 import { triggerWebhookResync } from './helius-webhooks.js';
 import { isMintHeld } from '../trading/held-mints.js';
+import { isAmmSubscribed } from './onchain-amm-price.js';
 
 const cashbackInflight = new Set();
 export function ensureCashback(mintAddress, bondingCurveKey, currentValue) {
@@ -361,10 +362,15 @@ function onTrade(e) {
       let heldLock = false;
       if (isHeld) {
         if (!mint.migrated) {
-          // Pre-mig held — block ALL processor.js writes (onchain-curve only)
+          // Pre-mig held — onchain-curve is sole writer
+          heldLock = true;
+        } else if (isAmmSubscribed(e.mint)) {
+          // Post-mig held with active onchain-amm — that's sole writer
           heldLock = true;
         } else {
-          // Post-mig held — block pumpportal, allow helius-tx
+          // Post-mig held but onchain-amm not subscribed yet (DexScreener pool
+          // address pending, vault fetch in flight, etc) — fall back to
+          // helius-tx, still block pumpportal
           heldLock = source !== 'helius-tx';
         }
       }
