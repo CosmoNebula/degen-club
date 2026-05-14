@@ -61,13 +61,19 @@ function decodeAndUpdate(mintAddress, accountInfoData) {
     const priceSol = supplyTokens > 0 ? mcapSol / supplyTokens : 0;
     if (priceSol < PRICE_FLOOR_SOL) return;
     const _now = Date.now();
+    // 2026-05-13 PM: now also updates peak_market_cap_sol. For held pre-mig
+    // positions, onchain-curve is the SOLE writer (processor.js blocked) so
+    // peak tracking must live here. Curve-derived prices are immune to dust
+    // manipulation, sandwich routing, and trade-interpretation quirks, so
+    // peak_market_cap_sol stays anchored to real curve state.
     db().prepare(`UPDATE mints SET
       current_market_cap_sol = ?,
       last_price_sol = ?,
+      peak_market_cap_sol = MAX(peak_market_cap_sol, ?),
       last_trade_at = ?,
       last_price_source = ?,
       last_price_source_at = ?
-      WHERE mint_address = ?`).run(mcapSol, priceSol, _now, 'onchain-curve', _now, mintAddress);
+      WHERE mint_address = ?`).run(mcapSol, priceSol, mcapSol, _now, 'onchain-curve', _now, mintAddress);
   } catch (err) {
     // Self-healing: per-mint failure counter. After N decode failures, blacklist
     // the mint to stop log spam and avoid wasted work. Some pump.fun bonding

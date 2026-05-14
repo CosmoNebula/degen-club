@@ -345,14 +345,30 @@ function onTrade(e) {
         _junkDropLastLog = now;
       }
     } else {
-      // Helius-only lock for held mints: if we hold this mint, allow only
-      // Helius-sourced writers (helius-tx + onchain-curve via Solana WSS).
-      // pumpportal events still get the trade row inserted for history but
-      // don't touch mints.last_price_sol — keeps the position monitor's
-      // price feed coherent without source-switching noise.
+      // Held-mint write lock — tightened 2026-05-13 PM after observing that
+      // helius-tx trade-implied prices still polluted held-position peak
+      // tracking (e.g., #5107 DigitalID recorded peak +161% while real trades
+      // only reached +31%). For HELD PRE-MIG mints, onchain-curve (Helius WSS
+      // reserve decoder in src/ingestion/onchain-price.js) is the sole writer:
+      // it reads the bonding curve's actual reserves, immune to trade
+      // interpretation, sandwich routing, out-of-order events. processor.js
+      // writes (pumpportal AND helius-tx) are blocked for pre-mig held.
+      // For HELD POST-MIG mints: onchain-curve doesn't fire (BC pool closed),
+      // so helius-tx remains the canonical source. pumpportal still blocked.
+      // For NOT-HELD mints: all sources write normally.
       const source = e.source || 'pumpportal';
-      const heldHeliusLock = isMintHeld(e.mint) && source !== 'helius-tx';
-      if (!heldHeliusLock) {
+      const isHeld = isMintHeld(e.mint);
+      let heldLock = false;
+      if (isHeld) {
+        if (!mint.migrated) {
+          // Pre-mig held — block ALL processor.js writes (onchain-curve only)
+          heldLock = true;
+        } else {
+          // Post-mig held — block pumpportal, allow helius-tx
+          heldLock = source !== 'helius-tx';
+        }
+      }
+      if (!heldLock) {
         s.updateMintOnTrade.run(
           mcapSol, priceSol || 0, e.vSolInBondingCurve || 0, e.vTokensInBondingCurve || 0,
           now, mcapSol, source, now, e.mint
