@@ -185,7 +185,7 @@ const DEVS_PER_CREATOR_YIELD_MS = 30;
 // state change in the last 6h gets reclassified by the next sweep. Tighter
 // than 7d (33k) but loose enough that nothing slips between sweep windows.
 const DEVS_ACTIVE_WINDOW_HOURS = 6;
-async function recomputeAllCreatorsAsync() {
+export async function recomputeAllCreatorsAsync() {
   const s = S();
   const cutoff = Date.now() - DEVS_ACTIVE_WINDOW_HOURS * 60 * 60 * 1000;
   const active = s.activeCreators.all(cutoff, cutoff, cutoff);
@@ -209,21 +209,9 @@ export function recomputeAllCreators() {
 }
 
 export function startDevSweep() {
-  // 2026-05-14: bumped initial from 8s to 3min — boot storm was firing
-  // devs + bundle + leaderboard + archive all together in the first
-  // 30s, dropping WSS for 30-60s post-restart. Stagger them apart.
-  setTimeout(() => {
-    recomputeAllCreatorsAsync()
-      .then(n => console.log(`[devs] initial classification: ${n} creators (batched)`))
-      .catch(err => console.error('[devs] initial', err.message));
-  }, 3 * 60 * 1000);
-
-  // Was 10min; dev classification changes slowly (launch_count, migrated_count
-  // accumulate over days). 4h is plenty fresh and gives the per-creator
-  // yielding plenty of headroom between sweeps.
-  setInterval(() => {
-    recomputeAllCreatorsAsync()
-      .then(n => { if (n > 0) console.log(`[devs] recomputed ${n} creators (batched)`); })
-      .catch(err => console.error('[devs] sweep', err.message));
-  }, 4 * 60 * 60 * 1000);
+  // 2026-05-14: scheduler moved off main thread to devs-worker.js.
+  // recomputeAllCreatorsAsync stays exported for the worker. Manual CLI
+  // path uses recomputeAllCreators (sync). No-op here so index.js
+  // doesn't need a wiring change; worker is started separately.
+  console.log('[devs] in-process scheduler disabled — recompute owned by devs-worker thread');
 }

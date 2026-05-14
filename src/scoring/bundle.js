@@ -113,24 +113,8 @@ export function detectBundles() {
 }
 
 export function startBundleSweep() {
-  // 2026-05-14: bumped initial from 15s to 2min — first sweep is the
-  // heaviest (cold page cache) and was overlapping with leaderboard /
-  // devs at boot. Spreads the post-restart burst.
-  setTimeout(() => {
-    try {
-      const r = detectBundles();
-      console.log(`[bundle] initial sweep: ${r.clusters} clusters from ${r.mintsScanned} mints`);
-    } catch (err) {
-      console.error('[bundle] initial', err.message);
-    }
-  }, 2 * 60 * 1000);
-
-  setInterval(() => {
-    try {
-      const r = detectBundles();
-      if (r.clusters > 0) console.log(`[bundle] sweep: ${r.clusters} clusters from ${r.mintsScanned} mints`);
-    } catch (err) {
-      console.error('[bundle] sweep', err.message);
-    }
-  }, config.bundle.intervalMs);
+  // 2026-05-14: scheduler moved off main thread to bundle-worker.js.
+  // detectBundles stays exported for the worker. No-op here so index.js
+  // doesn't need a wiring change; worker is started separately.
+  console.log('[bundle] in-process scheduler disabled — sweep owned by bundle-worker thread');
 }
