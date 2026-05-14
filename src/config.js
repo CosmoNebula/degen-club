@@ -92,13 +92,18 @@ export const config = {
   },
 
   bundle: {
-    intervalMs: 5 * 60 * 1000,
+    // 2026-05-14: was 5min interval + 24h window — single sweep was 10s+ on
+    // 430k-trade scan, dropping WSS every cycle. Bundles are detected at
+    // coin-launch (cohort window <2s after creation), so a 6h scan catches
+    // every active mint that could still be relevant. 15min interval keeps
+    // it well-clear of WSS reconnect cycles.
+    intervalMs: 15 * 60 * 1000,
     cohortMaxSeconds: 2,
     cohortMinSize: 2,
     cohortMaxSize: 30,
     minCoincidences: 3,
     minClusterSize: 3,
-    maxAgeMs: 24 * 60 * 60 * 1000,
+    maxAgeMs: 6 * 60 * 60 * 1000,
     maxMintsPerSweep: 2000,
   },
 
