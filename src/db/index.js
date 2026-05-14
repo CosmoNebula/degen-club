@@ -298,6 +298,19 @@ function runMigrations(d) {
   // rewriting the 3 query sites to use `symbol = ? COLLATE NOCASE`, this
   // collapses each call to <1ms.
   d.exec(`CREATE INDEX IF NOT EXISTS idx_mints_symbol_nocase ON mints(symbol COLLATE NOCASE)`);
+  // 2026-05-14 batch-3: composite indexes for the recurring mints scans
+  // that were collectively burning 2-5s of loop time across the various
+  // scoring/ml sweepers. Each WHERE migrated=0 AND rugged=0 ORDER BY X
+  // scan went from full-table to indexed range. Build cost on ~50k rows
+  // is sub-second per index at startup.
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_mints_alive_lasttrade ON mints(migrated, rugged, last_trade_at DESC)`);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_mints_alive_created ON mints(migrated, rugged, created_at DESC)`);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_mints_migrated_peak ON mints(migrated, peak_market_cap_sol)`);
+  // Bundle clustering reads trades WHERE is_buy=1 AND seconds_from_creation<=?
+  // AND timestamp>?. This index lets the planner skip the 4.45M-row scan
+  // and seek directly to the recent-buys range. Index build is ~30s at
+  // startup on the current table size — one-time cost.
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_trades_buy_recency ON trades(is_buy, timestamp, seconds_from_creation)`);
 
   d.exec(`CREATE TABLE IF NOT EXISTS gate_rejections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

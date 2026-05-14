@@ -76,14 +76,24 @@ function loadCurrentlyTracked(d) {
   return m;
 }
 
+// 2026-05-14: this query was 4.2-4.6s every recompute (every ~15min),
+// blocking the loop long enough to drop WSS each time. Cache result for
+// 10min — fresher than that doesn't change tier assignments meaningfully.
+const CANDIDATES_CACHE_TTL_MS = 10 * 60 * 1000;
+let _candidatesCache = null;
+let _candidatesCacheAt = 0;
 function loadCandidatesWithExtraStats() {
+  const now = Date.now();
+  if (_candidatesCache && (now - _candidatesCacheAt) < CANDIDATES_CACHE_TTL_MS) {
+    return _candidatesCache;
+  }
   const d = db();
   const cutoff30d = Date.now() - 30 * DAY_MS;
   const cutoff7d = Date.now() - 7 * DAY_MS;
 
   // Gather candidates that pass disqualifiers, then compute the three derived
   // metrics (avg_multiple_30d, early_entry_rate, rug_rate_30d) in one SQL pass.
-  return d.prepare(`
+  const sql = `
     WITH candidates AS (
       SELECT address FROM wallets
       WHERE COALESCE(closed_30d, 0) >= 20
@@ -171,7 +181,11 @@ function loadCandidatesWithExtraStats() {
       ) AS rug_rate_30d
     FROM wallets w
     WHERE w.address IN (SELECT address FROM candidates)
-  `).all(cutoff30d, cutoff7d, cutoff30d);
+  `;
+  const rows = d.prepare(sql).all(cutoff30d, cutoff7d, cutoff30d);
+  _candidatesCache = rows;
+  _candidatesCacheAt = now;
+  return rows;
 }
 
 // Score v2.1 (2026-05-11) — base 30d quality + 7d momentum overlay.
