@@ -18,24 +18,24 @@ import { pruneTrades, pruneAuxData } from './maintenance.js';
 if (!isMainThread) {
   db(); // open DB connection for this thread
 
-  setTimeout(() => {
+  setTimeout(async () => {
     try {
-      const r = pruneTrades();
+      const r = await pruneTrades();
       console.log(`[maintenance-worker] startup prune: rugged=${r.ruggedDeleted} quiet=${r.quietDeleted} flags=${r.flagsDeleted} trades ${r.tradesBefore}→${r.tradesAfter}`);
-      const a = pruneAuxData();
+      const a = await pruneAuxData();
       console.log(`[maintenance-worker] startup aux: orphan_holdings=${a.orphanHoldings} stale_mints=${a.staleMints} copy_signals=${a.oldCopySignals} volume_signals=${a.oldVolumeSignals}`);
     } catch (err) {
       console.error('[maintenance-worker] startup', err.message);
     }
   }, config.maintenance.startupDelayMs);
 
-  setInterval(() => {
+  setInterval(async () => {
     try {
-      const r = pruneTrades();
+      const r = await pruneTrades();
       if (r.ruggedDeleted + r.quietDeleted + r.flagsDeleted > 0) {
         console.log(`[maintenance-worker] sweep: rugged=${r.ruggedDeleted} quiet=${r.quietDeleted} flags=${r.flagsDeleted} trades ${r.tradesBefore}→${r.tradesAfter}`);
       }
-      const a = pruneAuxData();
+      const a = await pruneAuxData();
       const auxTotal = a.orphanHoldings + a.staleMints + a.oldCopySignals + a.oldVolumeSignals;
       if (auxTotal > 0) {
         console.log(`[maintenance-worker] aux: orphan_holdings=${a.orphanHoldings} stale_mints=${a.staleMints} copy_signals=${a.oldCopySignals} volume_signals=${a.oldVolumeSignals}`);

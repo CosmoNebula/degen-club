@@ -2506,9 +2506,9 @@ export function startServer(getIngestionStatus) {
     }
   });
 
-  app.post('/api/db/prune', (req, res) => {
+  app.post('/api/db/prune', async (req, res) => {
     try {
-      const r = pruneTrades();
+      const r = await pruneTrades();
       const v = vacuumDb();
       res.json({ ...r, vacuumFreed: v.freed, sizeBefore: v.before, sizeAfter: v.after });
     } catch (err) {

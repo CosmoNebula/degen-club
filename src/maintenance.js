@@ -8,56 +8,83 @@ function S() {
   const d = db();
   stmts = {
     countTrades: d.prepare('SELECT COUNT(*) AS n FROM trades'),
-    deleteRuggedTrades: d.prepare(`
-      DELETE FROM trades WHERE mint_address IN (
+    // 2026-05-14: chunked DELETEs. Single big DELETE held the SQLite
+    // writer lock for 5-8s, blocking unrelated INSERTs on the main
+    // thread. We now SELECT rowids in batches and DELETE by rowid,
+    // yielding briefly between batches so other writers can grab the
+    // lock. Use these via the chunked* helpers in pruneAuxData/Trades.
+    pickRuggedTradeRowids: d.prepare(`
+      SELECT rowid FROM trades WHERE mint_address IN (
         SELECT mint_address FROM mints
         WHERE rugged = 1 AND rugged_at IS NOT NULL AND rugged_at < ?
-      )
+      ) LIMIT ?
     `),
-    deleteQuietTrades: d.prepare(`
-      DELETE FROM trades WHERE mint_address IN (
+    pickQuietTradeRowids: d.prepare(`
+      SELECT rowid FROM trades WHERE mint_address IN (
         SELECT mint_address FROM mints
         WHERE migrated = 0 AND rugged = 0
           AND COALESCE(last_trade_at, created_at) < ?
-      )
+      ) LIMIT ?
     `),
-    deleteOldFlags: d.prepare('DELETE FROM rug_flags WHERE fired_at < ?'),
-    // 2026-05-14: NOT IN against the wallets table planned as a re-eval per
-    // row (~3.2s block at 4.45M-row scale). NOT EXISTS with PK lookup on
-    // wallets.address is sub-100ms.
-    deleteOrphanHoldings: d.prepare(`
-      DELETE FROM wallet_holdings
+    pickOrphanHoldingsRowids: d.prepare(`
+      SELECT rowid FROM wallet_holdings
       WHERE NOT EXISTS (
         SELECT 1 FROM wallets WHERE wallets.address = wallet_holdings.wallet
-      )
+      ) LIMIT ?
     `),
-    deleteStaleMints: d.prepare(`
-      DELETE FROM mints
+    pickStaleMintsRowids: d.prepare(`
+      SELECT rowid FROM mints
       WHERE migrated = 0
         AND COALESCE(last_trade_at, created_at) < ?
         AND mint_address NOT IN (SELECT mint_address FROM paper_positions WHERE status = 'open')
+      LIMIT ?
     `),
+    deleteOldFlags: d.prepare('DELETE FROM rug_flags WHERE fired_at < ?'),
     deleteOldCopySignals: d.prepare('DELETE FROM copy_signals WHERE fired_at < ?'),
     deleteOldVolumeSignals: d.prepare('DELETE FROM volume_signals WHERE fired_at < ?'),
   };
   return stmts;
 }
 
+// Chunked-delete helper. Selects up to BATCH rowids matching the pick statement,
+// then DELETEs them by rowid in one statement. Each batch holds the SQLite
+// writer lock for ~50-100ms instead of 5-8s. Yields YIELD_MS between batches
+// so other writers (main-thread INSERTs, other workers) can take the lock.
+// Returns total rows deleted across all batches.
+const CHUNK_BATCH = 2000;
+const CHUNK_YIELD_MS = 50;
+const CHUNK_MAX_BATCHES = 500; // safety cap — at 2k/batch = 1M rows per sweep call
+async function chunkedDelete(table, pickStmt, ...pickArgs) {
+  const d = db();
+  let total = 0;
+  for (let i = 0; i < CHUNK_MAX_BATCHES; i++) {
+    const rows = pickStmt.all(...pickArgs, CHUNK_BATCH);
+    if (rows.length === 0) break;
+    const placeholders = rows.map(() => '?').join(',');
+    const ids = rows.map(r => r.rowid);
+    const r = d.prepare(`DELETE FROM ${table} WHERE rowid IN (${placeholders})`).run(...ids);
+    total += r.changes;
+    if (rows.length < CHUNK_BATCH) break; // less-than-full batch = drained
+    await new Promise(resolve => setTimeout(resolve, CHUNK_YIELD_MS));
+  }
+  return total;
+}
+
 // Aux cleanup beyond pruneTrades. Runs alongside it on the maintenance schedule.
 // Conservative cuts only — never touches migrated mints or their trades, since
 // those feed migrator-hunter scoring permanently.
-export function pruneAuxData() {
+export async function pruneAuxData() {
   const s = S();
   const now = Date.now();
 
-  const orphanHoldings = s.deleteOrphanHoldings.run().changes;
+  const orphanHoldings = await chunkedDelete('wallet_holdings', s.pickOrphanHoldingsRowids);
   // Sweep expired SL re-entry watchlist rows (keep table small).
   try { db().prepare(`DELETE FROM sl_watchlist WHERE expires_at < ? OR consumed = 1`).run(now - 60 * 60 * 1000); } catch {}
   // ML-collection mode: extended retention so labels can resolve and we have
   // enough negative-class data for training. Mints kept 7 days (was 24h),
   // signals kept 7 days (was 6h).
   const staleMintCutoff = now - 7 * 24 * 60 * 60 * 1000;
-  const staleMints = s.deleteStaleMints.run(staleMintCutoff).changes;
+  const staleMints = await chunkedDelete('mints', s.pickStaleMintsRowids, staleMintCutoff);
   const oldSignalCutoff = now - 7 * 24 * 60 * 60 * 1000;
   const oldCopySignals = s.deleteOldCopySignals.run(oldSignalCutoff).changes;
   const oldVolumeSignals = s.deleteOldVolumeSignals.run(oldSignalCutoff).changes;
@@ -69,29 +96,22 @@ function fileSize(path) {
   try { return fs.statSync(path).size; } catch { return 0; }
 }
 
-export function pruneTrades() {
+export async function pruneTrades() {
   const s = S();
-  const d = db();
   const now = Date.now();
   const before = s.countTrades.get().n;
 
   const ruggedCutoff = now - config.maintenance.ruggedRetentionHours * 60 * 60 * 1000;
-  const r1 = s.deleteRuggedTrades.run(ruggedCutoff);
+  const ruggedDeleted = await chunkedDelete('trades', s.pickRuggedTradeRowids, ruggedCutoff);
 
   const quietCutoff = now - config.maintenance.quietRetentionMinutes * 60 * 1000;
-  const r2 = s.deleteQuietTrades.run(quietCutoff);
+  const quietDeleted = await chunkedDelete('trades', s.pickQuietTradeRowids, quietCutoff);
 
   const oldFlagsCutoff = now - 7 * 24 * 60 * 60 * 1000;
-  const r3 = s.deleteOldFlags.run(oldFlagsCutoff);
+  const flagsDeleted = s.deleteOldFlags.run(oldFlagsCutoff).changes;
 
   const after = s.countTrades.get().n;
-  return {
-    ruggedDeleted: r1.changes,
-    quietDeleted: r2.changes,
-    flagsDeleted: r3.changes,
-    tradesBefore: before,
-    tradesAfter: after,
-  };
+  return { ruggedDeleted, quietDeleted, flagsDeleted, tradesBefore: before, tradesAfter: after };
 }
 
 export function vacuumDb() {
