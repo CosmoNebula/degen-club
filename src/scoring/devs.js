@@ -181,13 +181,13 @@ function classifyCreator(c) {
 // stretches to several hours, fine since dev classification rarely
 // changes. The interval is now 4h (was 10min) — way too often before.
 const DEVS_PER_CREATOR_YIELD_MS = 30;
-// Only recompute creators active in the last N days. Creators silent
-// longer than that have stable classification — their launch_count etc.
-// don't change without new activity.
-const DEVS_ACTIVE_WINDOW_DAYS = 7;
+// 6h overlaps the 4h sweep interval generously — any creator with a mint
+// state change in the last 6h gets reclassified by the next sweep. Tighter
+// than 7d (33k) but loose enough that nothing slips between sweep windows.
+const DEVS_ACTIVE_WINDOW_HOURS = 6;
 async function recomputeAllCreatorsAsync() {
   const s = S();
-  const cutoff = Date.now() - DEVS_ACTIVE_WINDOW_DAYS * 86400 * 1000;
+  const cutoff = Date.now() - DEVS_ACTIVE_WINDOW_HOURS * 60 * 60 * 1000;
   const active = s.activeCreators.all(cutoff, cutoff, cutoff);
   for (let i = 0; i < active.length; i++) {
     try { recomputeCreator(active[i].wallet); } catch (err) { console.error('[devs]', err.message); }
