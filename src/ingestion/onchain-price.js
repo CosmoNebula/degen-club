@@ -277,23 +277,40 @@ export function startOnchainPriceFeed() {
   // independently of the global WSS connection). Cost: ~1 Helius credit per
   // stale poll. With ~5 held mints all stale = 5 credits/5s = 3.6k/hr —
   // negligible vs the 10M monthly budget.
+  // 2026-05-14 — aggressive 2s polling for HELD MINTS specifically. Observed
+  // pattern: WSS goes silent during real curve pumps, position monitor reads
+  // frozen prices, FAKE_PUMP fires on coins that actually 2x'd. Stale-only
+  // polling (10s threshold) wasn't catching up reliably either, leading to
+  // multi-position losses (#5155 NICK, #5171 REDCHUD, #5190 FLT, #5204 RECOVER
+  // — all -40% to -73% losses on coins that ran +98% to +129%).
+  //
+  // For HELD mints, poll unconditionally every 2s — don't trust WSS at all.
+  // Cost: ~1800 credits/hr per held mint × typical 5 held = 9k/hr = 6.5M/mo,
+  // under the 10M budget.
+  //
+  // For NON-HELD mints (post-exit watch, etc), keep the stale-only polling.
   setInterval(() => {
     if (!_running || _subs.size === 0) return;
     const d = db();
     const stmt = d.prepare('SELECT last_curve_write_at FROM mints WHERE mint_address = ?');
+    const heldStmt = d.prepare('SELECT 1 FROM paper_positions WHERE mint_address = ? AND status = \'open\' LIMIT 1');
     const now = Date.now();
     for (const [mint, s] of _subs) {
+      if (!s.bondingCurveKey) continue;
+      const isHeld = !!heldStmt.get(mint);
       const row = stmt.get(mint);
       const lastCurve = row?.last_curve_write_at || 0;
-      if (now - lastCurve > 10 * 1000 && s.bondingCurveKey) {
-        // stale — poll directly
+      const ageMs = now - lastCurve;
+      // Held: poll if >2s stale. Non-held: poll if >10s stale.
+      const threshold = isHeld ? 2000 : 10000;
+      if (ageMs > threshold) {
         fetchAccountInfoOnce(s.bondingCurveKey).then(data => {
           if (data) decodeAndUpdate(mint, data);
         }).catch(() => {});
       }
     }
-  }, 5 * 1000);
-  console.log(`[onchain-price] started · ${RPC_WS} · reconcile every ${REFRESH_INTERVAL_MS / 1000}s · stale-WS watchdog 30s/5s · per-sub poll backup 10s/5s`);
+  }, 2 * 1000);
+  console.log(`[onchain-price] started · ${RPC_WS} · reconcile every ${REFRESH_INTERVAL_MS / 1000}s · stale-WS watchdog 30s/5s · held-mint poll 2s, non-held 10s`);
 }
 
 export function stopOnchainPriceFeed() {
