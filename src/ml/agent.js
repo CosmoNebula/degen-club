@@ -48,6 +48,11 @@ const RETIRE_WORST_MIN_TRADES = 10;         // need at least N closed trades bef
 // can still adjust them based on evidence.
 const EMERGENCY_PNL_FRACTION = -999;        // disabled
 const EMERGENCY_MIN_TRADES = 999999;        // disabled
+// 2026-05-14: user is hand-curating the strategy set during the "lock-in"
+// phase. Disable ALL retire paths — orphan, evolutionary, and Claude-consult.
+// Agent can still propose (filtered by readiness) and MODIFY existing recipes
+// via consult; it just can't remove them. Flip to false to restore.
+const STRATEGIES_LOCKED = true;
 
 let stmts = null;
 // Set by maybeProposeStrategy when one or more live strategies are bleeding,
@@ -1830,10 +1835,16 @@ async function maybeRetireStrategies() {
       const result = await evaluateStrategy(recipe, perfStr);
       const decision = result.result;
       if (decision.decision === 'retire') {
-        retireStrategy(st.id, decision.reason);
-        logThought('retire', 'consult', st.id,
-          `retired ${st.id}: ${decision.reason}`, { decision });
-        console.log(`[agent] 🗑️ RETIRED: ${st.id} — ${decision.reason}`);
+        if (STRATEGIES_LOCKED) {
+          logThought('thought', 'consult', st.id,
+            `Claude voted retire on ${st.id} but STRATEGIES_LOCKED — ignoring: ${decision.reason}`, { decision });
+          console.log(`[agent] 🔒 LOCKED — ignored retire vote on ${st.id}: ${decision.reason}`);
+        } else {
+          retireStrategy(st.id, decision.reason);
+          logThought('retire', 'consult', st.id,
+            `retired ${st.id}: ${decision.reason}`, { decision });
+          console.log(`[agent] 🗑️ RETIRED: ${st.id} — ${decision.reason}`);
+        }
       } else if (decision.decision === 'modify' && Array.isArray(decision.modifications) && decision.modifications.length > 0) {
         // Apply each modification to the recipe via dotted-path setter, log audit trail
         let modifiedRecipe = JSON.parse(JSON.stringify(recipe));
@@ -1874,6 +1885,7 @@ async function maybeRetireStrategies() {
 // retiring frees the slot AND gives the agent unambiguous "filters too strict"
 // signal for its next proposal. Returns # of strategies retired this pass.
 function retireOrphans() {
+  if (STRATEGIES_LOCKED) return 0;
   const live = S().liveStrategies.all();
   const now = Date.now();
   const orphans = live
@@ -1916,6 +1928,7 @@ function retireOrphans() {
 // Picks the worst-PnL strategy (≥RETIRE_WORST_MIN_TRADES closed) and retires
 // it to make room for a variant. Survival of the most profitable.
 function maybeMakeRoomForVariant() {
+  if (STRATEGIES_LOCKED) return false;
   const live = S().liveStrategies.all();
   if (live.length < STRATEGY_CAP) return false;
   const now = Date.now();
