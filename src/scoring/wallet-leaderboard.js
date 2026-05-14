@@ -518,16 +518,10 @@ export function startWalletLeaderboard() {
   // 2026-05-13 PM: AUTO_INTERVAL was 2h while the module constant said 30min —
   // log was lying. Unified on RECOMPUTE_INTERVAL_MS (now 15min) so the actual
   // recompute matches what we say. Each pass is ~3s on ~3k candidates.
-  // 2026-05-14: bumped from 60s to 5min — the 13-16s initial recompute
-  // was dropping WSS shortly after boot. Stagger past the early boot
-  // storm so connections stabilize first.
-  setTimeout(() => {
-    try { recomputeAllLeaderboards({ verbose: true }); }
-    catch (err) { console.error('[leaderboard] initial', err.message); }
-  }, 5 * 60 * 1000);
-  setInterval(() => {
-    try { recomputeAllLeaderboards({ verbose: true }); }
-    catch (err) { console.error('[leaderboard] tick', err.message); }
-  }, RECOMPUTE_INTERVAL_MS);
-  console.log(`[leaderboard] started · combined + premig + postmig recompute every ${RECOMPUTE_INTERVAL_MS / 60000}min`);
+  // 2026-05-14: the periodic recompute moved off the main thread into
+  // wallet-leaderboard-worker.js. recomputeAllLeaderboards is still
+  // exported for the manual API trigger in src/server/index.js.
+  // startWalletLeaderboard() is now a no-op — the worker is started
+  // separately from src/index.js.
+  console.log('[leaderboard] in-process scheduler disabled — recompute owned by leaderboard-worker thread');
 }
