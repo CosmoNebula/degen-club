@@ -59,7 +59,7 @@ function S() {
     // mention could be about any of 727 READ mints, not specifically this one.
     symbolHasOtherActiveMints: d.prepare(`
       SELECT COUNT(*) AS n FROM mints
-      WHERE UPPER(symbol) = UPPER(?)
+      WHERE symbol = ? COLLATE NOCASE
         AND mint_address != ?
         AND last_trade_at IS NOT NULL
         AND last_trade_at > ?

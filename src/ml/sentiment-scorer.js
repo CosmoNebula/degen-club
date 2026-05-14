@@ -152,7 +152,7 @@ function S() {
     // to mints that traded within the active window, and skip when ambiguous.
     findActiveMintsBySymbol: d.prepare(`
       SELECT mint_address, last_trade_at FROM mints
-      WHERE UPPER(symbol) = UPPER(?)
+      WHERE symbol = ? COLLATE NOCASE
         AND last_trade_at IS NOT NULL
         AND last_trade_at > ?
         AND COALESCE(rugged, 0) = 0

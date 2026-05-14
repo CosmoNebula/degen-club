@@ -12,6 +12,40 @@ import { db } from './db/index.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HEALTH_PATH = path.resolve(__dirname, '..', 'data', 'health.json');
 
+// 2026-05-14: the 4 COUNT(*) calls below were hitting every 5s and blocking
+// the event loop for 700-1200ms each — pure dashboard data, not load-bearing.
+// Cache for 60s. open_positions and last_trade_at refresh every tick since
+// they're cheap (open count is small; MAX(timestamp) hits the index tail).
+const COUNTS_CACHE_TTL_MS = 60 * 1000;
+let _cachedCounts = null;
+let _cachedAt = 0;
+function getCounts() {
+  const now = Date.now();
+  const d = db();
+  // Hot path: open_positions + last_trade_at every tick (cheap).
+  let hot = {};
+  try {
+    hot = d.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM paper_positions WHERE status='open') AS open_positions,
+        (SELECT MAX(timestamp) FROM trades) AS last_trade_at
+    `).get() || {};
+  } catch { /* leave defaults */ }
+  // Cold path: the 3 full-table COUNT(*) on trades/mints/wallets, every 60s.
+  if (!_cachedCounts || (now - _cachedAt) > COUNTS_CACHE_TTL_MS) {
+    try {
+      _cachedCounts = d.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM trades) AS trades,
+          (SELECT COUNT(*) FROM mints) AS mints,
+          (SELECT COUNT(*) FROM wallets) AS wallets
+      `).get() || {};
+      _cachedAt = now;
+    } catch { _cachedCounts = _cachedCounts || {}; }
+  }
+  return { ..._cachedCounts, ...hot };
+}
+
 export function startHealthHeartbeat({ pp, onchainTrades }) {
   const startedAt = Date.now();
   const tick = () => {
@@ -20,20 +54,7 @@ export function startHealthHeartbeat({ pp, onchainTrades }) {
       const ppStatus = pp?.status?.() || {};
       const ot = onchainTrades || {};
 
-      const counts = (() => {
-        try {
-          const d = db();
-          const r = d.prepare(`
-            SELECT
-              (SELECT COUNT(*) FROM trades) AS trades,
-              (SELECT COUNT(*) FROM mints) AS mints,
-              (SELECT COUNT(*) FROM wallets) AS wallets,
-              (SELECT COUNT(*) FROM paper_positions WHERE status='open') AS open_positions,
-              (SELECT MAX(timestamp) FROM trades) AS last_trade_at
-          `).get();
-          return r || {};
-        } catch { return {}; }
-      })();
+      const counts = getCounts();
 
       const dbFile = (() => {
         try {

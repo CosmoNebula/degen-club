@@ -93,7 +93,7 @@ function S() {
     // can't tell us anything — the buzz could be about a different mint.
     symbolHasOtherActiveMints: d.prepare(`
       SELECT COUNT(*) AS n FROM mints
-      WHERE UPPER(symbol) = UPPER(?)
+      WHERE symbol = ? COLLATE NOCASE
         AND mint_address != ?
         AND last_trade_at IS NOT NULL
         AND last_trade_at > ?

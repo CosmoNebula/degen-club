@@ -290,6 +290,14 @@ function runMigrations(d) {
   d.exec(`CREATE INDEX IF NOT EXISTS idx_creators_category ON creators(category)`);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_creators_score ON creators(reputation_score DESC)`);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_positions_strategy ON paper_positions(strategy)`);
+  // 2026-05-14: case-insensitive index on mints.symbol — the per-mint
+  // "is this symbol shared with other active mints?" disambiguation query
+  // (sentiment-scorer + feature-collector + snapshot-sweeper) was firing
+  // ~5×/sec at 150-220ms each, scanning all 50k+ mint rows because
+  // UPPER(symbol)=UPPER(?) defeats any plain symbol index. Paired with
+  // rewriting the 3 query sites to use `symbol = ? COLLATE NOCASE`, this
+  // collapses each call to <1ms.
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_mints_symbol_nocase ON mints(symbol COLLATE NOCASE)`);
 
   d.exec(`CREATE TABLE IF NOT EXISTS gate_rejections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
