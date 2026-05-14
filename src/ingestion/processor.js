@@ -359,18 +359,32 @@ function onTrade(e) {
       // For NOT-HELD mints: all sources write normally.
       const source = e.source || 'pumpportal';
       const isHeld = isMintHeld(e.mint);
+      // 2026-05-14: smart fallback. The strict onchain-curve / onchain-amm
+      // lock creates a single point of failure — if the primary source's WSS
+      // stalls, position monitor freezes for the full reconnect window.
+      // pump.fun coins can move 50%+ in 30s, so even brief stalls cost real
+      // money. Fallback: if the primary source has been silent on this mint
+      // for >FALLBACK_THRESHOLD_MS, allow helius-tx to write (webhook is
+      // independent of WSS reliability). pumpportal always blocked for held.
+      const FALLBACK_THRESHOLD_MS = 15 * 1000;
+      const lastSrc = mint.last_price_source || '';
+      const lastSrcAt = mint.last_price_source_at || 0;
+      const primaryStale = (now - lastSrcAt) > FALLBACK_THRESHOLD_MS;
       let heldLock = false;
       if (isHeld) {
-        if (!mint.migrated) {
-          // Pre-mig held — onchain-curve is sole writer
-          heldLock = true;
-        } else if (isAmmSubscribed(e.mint)) {
-          // Post-mig held with active onchain-amm — that's sole writer
-          heldLock = true;
+        const primary = !mint.migrated ? 'onchain-curve'
+                      : isAmmSubscribed(e.mint) ? 'onchain-amm'
+                      : null; // no reserve-decoder subscription → helius-tx is canonical
+        if (primary) {
+          // Primary reserve-decoded source is supposed to write.
+          // Block writes EXCEPT: helius-tx as fallback when primary is stale.
+          if (source === 'helius-tx' && (lastSrc !== primary || primaryStale)) {
+            heldLock = false; // smart fallback to helius-tx
+          } else {
+            heldLock = true;
+          }
         } else {
-          // Post-mig held but onchain-amm not subscribed yet (DexScreener pool
-          // address pending, vault fetch in flight, etc) — fall back to
-          // helius-tx, still block pumpportal
+          // No primary (post-mig before AMM sub) — helius-tx canonical, block pumpportal
           heldLock = source !== 'helius-tx';
         }
       }

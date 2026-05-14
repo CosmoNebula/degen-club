@@ -210,21 +210,18 @@ export function startOnchainPriceFeed() {
   _running = true;
   connect();
   setInterval(reconcile, REFRESH_INTERVAL_MS);
-  // Stale-WS watchdog — if no notifications for active subs in 60s, force
-  // reconnect. Held positions rely on onchain-curve as the SOLE price writer
-  // (per the 2026-05-13 PM lock), so a stale WSS = position monitor reading
-  // frozen prices for 60s+ = missing runners and dumps. Tightened from 5min
-  // to 60s. Held mints with ≥1 trade/min should be common; longer silence
-  // = WSS stuck.
+  // Stale-WS watchdog — 30s silence threshold, checked every 5s. Pump.fun
+  // coins move 50%+ in 30s so this is the longest reasonable blind window.
+  // Max total stale = 30s threshold + 5s check interval + ~5s reconnect.
   setInterval(() => {
     if (!_running) return;
     const sinceMsg = Date.now() - _lastMsgAt;
-    if (_subs.size > 0 && sinceMsg > 60 * 1000 && _ws) {
+    if (_subs.size > 0 && sinceMsg > 30 * 1000 && _ws) {
       console.warn(`[onchain-price] STALE — no messages in ${Math.floor(sinceMsg/1000)}s with ${_subs.size} subs, forcing reconnect`);
       try { _ws.terminate(); } catch {}
     }
-  }, 15 * 1000);
-  console.log(`[onchain-price] started · ${RPC_WS} · reconcile every ${REFRESH_INTERVAL_MS / 1000}s · stale-WS watchdog 60s`);
+  }, 5 * 1000);
+  console.log(`[onchain-price] started · ${RPC_WS} · reconcile every ${REFRESH_INTERVAL_MS / 1000}s · stale-WS watchdog 30s/5s`);
 }
 
 export function stopOnchainPriceFeed() {
