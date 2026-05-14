@@ -21,6 +21,15 @@ const _tierLadderWarned = new Set();
 // And for FAST_FAIL/FAKE_PUMP params that go dead after tier1 fires.
 const _fastFailWarned = new Set();
 
+// 2026-05-13: trail-breach confirmation. uAPE got shaken out by a single
+// whale dump that briefly crashed price below the trail floor for ~3
+// seconds, then recovered to +390% above our exit. Map keyed by position id
+// tracks when the trail floor was first breached. Trail exits only fire
+// once the breach has been sustained for TRAIL_CONFIRM_MS. Clears on
+// recovery above floor and on position close.
+const TRAIL_CONFIRM_MS = 3000;
+const _trailBreachStartedAt = new Map();
+
 // Effective paper latency. Defaults to live-measured Helius p90 — replaces the
 // old static config.paper.latencyMs guess. If the dashboard explicitly sets
 // config.paper.latencyMs > 0, that override wins (manual control). Otherwise
@@ -458,6 +467,7 @@ function broadcastEntryToTelegram({ strategy, mintAddress, entryPrice, entrySol,
 
 function finalizePosition(p, exitPrice, exitMcap, exitReason) {
   const s = S();
+  _trailBreachStartedAt.delete(p.id);
   let finalSol;
   if (p.position_mode === 'live') {
     if (_pendingSells.has(p.id)) return;
@@ -1053,6 +1063,23 @@ function checkPosition(p) {
   const peakFloorActive = !!armedLevel;
   const peakFloorExit = armedLevel ? armedLevel.exit : 0;
 
+  // Trail-breach confirmation. Update breach state every tick: if current is
+  // below either trail floor, record/keep the breach start timestamp;
+  // otherwise clear it. Only fire the trail exit once the breach has been
+  // sustained for TRAIL_CONFIRM_MS. Filters out single-tick whale dumps
+  // that immediately recover (uAPE: shaken out 21s after entry, ran to
+  // +390% above our exit moments later).
+  const inTrailBreach =
+    (t3Armed && peakPctRaw <= tier3TrailFloor) ||
+    (postT1TrailFloor !== null && peakPctRaw <= postT1TrailFloor);
+  if (inTrailBreach) {
+    if (!_trailBreachStartedAt.has(p.id)) _trailBreachStartedAt.set(p.id, now);
+  } else {
+    _trailBreachStartedAt.delete(p.id);
+  }
+  const trailBreachConfirmedNow = _trailBreachStartedAt.has(p.id) &&
+    (now - _trailBreachStartedAt.get(p.id)) >= TRAIL_CONFIRM_MS;
+
   if (m.rugged) exitReason = 'RUGGED';
   // 2026-05-13: removed `else if (m.migrated)` auto-exit. With config.moonbag
   // disabled, this line was firing on EVERY migrated position — CUPPY entered
@@ -1061,8 +1088,8 @@ function checkPosition(p) {
   // keep price ticking; smart-SL + spike-guard already defend against
   // migration-moment phantom prices.
   else if ((p.tokens_remaining || 0) <= 0) exitReason = ((strat.tier2_sell_pct || 0) > 0) ? 'TIERED_FULL' : 'TARGET_HIT';
-  else if (t3Armed && peakPctRaw <= tier3TrailFloor) exitReason = 'TP_TRAIL';
-  else if (postT1TrailFloor !== null && peakPctRaw <= postT1TrailFloor) exitReason = 'POST_T1_TRAIL';
+  else if (t3Armed && peakPctRaw <= tier3TrailFloor && trailBreachConfirmedNow) exitReason = 'TP_TRAIL';
+  else if (postT1TrailFloor !== null && peakPctRaw <= postT1TrailFloor && trailBreachConfirmedNow) exitReason = 'POST_T1_TRAIL';
   else if (peakFloorActive && peakPctRaw < peakFloorExit) exitReason = 'PEAK_FLOOR';
   else if (beActive && !trailArmed && peakPctRaw <= (strat.breakeven_floor_pct || 0)) exitReason = 'BREAKEVEN_SL';
   else if (fastFailActive && peakPctRaw <= fastFailSl) exitReason = 'FAST_FAIL';
