@@ -6,6 +6,15 @@ function S() {
   const d = db();
   cached = {
     allCreators: d.prepare('SELECT wallet FROM creators'),
+    // 2026-05-14: only recompute creators with recent activity. Their
+    // classification is derived from launch_count + mint outcomes, which
+    // only change when they LAUNCH a new mint or one of their mints
+    // migrates/rugs. A creator silent for 72h has stale state by definition.
+    activeCreators: d.prepare(`
+      SELECT wallet FROM creators
+      WHERE last_active_at IS NOT NULL
+        AND last_active_at > ?
+    `),
     creatorMints: d.prepare(`
       SELECT mint_address, peak_market_cap_sol, current_market_cap_sol,
              migrated, rugged, flags, created_at, last_trade_at, migrated_at, rugged_at
@@ -167,17 +176,20 @@ function classifyCreator(c) {
 // stretches to several hours, fine since dev classification rarely
 // changes. The interval is now 4h (was 10min) — way too often before.
 const DEVS_PER_CREATOR_YIELD_MS = 30;
+// Only recompute creators active in the last N days. Creators silent
+// longer than that have stable classification — their launch_count etc.
+// don't change without new activity.
+const DEVS_ACTIVE_WINDOW_DAYS = 7;
 async function recomputeAllCreatorsAsync() {
   const s = S();
-  const all = s.allCreators.all();
-  for (let i = 0; i < all.length; i++) {
-    try { recomputeCreator(all[i].wallet); } catch (err) { console.error('[devs]', err.message); }
-    // Yield after every creator. The query itself can be 800ms+, so the
-    // yield lets WSS / heartbeat / live trade processing breathe before
-    // the next creator's SQL fires. Total wall ~hours; bot stays live.
+  const cutoff = Date.now() - DEVS_ACTIVE_WINDOW_DAYS * 86400 * 1000;
+  const active = s.activeCreators.all(cutoff);
+  for (let i = 0; i < active.length; i++) {
+    try { recomputeCreator(active[i].wallet); } catch (err) { console.error('[devs]', err.message); }
+    // Per-creator yield keeps WSS / heartbeat / live processing breathing.
     await new Promise(resolve => setTimeout(resolve, DEVS_PER_CREATOR_YIELD_MS));
   }
-  return all.length;
+  return active.length;
 }
 
 // Sync version retained for the manual CLI path in case anything still
