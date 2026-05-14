@@ -28,10 +28,11 @@ const strategies = [
           { kind: 'snapshot_feature', name: 'pct_first_block_buys', op: '<=', value: 0.25 },
           { kind: 'snapshot_feature', name: 'buy_sell_ratio', op: '>=', value: 1.2 },
           { kind: 'snapshot_feature', name: 'unique_buyers', op: '>=', value: 15 },
-          // Coin-level ML stack — these answer "will this coin pop?" directly
-          { kind: 'ml_prediction', name: 'hits_2x_within_1h', op: '>=', value: 0.40 },
-          { kind: 'ml_prediction', name: 'peaked_100', op: '>=', value: 0.45 },
-          { kind: 'ml_prediction', name: 'peaked_30', op: '>=', value: 0.70 },
+          // Coin-level ML stack — calibrated to actual prob distribution
+          // (means: hits_2x=0.10, peaked_100=0.11, peaked_30=0.19, will_die=0.69)
+          { kind: 'ml_prediction', name: 'hits_2x_within_1h', op: '>=', value: 0.25 },
+          { kind: 'ml_prediction', name: 'peaked_100', op: '>=', value: 0.30 },
+          { kind: 'ml_prediction', name: 'peaked_30', op: '>=', value: 0.50 },
           { kind: 'ml_prediction', name: 'rug_within_5min', op: '<', value: 0.35 },
           { kind: 'ml_prediction', name: 'will_die_fast', op: '<', value: 0.55 },
         ],
@@ -65,17 +66,21 @@ const strategies = [
           { kind: 'snapshot_feature', name: 'has_twitter', op: '>=', value: 1 },
           { kind: 'snapshot_feature', name: 'unique_buyers', op: '>=', value: 30 },
           { kind: 'snapshot_feature', name: 'pct_first_block_buys', op: '<=', value: 0.20 },
-          // ML stack — conviction is proven by 6 models agreeing
-          { kind: 'ml_prediction', name: 'alive_at_1h', op: '>=', value: 0.80 },
-          { kind: 'ml_prediction', name: 'alive_at_4h', op: '>=', value: 0.60 },
-          { kind: 'ml_prediction', name: 'peaked_300', op: '>=', value: 0.55 },
-          { kind: 'ml_prediction', name: 'hits_2x_within_1h', op: '>=', value: 0.55 },
-          { kind: 'ml_prediction', name: 'migrated', op: '>=', value: 0.55 },
-          // Post-migration upside predictor — the new coin-level model
-          { kind: 'ml_prediction', name: 'post_mig_peak_pct', op: '>=', value: 0.55 },
-          { kind: 'ml_prediction', name: 'will_die_fast', op: '<', value: 0.25 },
+          // ML stack — calibrated to actual prob distribution. peaked_300 max
+          // observed = 0.391 so 0.55 was impossible. hits_2x_within_1h max = 0.5.
+          // will_die_fast mean = 0.69 so < 0.30 was nearly impossible.
+          // post_mig_peak_pct is REGRESSION (pct value, not prob) — mean 5.09.
+          { kind: 'ml_prediction', name: 'alive_at_1h', op: '>=', value: 0.45 },
+          { kind: 'ml_prediction', name: 'alive_at_4h', op: '>=', value: 0.25 },
+          { kind: 'ml_prediction', name: 'peaked_300', op: '>=', value: 0.18 },
+          { kind: 'ml_prediction', name: 'peaked_100', op: '>=', value: 0.30 },
+          { kind: 'ml_prediction', name: 'hits_2x_within_1h', op: '>=', value: 0.30 },
+          { kind: 'ml_prediction', name: 'migrated', op: '>=', value: 0.35 },
+          // Post-migration upside predictor (regression: peak % from mig)
+          { kind: 'ml_prediction', name: 'post_mig_peak_pct', op: '>=', value: 3.0 },
+          { kind: 'ml_prediction', name: 'will_die_fast', op: '<', value: 0.40 },
           { kind: 'ml_prediction', name: 'rug_within_5min', op: '<', value: 0.20 },
-          { kind: 'ml_prediction', name: 'post_mig_rugs_1h', op: '<', value: 0.25 },
+          { kind: 'ml_prediction', name: 'post_mig_rugs_1h', op: '<', value: 0.040 },
         ],
         max_mint_age_sec: 300,
       },
@@ -110,9 +115,9 @@ const strategies = [
           { kind: 'snapshot_feature', name: 'unique_buyers', op: '>=', value: 20 },
           { kind: 'snapshot_feature', name: 'buy_sell_ratio', op: '>=', value: 1.1 },
           { kind: 'snapshot_feature', name: 'pct_sniper_buys', op: '<=', value: 0.40 },
-          // Coin-level ML — staying-power confirmation for a swing hold
-          { kind: 'ml_prediction', name: 'alive_at_1h', op: '>=', value: 0.55 },
-          { kind: 'ml_prediction', name: 'peaked_100', op: '>=', value: 0.30 },
+          // Coin-level ML — calibrated to actual distribution
+          { kind: 'ml_prediction', name: 'alive_at_1h', op: '>=', value: 0.30 },
+          { kind: 'ml_prediction', name: 'peaked_100', op: '>=', value: 0.20 },
           { kind: 'ml_prediction', name: 'rug_within_5min', op: '<', value: 0.40 },
         ],
         max_mint_age_sec: 1800,
