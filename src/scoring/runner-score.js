@@ -35,10 +35,19 @@ function S() {
       FROM trades
       WHERE mint_address = ?
     `),
+    // 2026-05-14: window function over all buys for a mint was 1.2-1.4s
+    // each, fired 1× per scored candidate → loop-saturating. We only care
+    // if the answer is ≤ FIRE_MAX_TRADES_TO_5 (=25); a value of "30+" tells
+    // us the same thing as "5000". Limit the inner scan to 30 rows. If
+    // cum_sol < 5 at row 30, we don't fire anyway (over threshold).
     tradesTo5SOL: d.prepare(`
       SELECT COUNT(*) AS n FROM (
-        SELECT timestamp, SUM(sol_amount) OVER (ORDER BY timestamp) AS cum_sol
-        FROM trades WHERE mint_address = ? AND is_buy = 1
+        SELECT SUM(sol_amount) OVER (ORDER BY timestamp) AS cum_sol
+        FROM (
+          SELECT timestamp, sol_amount FROM trades
+          WHERE mint_address = ? AND is_buy = 1
+          ORDER BY timestamp ASC LIMIT 30
+        )
       ) WHERE cum_sol < 5
     `),
     nonBotFraction: d.prepare(`
