@@ -66,6 +66,19 @@ function S() {
       (signature, mint_address, wallet, is_buy, sol_amount, token_amount, price_sol, market_cap_sol,
        seconds_from_creation, is_sniper, is_first_block, buyer_rank, wallet_label, timestamp, is_junk)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    // 2026-05-14: peak_market_cap_sol DROPPED from the trade-driven update.
+    // Trade-implied prices (pumpportal AND helius-tx) can be polluted by MEV
+    // sandwich victims, off-pool quotes, and AMM router quirks that the
+    // dust/spike/stale/reserve-mismatch filters can't catch when reserve
+    // data is older than RESERVE_FRESH_MS (HUMANITAS: peak hit 1208 SOL from
+    // a 0.022-SOL trade ~3min after the last BC write, real chart peak ~470).
+    // Peak is now a reserve-only quantity — written exclusively by:
+    //   - src/ingestion/onchain-price.js (BC reserve decoder, pre-mig)
+    //   - src/ingestion/onchain-amm-price.js (pump-amm reserve decoder, post-mig held)
+    //   - src/ingestion/dexscreener.js (reserve-derived aggregator polling)
+    //   - src/ingestion/migrated-tracker.js (post-mig AMM polling)
+    // Tradeoff: peak lags by up to one reserve-poll interval, but never
+    // records phantom moves. Accuracy beats freshness for peak tracking.
     updateMintOnTrade: d.prepare(`UPDATE mints SET
         current_market_cap_sol = ?,
         last_price_sol = ?,
@@ -73,7 +86,6 @@ function S() {
         v_tokens_in_curve = ?,
         trade_count = trade_count + 1,
         last_trade_at = ?,
-        peak_market_cap_sol = MAX(peak_market_cap_sol, ?),
         last_price_source = ?,
         last_price_source_at = ?
       WHERE mint_address = ?`),
@@ -407,7 +419,7 @@ function onTrade(e) {
       if (!heldLock) {
         s.updateMintOnTrade.run(
           mcapSol, priceSol || 0, e.vSolInBondingCurve || 0, e.vTokensInBondingCurve || 0,
-          now, mcapSol, source, now, e.mint
+          now, source, now, e.mint
         );
       }
     }
