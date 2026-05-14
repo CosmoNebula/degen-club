@@ -326,6 +326,11 @@ function runMigrations(d) {
   // creator_wallet filter was a 178k-row mints tablescan per creator;
   // index makes it O(1). Drops bundleOverlap from ~800ms to <50ms.
   d.exec(`CREATE INDEX IF NOT EXISTS idx_mints_creator ON mints(creator_wallet)`);
+  // Partial index on KOL wallets only — agent-market-regime's KOL-active
+  // count query was tablescanning trades for is_kol matches (5.5s). With
+  // <200 KOL wallets total, partial index keeps it tiny and lets the
+  // planner start from the KOL set then join to trades.
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_wallets_kol ON wallets(address) WHERE is_kol = 1`);
 
   d.exec(`CREATE TABLE IF NOT EXISTS gate_rejections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
