@@ -144,30 +144,8 @@ export function dbStats() {
 }
 
 export function startMaintenance() {
-  setTimeout(() => {
-    try {
-      const r = pruneTrades();
-      console.log(`[maintenance] startup prune: rugged=${r.ruggedDeleted} quiet=${r.quietDeleted} flags=${r.flagsDeleted} trades ${r.tradesBefore}→${r.tradesAfter}`);
-      const a = pruneAuxData();
-      console.log(`[maintenance] startup aux: orphan_holdings=${a.orphanHoldings} stale_mints=${a.staleMints} copy_signals=${a.oldCopySignals} volume_signals=${a.oldVolumeSignals}`);
-    } catch (err) {
-      console.error('[maintenance] startup', err.message);
-    }
-  }, config.maintenance.startupDelayMs);
-
-  setInterval(() => {
-    try {
-      const r = pruneTrades();
-      if (r.ruggedDeleted + r.quietDeleted + r.flagsDeleted > 0) {
-        console.log(`[maintenance] sweep: rugged=${r.ruggedDeleted} quiet=${r.quietDeleted} flags=${r.flagsDeleted} trades ${r.tradesBefore}→${r.tradesAfter}`);
-      }
-      const a = pruneAuxData();
-      const auxTotal = a.orphanHoldings + a.staleMints + a.oldCopySignals + a.oldVolumeSignals;
-      if (auxTotal > 0) {
-        console.log(`[maintenance] aux: orphan_holdings=${a.orphanHoldings} stale_mints=${a.staleMints} copy_signals=${a.oldCopySignals} volume_signals=${a.oldVolumeSignals}`);
-      }
-    } catch (err) {
-      console.error('[maintenance]', err.message);
-    }
-  }, config.maintenance.intervalMs);
+  // 2026-05-14: scheduler moved off main thread to maintenance-worker.js.
+  // pruneTrades + pruneAuxData stay exported for the worker. No-op here
+  // so index.js doesn't need a wiring change; worker is started separately.
+  console.log('[maintenance] in-process scheduler disabled — sweep owned by maintenance-worker thread');
 }
