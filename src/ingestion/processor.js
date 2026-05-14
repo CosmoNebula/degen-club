@@ -366,29 +366,25 @@ function onTrade(e) {
       // money. Fallback: if the primary source has been silent on this mint
       // for >FALLBACK_THRESHOLD_MS, allow helius-tx to write (webhook is
       // independent of WSS reliability). pumpportal always blocked for held.
-      const FALLBACK_THRESHOLD_MS = 15 * 1000;
-      // Use last_curve_write_at (updated ONLY by onchain-curve / onchain-amm,
-      // never by helius-tx) for the staleness check. If we used the global
-      // last_price_source_at, helius-tx fallback writes would touch it and
-      // self-perpetuate the fallback forever — locking the held-mint price
-      // feed onto trade-derived data even after onchain-curve resumed.
-      const curveWriteAt = mint.last_curve_write_at || 0;
-      const primaryStale = (now - curveWriteAt) > FALLBACK_THRESHOLD_MS;
+      // STRICT held-mint lock — no helius-tx fallback for pre-mig held.
+      // Trade-derived prices kept letting off-curve MEV manipulation
+      // through (e.g., 0.046 SOL buys with implied prices 2-3x real BC
+      // state). These slip past both dust (>=0.02 SOL) and spike-up
+      // (<5x ratio) filters. Result: phantom peaks recorded into
+      // highest_pct. Brief WSS staleness (up to ~35s on reconnect) is
+      // preferable to permanently corrupted peak tracking.
+      //
+      // Pre-mig held: onchain-curve sole writer. Block everything else.
+      // Post-mig held: onchain-amm if subscribed; else helius-tx fallback
+      //   (no reserve decoder available, must accept trade-derived).
       let heldLock = false;
       if (isHeld) {
-        const primary = !mint.migrated ? 'onchain-curve'
-                      : isAmmSubscribed(e.mint) ? 'onchain-amm'
-                      : null;
-        if (primary) {
-          // Helius-tx is allowed as fallback ONLY when the reserve-decoder
-          // is actually stale. Once it fires again, primaryStale flips false
-          // on the next trade evaluation and helius-tx is blocked again.
-          if (source === 'helius-tx' && primaryStale) {
-            heldLock = false;
-          } else {
-            heldLock = true;
-          }
+        if (!mint.migrated) {
+          heldLock = true; // pre-mig: STRICT, onchain-curve only
+        } else if (isAmmSubscribed(e.mint)) {
+          heldLock = true; // post-mig with onchain-amm: STRICT
         } else {
+          // post-mig before AMM subscribes: helius-tx canonical, block pumpportal
           heldLock = source !== 'helius-tx';
         }
       }
