@@ -22,6 +22,7 @@
 import { db } from '../db/index.js';
 import { getSolUsd } from '../price.js';
 import { pickPool } from './pool-picker.js';
+import { isMintHeld } from '../trading/held-mints.js';
 
 const TICK_INTERVAL_MS = 60 * 1000;             // every 60s — poll a fresh batch
 const FIRST_RUN_DELAY_MS = 90 * 1000;
@@ -124,6 +125,14 @@ async function fetchPool(mintAddress, preferredPoolAddress = null) {
 }
 
 async function pollOne(mintAddress) {
+  // Helius-only lock for held mints: skip DexScreener poll entirely.
+  // The held-mint Helius webhook subscription provides every trade in real-
+  // time via helius-tx — DexScreener polling would just add source-switching
+  // noise to mints.last_price_sol while we have a position open.
+  if (isMintHeld(mintAddress)) {
+    S().markRefreshed.run(Date.now(), mintAddress);
+    return false;
+  }
   // Pin to amm_pool_address once selected so we don't flip venues between
   // refreshes (each flip causes a price gap that fires our spike guards).
   const pinnedRow = db().prepare(

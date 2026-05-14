@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { getSolUsd } from '../price.js';
 import { heliusWS } from './helius.js';
 import { pickPool } from './pool-picker.js';
+import { isMintHeld } from '../trading/held-mints.js';
 
 let stmts = null;
 function S() {
@@ -53,6 +54,11 @@ export async function fetchDexscreenerPrice(mintAddress, preferredPoolAddress = 
 const PRICE_FLOOR_SOL = 1e-9;
 
 async function refreshMintPrice(mintAddress) {
+  // Helius-only lock: if we hold this mint, skip the DexScreener refresh
+  // entirely. The held-mint webhook subscription (helius-tx) captures every
+  // trade in real-time, so DexScreener polling would just add source-switching
+  // noise to mints.last_price_sol.
+  if (isMintHeld(mintAddress)) return null;
   // Look up any pinned pool from open moonbags so the picker can keep us on
   // the same venue across refreshes (avoids the "flip-flop between pump-amm
   // and raydium" problem we hit during migration handoffs).

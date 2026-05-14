@@ -14,6 +14,7 @@ import { trackBuyer, checkVelocityRunnerProfile, markFired } from '../scoring/co
 import { getIngestionPaused } from '../ml/disk-monitor.js';
 import { updateMigratorStatsForMint } from '../scoring/migrator-stats.js';
 import { triggerWebhookResync } from './helius-webhooks.js';
+import { isMintHeld } from '../trading/held-mints.js';
 
 const cashbackInflight = new Set();
 export function ensureCashback(mintAddress, bondingCurveKey, currentValue) {
@@ -332,10 +333,19 @@ function onTrade(e) {
         _junkDropLastLog = now;
       }
     } else {
-      s.updateMintOnTrade.run(
-        mcapSol, priceSol || 0, e.vSolInBondingCurve || 0, e.vTokensInBondingCurve || 0,
-        now, mcapSol, e.source || 'pumpportal', now, e.mint
-      );
+      // Helius-only lock for held mints: if we hold this mint, allow only
+      // Helius-sourced writers (helius-tx + onchain-curve via Solana WSS).
+      // pumpportal events still get the trade row inserted for history but
+      // don't touch mints.last_price_sol — keeps the position monitor's
+      // price feed coherent without source-switching noise.
+      const source = e.source || 'pumpportal';
+      const heldHeliusLock = isMintHeld(e.mint) && source !== 'helius-tx';
+      if (!heldHeliusLock) {
+        s.updateMintOnTrade.run(
+          mcapSol, priceSol || 0, e.vSolInBondingCurve || 0, e.vTokensInBondingCurve || 0,
+          now, mcapSol, source, now, e.mint
+        );
+      }
     }
 
     if (isBuy) {

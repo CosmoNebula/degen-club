@@ -4,6 +4,7 @@ import { isLiveMode } from './wallet.js';
 import { getMedianLatency, getPriorityFeeSol } from '../scoring/live-conditions.js';
 import { estimateBuyFriction, estimateSellFriction } from '../scoring/mint-microstructure.js';
 import { triggerWebhookResync } from '../ingestion/helius-webhooks.js';
+import { addHeldMint, removeHeldMint } from './held-mints.js';
 import { Worker, isMainThread } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -312,6 +313,7 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
     );
     const positionId = result.lastInsertRowid;
     db().prepare("UPDATE paper_positions SET position_mode = 'live', pending_fill = 1 WHERE id = ?").run(positionId);
+    addHeldMint(mintAddress);
     triggerWebhookResync();
     if (entryScore && entryScore !== 1.0) {
       db().prepare('UPDATE paper_positions SET entry_score = ? WHERE id = ?').run(entryScore, positionId);
@@ -358,6 +360,7 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
     );
     const positionId = insertResult.lastInsertRowid;
     db().prepare("UPDATE paper_positions SET pending_fill = 1 WHERE id = ?").run(positionId);
+    addHeldMint(mintAddress);
     triggerWebhookResync();
     if (entryScore && entryScore !== 1.0) {
       db().prepare('UPDATE paper_positions SET entry_score = ? WHERE id = ?').run(entryScore, positionId);
@@ -436,6 +439,7 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
     fillPrice, entrySol, tokenAmount, tokenAmount, entryMcap || 0, now, now
   );
   s.bumpOpened.run(strategy);
+  addHeldMint(mintAddress);
   triggerWebhookResync();
   if (entryScore && entryScore !== 1.0) {
     db().prepare('UPDATE paper_positions SET entry_score = ? WHERE id = ?').run(entryScore, result.lastInsertRowid);
@@ -486,6 +490,7 @@ function finalizePosition(p, exitPrice, exitMcap, exitReason) {
       if (pnlSol > 0) s.bumpWin.run(pnlSol, p.strategy);
       else if (pnlSol < 0) s.bumpLoss.run(pnlSol, p.strategy);
       else s.bumpFlat.run(pnlSol, p.strategy);
+      removeHeldMint(p.mint_address);
       triggerWebhookResync();
       console.log(`[live] CLOSE ${p.strategy} on ${p.mint_address.slice(0,8)}… ${exitReason} ${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL (${(pnlPct*100).toFixed(1)}%) tx=${r.txSig?.slice(0,8) || 'none'}`);
     }).catch(err => console.error('[live] close failed', err.message))
@@ -506,6 +511,7 @@ function finalizePosition(p, exitPrice, exitMcap, exitReason) {
   if (realizedPnlSol > 0) s.bumpWin.run(realizedPnlSol, p.strategy);
   else if (realizedPnlSol < 0) s.bumpLoss.run(realizedPnlSol, p.strategy);
   else s.bumpFlat.run(realizedPnlSol, p.strategy);
+  removeHeldMint(p.mint_address);
   triggerWebhookResync();
   console.log(`[paper] CLOSE ${p.strategy} on ${p.mint_address.slice(0, 8)}… ${exitReason} ${realizedPnlSol >= 0 ? '+' : ''}${realizedPnlSol.toFixed(4)} SOL (${(realizedPnlPct * 100).toFixed(1)}%)`);
 
