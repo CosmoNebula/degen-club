@@ -84,8 +84,8 @@ function analyzeTrading(startTs) {
 
   const positions = d.prepare(`
     SELECT id, mint_address, strategy, status, entered_at, exited_at,
-           entry_price_sol, entry_mcap_sol, peak_mcap_sol, exit_price_sol, exit_mcap_sol,
-           realized_pnl_sol, exit_reason, highest_pct, sol_invested
+           entry_price, entry_mcap_sol, exit_price, exit_mcap_sol,
+           realized_pnl_sol, realized_pnl_pct, exit_reason, highest_pct, entry_sol
     FROM paper_positions
     WHERE entered_at >= ?
     ORDER BY entered_at ASC
@@ -104,7 +104,7 @@ function analyzeTrading(startTs) {
     byStrategy[k].closed++;
     if ((p.realized_pnl_sol || 0) > 0) byStrategy[k].wins++;
     byStrategy[k].pnl_sol += p.realized_pnl_sol || 0;
-    byStrategy[k].total_invested += p.sol_invested || 0;
+    byStrategy[k].total_invested += p.entry_sol || 0;
   }
 
   // Exit reason breakdown
@@ -141,8 +141,7 @@ function analyzePriceAccuracy(startTs) {
   // the position as suspect (we're recording a phantom peak).
   const rows = d.prepare(`
     SELECT id, mint_address, strategy, entered_at, exited_at,
-           entry_price_sol, peak_mcap_sol, exit_price_sol,
-           highest_pct, realized_pnl_sol
+           entry_price, exit_price, highest_pct, realized_pnl_sol
     FROM paper_positions
     WHERE status = 'closed' AND entered_at >= ?
   `).all(startTs);
@@ -161,9 +160,9 @@ function analyzePriceAccuracy(startTs) {
   for (const p of rows) {
     if (!p.entered_at || !p.exited_at) continue;
     const real = realPeakStmt.get(p.mint_address, p.entered_at, p.exited_at);
-    if (!real || !real.real_peak || !p.entry_price_sol) continue;
+    if (!real || !real.real_peak || !p.entry_price) continue;
     checked++;
-    const realPeakPct = ((real.real_peak / p.entry_price_sol) - 1) * 100;
+    const realPeakPct = ((real.real_peak / p.entry_price) - 1) * 100;
     const recordedPeakPct = p.highest_pct || 0;
     const diff = recordedPeakPct - realPeakPct;
     if (Math.abs(diff) > 20) {
