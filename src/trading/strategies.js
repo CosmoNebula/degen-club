@@ -206,6 +206,7 @@ function strategiesForTrigger(trigger) {
 // the agent's raw rationale. Only used for agent_* strategies; built-in ones
 // keep their hand-written descriptions.
 const COND_LABELS = {
+  // ML prediction targets (probabilities 0-1, rendered as %)
   migrated: 'ML thinks it\'ll graduate',
   migrates_within_15min: 'ML thinks it\'ll graduate in <15min',
   will_die_fast: 'ML thinks it WON\'T die fast',
@@ -214,39 +215,72 @@ const COND_LABELS = {
   peaked_100: 'ML thinks ≥100% peak coming',
   peaked_300: 'ML thinks ≥300% peak coming',
   hits_2x_within_1h: 'ML thinks 2x within 1hr',
+  alive_at_1h: 'ML thinks alive at 1hr',
+  alive_at_4h: 'ML thinks alive at 4hr',
   peak_pct_max: 'ML predicts peak gain',
   drawdown_from_peak_pct: 'Not already past peak',
   time_to_peak_sec: 'ML predicts time-to-peak',
   post_mig_hits_2x: 'ML thinks 2x post-mig',
-  post_mig_peak_pct: 'ML predicts post-mig peak',
+  post_mig_peak_pct: 'ML thinks big post-mig pump',
   post_mig_rugs_1h: 'ML thinks low post-mig rug risk',
+  // Coin-level snapshot features
   tracked_buyers: 'tracked wallets in',
   kol_buyers: 'KOL wallets in',
   top50_buyers: 'top-50 wallets in',
+  bundle_buyers: 'bundle wallets in',
+  unique_buyers: 'unique buyers',
   creator_sells_post_launch: 'creator hasn\'t dumped',
   last_mcap_sol: 'mcap',
   buy_count: 'buys',
+  buy_sell_ratio: 'buy/sell ratio',
+  pct_sniper_buys: 'sniper-buy %',
+  pct_first_block_buys: 'first-block-buy %',
+  top1_buyer_sol_pct: 'top whale %',
+  inflow_accel_pct: 'inflow acceleration',
+  has_twitter: 'has Twitter',
+  has_telegram: 'has Telegram',
+  has_website: 'has website',
+  // Sentiment metrics (kind=sentiment uses c.metric not c.name)
+  bull_mentions: 'Claude: bullish mentions',
+  bear_mentions: 'Claude: bearish mentions',
+  shill_mentions: 'Claude: shill mentions',
+  total_mentions: 'Claude: total mentions',
+  sum_confidence: 'Claude sentiment confidence',
 };
+// ML targets get rendered as %, distribution-pct features as %, raw counts as numbers.
+const PCT_PROB_FIELDS = new Set([
+  'migrated', 'will_die_fast', 'rug_within_5min', 'peaked_30', 'peaked_100',
+  'peaked_300', 'hits_2x_within_1h', 'migrates_within_15min', 'post_mig_hits_2x',
+  'post_mig_rugs_1h', 'post_mig_peak_pct', 'drawdown_from_peak_pct',
+  'alive_at_1h', 'alive_at_4h',
+]);
+const PCT_FRAC_FIELDS = new Set([
+  'pct_sniper_buys', 'pct_first_block_buys', 'top1_buyer_sol_pct',
+  'inflow_accel_pct', 'buy_sell_ratio',
+]);
 function fmtThreshold(name, op, value) {
-  const isPct = op === '<' || op === '<=' || op === '>' || op === '>=' ;
-  if (name === 'migrated' || name === 'will_die_fast' || name === 'rug_within_5min' ||
-      name === 'peaked_30' || name === 'peaked_100' || name === 'peaked_300' ||
-      name === 'hits_2x_within_1h' || name === 'migrates_within_15min' ||
-      name === 'post_mig_hits_2x' || name === 'post_mig_rugs_1h' || name === 'drawdown_from_peak_pct') {
-    return `${(value * 100).toFixed(0)}%`;
-  }
+  if (PCT_PROB_FIELDS.has(name)) return `${(value * 100).toFixed(0)}%`;
+  if (PCT_FRAC_FIELDS.has(name) && Math.abs(value) <= 1) return `${(value * 100).toFixed(0)}%`;
   return String(value);
 }
 function humanizeRecipe(recipe) {
   const conds = recipe?.entry?.conditions || [];
   const lines = [];
   for (const c of conds) {
-    const lbl = COND_LABELS[c.name] || c.name;
-    const dir = (c.op === '<' || c.op === '<=') ? 'below' : (c.op === '>' || c.op === '>=' ? 'above' : 'at');
-    const val = fmtThreshold(c.name, c.op, c.value);
-    // Pretty form: "ML thinks it'll graduate (≥30%)", "creator hasn't dumped (=0)"
-    const opSym = c.op;
-    lines.push(`• ${lbl} (${opSym}${val})`);
+    // sentiment kind uses c.metric; narrative_match has no specific field name
+    let key = c.name;
+    if (!key && c.kind === 'sentiment') key = c.metric;
+    if (!key && c.kind === 'narrative_match') key = 'narrative_match';
+    if (!key && c.kind === 'composite_score') key = 'composite_score';
+    if (!key && c.kind === 'creator_stat') key = c.name || 'creator_stat';
+    const labelOverride = {
+      narrative_match: 'matches active narrative',
+      composite_score: 'composite score',
+      creator_stat: 'creator stat',
+    };
+    const lbl = labelOverride[key] || COND_LABELS[key] || key || c.kind || 'condition';
+    const val = fmtThreshold(key, c.op, c.value);
+    lines.push(`• ${lbl} (${c.op}${val})`);
   }
   const minAge = recipe?.entry?.min_mint_age_sec || 0;
   const maxAge = recipe?.entry?.max_mint_age_sec;
