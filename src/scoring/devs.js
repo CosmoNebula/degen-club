@@ -161,23 +161,21 @@ function classifyCreator(c) {
 }
 
 // 2026-05-14: was a tight for-loop over ~34k creators with a JOIN-heavy
-// SQL query per iteration. Single sweep = 30-60 min of solid main-thread
-// blocking, wedging WSS connections and stalling everything. Now yields
-// to the event loop after each BATCH so other I/O can be serviced.
-const DEVS_BATCH_SIZE = 50;
-const DEVS_BATCH_YIELD_MS = 25;
+// SQL query (800ms each) per iteration. Even with batched yielding, 50
+// creators × 800ms = 40s of solid blocking per batch. Now yields after
+// EACH creator with 30ms gap → max single block ~830ms. Total wall time
+// stretches to several hours, fine since dev classification rarely
+// changes. The interval is now 4h (was 10min) — way too often before.
+const DEVS_PER_CREATOR_YIELD_MS = 30;
 async function recomputeAllCreatorsAsync() {
   const s = S();
   const all = s.allCreators.all();
-  for (let i = 0; i < all.length; i += DEVS_BATCH_SIZE) {
-    const batch = all.slice(i, i + DEVS_BATCH_SIZE);
-    for (const r of batch) {
-      try { recomputeCreator(r.wallet); } catch (err) { console.error('[devs]', err.message); }
-    }
-    // Yield: 25ms between batches lets the event loop service WSS, fetches,
-    // setInterval ticks. Total sweep wall-time stretches longer but the
-    // bot stays responsive throughout.
-    await new Promise(resolve => setTimeout(resolve, DEVS_BATCH_YIELD_MS));
+  for (let i = 0; i < all.length; i++) {
+    try { recomputeCreator(all[i].wallet); } catch (err) { console.error('[devs]', err.message); }
+    // Yield after every creator. The query itself can be 800ms+, so the
+    // yield lets WSS / heartbeat / live trade processing breathe before
+    // the next creator's SQL fires. Total wall ~hours; bot stays live.
+    await new Promise(resolve => setTimeout(resolve, DEVS_PER_CREATOR_YIELD_MS));
   }
   return all.length;
 }
@@ -200,9 +198,12 @@ export function startDevSweep() {
       .catch(err => console.error('[devs] initial', err.message));
   }, 8000);
 
+  // Was 10min; dev classification changes slowly (launch_count, migrated_count
+  // accumulate over days). 4h is plenty fresh and gives the per-creator
+  // yielding plenty of headroom between sweeps.
   setInterval(() => {
     recomputeAllCreatorsAsync()
       .then(n => { if (n > 0) console.log(`[devs] recomputed ${n} creators (batched)`); })
       .catch(err => console.error('[devs] sweep', err.message));
-  }, 10 * 60 * 1000);
+  }, 4 * 60 * 60 * 1000);
 }
