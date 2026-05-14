@@ -24,7 +24,47 @@ export function init() {
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   _db.exec(schema);
   runMigrations(_db);
+  // 2026-05-14: slow-query instrumentation. better-sqlite3 is synchronous,
+  // so any single .run/.all/.get/.iterate/.exec >SLOW_QUERY_MS is a stretch
+  // of frozen event loop. Wrap prepare() and exec() so we log offenders.
+  // Removable in one diff once we've identified the hot queries.
+  instrumentSlowQueries(_db);
   return _db;
+}
+
+const SLOW_QUERY_MS = 150;
+function instrumentSlowQueries(d) {
+  const origPrepare = d.prepare.bind(d);
+  d.prepare = (sql) => {
+    const stmt = origPrepare(sql);
+    const sqlStr = String(sql).replace(/\s+/g, ' ').slice(0, 140);
+    for (const method of ['run', 'all', 'get', 'iterate']) {
+      if (typeof stmt[method] !== 'function') continue;
+      const orig = stmt[method].bind(stmt);
+      stmt[method] = (...args) => {
+        const t0 = process.hrtime.bigint();
+        const out = orig(...args);
+        const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+        if (ms >= SLOW_QUERY_MS) {
+          console.log(`[slow-sql] ${ms.toFixed(0)}ms .${method}() :: ${sqlStr}`);
+        }
+        return out;
+      };
+    }
+    return stmt;
+  };
+  const origExec = d.exec.bind(d);
+  d.exec = (sql) => {
+    const sqlStr = String(sql).replace(/\s+/g, ' ').slice(0, 140);
+    const t0 = process.hrtime.bigint();
+    const out = origExec(sql);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    if (ms >= SLOW_QUERY_MS) {
+      console.log(`[slow-sql] ${ms.toFixed(0)}ms .exec() :: ${sqlStr}`);
+    }
+    return out;
+  };
+  console.log(`[slow-sql] instrumentation armed · threshold ${SLOW_QUERY_MS}ms`);
 }
 
 function ensureCol(d, table, name, def) {
