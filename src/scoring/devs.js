@@ -209,11 +209,14 @@ export function recomputeAllCreators() {
 }
 
 export function startDevSweep() {
+  // 2026-05-14: bumped initial from 8s to 3min — boot storm was firing
+  // devs + bundle + leaderboard + archive all together in the first
+  // 30s, dropping WSS for 30-60s post-restart. Stagger them apart.
   setTimeout(() => {
     recomputeAllCreatorsAsync()
       .then(n => console.log(`[devs] initial classification: ${n} creators (batched)`))
       .catch(err => console.error('[devs] initial', err.message));
-  }, 8000);
+  }, 3 * 60 * 1000);
 
   // Was 10min; dev classification changes slowly (launch_count, migrated_count
   // accumulate over days). 4h is plenty fresh and gives the per-creator

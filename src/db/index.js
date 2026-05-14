@@ -331,6 +331,10 @@ function runMigrations(d) {
   // <200 KOL wallets total, partial index keeps it tiny and lets the
   // planner start from the KOL set then join to trades.
   d.exec(`CREATE INDEX IF NOT EXISTS idx_wallets_kol ON wallets(address) WHERE is_kol = 1`);
+  // wallet_holdings cleanup's NOT EXISTS was tablescanning wallet_holdings
+  // (~millions of rows) at ~3s. With this index, the WHERE NOT EXISTS
+  // anti-join becomes a seek per row → sub-100ms.
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_wallet_holdings_wallet ON wallet_holdings(wallet)`);
 
   d.exec(`CREATE TABLE IF NOT EXISTS gate_rejections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -534,12 +534,18 @@ function onMigrate(e) {
     s.migrate.run(now, target, target, e.mint);
     const mint = s.getMint.get(e.mint);
     if (mint && mint.creator_wallet) s.bumpMigrated.run(mint.creator_wallet);
-    try {
-      const r = updateMigratorStatsForMint(e.mint);
-      if (r.updated > 0) console.log(`[migrator-stats] ${e.mint.slice(0,8)}… migrated → updated ${r.updated}/${r.wallets} wallets`);
-    } catch (err) {
-      console.error('[migrator-stats] update', err.message);
-    }
+    // 2026-05-14: was firing inline on every migration — 6-7s blocking
+    // query that dropped WSS every time a mint migrated. Defer to next
+    // tick so migration event handler unblocks; daily backfill cron via
+    // bin/migrator-stats.js handles deeper consistency.
+    setImmediate(() => {
+      try {
+        const r = updateMigratorStatsForMint(e.mint);
+        if (r.updated > 0) console.log(`[migrator-stats] ${e.mint.slice(0,8)}… migrated → updated ${r.updated}/${r.wallets} wallets`);
+      } catch (err) {
+        console.error('[migrator-stats] update', err.message);
+      }
+    });
   } catch (err) {
     console.error('[processor] migrate', err.message);
   }

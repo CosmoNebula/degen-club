@@ -518,10 +518,13 @@ export function startWalletLeaderboard() {
   // 2026-05-13 PM: AUTO_INTERVAL was 2h while the module constant said 30min —
   // log was lying. Unified on RECOMPUTE_INTERVAL_MS (now 15min) so the actual
   // recompute matches what we say. Each pass is ~3s on ~3k candidates.
+  // 2026-05-14: bumped from 60s to 5min — the 13-16s initial recompute
+  // was dropping WSS shortly after boot. Stagger past the early boot
+  // storm so connections stabilize first.
   setTimeout(() => {
     try { recomputeAllLeaderboards({ verbose: true }); }
     catch (err) { console.error('[leaderboard] initial', err.message); }
-  }, 60 * 1000);
+  }, 5 * 60 * 1000);
   setInterval(() => {
     try { recomputeAllLeaderboards({ verbose: true }); }
     catch (err) { console.error('[leaderboard] tick', err.message); }

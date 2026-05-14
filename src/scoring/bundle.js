@@ -113,6 +113,9 @@ export function detectBundles() {
 }
 
 export function startBundleSweep() {
+  // 2026-05-14: bumped initial from 15s to 2min — first sweep is the
+  // heaviest (cold page cache) and was overlapping with leaderboard /
+  // devs at boot. Spreads the post-restart burst.
   setTimeout(() => {
     try {
       const r = detectBundles();
@@ -120,7 +123,7 @@ export function startBundleSweep() {
     } catch (err) {
       console.error('[bundle] initial', err.message);
     }
-  }, 15000);
+  }, 2 * 60 * 1000);
 
   setInterval(() => {
     try {
