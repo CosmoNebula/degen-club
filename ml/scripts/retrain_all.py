@@ -42,8 +42,10 @@ TARGETS = [
     # strategies.
     {'name': 'hits_2x_within_1h',     'out': 'models/hits_2x_within_1h_v1.pkl',     'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
     # Regressions
-    {'name': 'peak_pct_max',           'out': 'models/peak_pct_max_v1.pkl',           'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
-    {'name': 'time_to_peak_sec',       'out': 'models/time_to_peak_sec_v1.pkl',       'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
+    # 2026-05-14: peak_pct_max + time_to_peak_sec dropped — R²=0.007 / 0.039
+    # respectively, model worse than predicting mean. Also one was the
+    # cause of retrain crashes (stratify split on integer-second values).
+    # drawdown_from_peak_pct kept (R²=0.70, strong).
     {'name': 'drawdown_from_peak_pct', 'out': 'models/drawdown_from_peak_pct_v1.pkl', 'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
     # time_to_peak_5x_sec: seconds from "+50% milestone" to "peak after". Drives
     # WHEN to tighten trailing stop on a running position. Existing
@@ -71,7 +73,8 @@ TARGETS = [
     # ---------- POST-MIGRATION (csv=training_postmig.csv, features-mode=post) ----------
     {'name': 'post_mig_hits_2x',  'out': 'models/post_mig_hits_2x_v1.pkl',  'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
     {'name': 'post_mig_rugs_1h',  'out': 'models/post_mig_rugs_1h_v1.pkl',  'min_pos': 30,  'kind': 'binary',     'mode': 'post'},
-    {'name': 'post_mig_peak_pct', 'out': 'models/post_mig_peak_pct_v1.pkl', 'min_pos': 100, 'kind': 'regression', 'mode': 'post'},
+    # 2026-05-14: post_mig_peak_pct dropped — R² = -0.085 (actively misleading,
+    # worse than predicting the mean).
 ]
 
 
@@ -231,9 +234,9 @@ def main():
     # 3) Signal serve.py to reload
     if trained:
         try:
-            with urllib.request.urlopen(SERVE_RELOAD_URL, data=b'', timeout=5) as resp:
+            with urllib.request.urlopen(SERVE_RELOAD_URL, data=b'', timeout=60) as resp:
                 print(f'[retrain] serve.py reload: HTTP {resp.status}')
-        except urllib.error.URLError as e:
+        except (urllib.error.URLError, TimeoutError) as e:
             print(f'[retrain] serve.py reload failed (service may be down): {e}')
 
     # 4) Update last_train marker
