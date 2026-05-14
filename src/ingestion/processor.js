@@ -139,6 +139,7 @@ export function ingestExternalTrade(p) {
     marketCapSol: 0, // unknown from webhook — leave 0, on-chain feed has the truth
     vSolInBondingCurve: 0,
     vTokensInBondingCurve: 0,
+    timestamp: p.timestamp || null,  // on-chain block timestamp; used by stale-event guard in onTrade
     source: 'helius-tx',
   });
 }
@@ -264,6 +265,19 @@ function onTrade(e) {
     const PEAK_RATIO_CAP = 20;
     const PEAK_GUARD_MIN_SOL = 10;
     const FRESH_MINT_GRACE_MS = 60 * 1000;
+    // 2026-05-13: stale-timestamp guard. Helius webhooks can deliver events
+    // out of order — a tracked wallet's trade from 2-3 min ago shows up well
+    // after newer trades have already moved last_price_sol downward. The
+    // existing 5x spike ratio doesn't catch the typical ~2x mismatch, so the
+    // stale price overwrites fresh state. Position monitor reads
+    // mints.last_price_sol → records the stale price as peak → trail floor
+    // is set on a fake peak → real price can't hold it → exit at a loss.
+    // EXPLOSM hit exactly this: position peaked at +109% (= 167e-9) without
+    // a single live trade matching that price; the 167 came from a webhook
+    // event for a trade that happened 2 min before entry.
+    // Fix: if e.timestamp exists AND is >30s older than mint.last_trade_at,
+    // flag as junk (trade row still inserts for history, mint state untouched).
+    const STALE_TRADE_MS = 30 * 1000;
     const priorPx = mint.last_price_sol || 0;
     const priorTradeAt = mint.last_trade_at || 0;
     const mintAge = now - (mint.created_at || now);
@@ -289,11 +303,17 @@ function onTrade(e) {
     const priorPeak = mint.peak_market_cap_sol || 0;
     const isAbsurdPeakJump = priorPeak > PEAK_GUARD_MIN_SOL &&
                              mcapSol > priorPeak * PEAK_RATIO_CAP;
+    // Out-of-order webhook event: trade timestamp is meaningfully older than
+    // the mint's most recent trade. Only checks when e.timestamp exists
+    // (helius-tx events) and only matters when the mint has prior activity.
+    const isStaleEvent = !!(e.timestamp && mint.last_trade_at &&
+                           e.timestamp < mint.last_trade_at - STALE_TRADE_MS);
     const isJunkPrice = !mint.rugged && (
       isDustOnAmm ||
       isSpikeUp ||
       isSpikeDown ||
       isAbsurdPeakJump ||
+      isStaleEvent ||
       (!mint.migrated && px < PRICE_FLOOR) ||
       (mint.migrated && px < MIGRATED_PRICE_FLOOR)
     );
