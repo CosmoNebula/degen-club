@@ -63,6 +63,22 @@ let _bleedersForNextProposal = [];
 // Cleared after each propose call. Caps at 8 entries to keep prompt tight.
 let _recentOrphans = [];
 const RECENT_ORPHANS_MAX = 8;
+
+// 2026-05-14: calibrationStats / edgeCheck / bestEdgeQuery each scan
+// 342k+ predictions × 878k snapshots. Each call was 30-40s and the
+// agent fired them 7+ times in a 5h session = ~4 min of cumulative
+// loop blocking. Cache for 10 min — these are calibration stats over
+// historical predictions, they barely change minute-to-minute.
+const HEAVY_QUERY_TTL_MS = 10 * 60 * 1000;
+const _heavyCache = new Map(); // key → { v, at }
+function cachedHeavy(key, fn) {
+  const now = Date.now();
+  const hit = _heavyCache.get(key);
+  if (hit && (now - hit.at) < HEAVY_QUERY_TTL_MS) return hit.v;
+  const v = fn();
+  _heavyCache.set(key, { v, at: now });
+  return v;
+}
 function S() {
   if (stmts) return stmts;
   const d = db();
@@ -197,6 +213,10 @@ function S() {
     // Calibration data — GROUP BY p.id so each prediction counts once, not
     // once per matching snapshot age. Without this we get JOIN-explosion
     // dilution (each prediction × 4 snapshots = artificially better Brier).
+    // 2026-05-14: added 7-day time bound. Without it, scanned all 342k+
+    // peaked_30 predictions × 878k labeled snapshots → 35-40s per call,
+    // dragging the loop through whatever path triggered the agent consult.
+    // 7 days of calibration data is plenty for Brier score statistical power.
     calibrationStats: d.prepare(`
       WITH per_pred AS (
         SELECT p.id, p.prob, MAX(s.peaked_30) AS actual
@@ -204,6 +224,7 @@ function S() {
         JOIN ml_mint_snapshots s ON s.mint_address = p.mint_address
         WHERE p.target = 'peaked_30'
           AND p.prob IS NOT NULL
+          AND p.timestamp > strftime('%s','now')*1000 - 7*86400000
           AND s.labels_resolved_at IS NOT NULL
           AND s.peaked_30 IS NOT NULL
         GROUP BY p.id
@@ -251,6 +272,7 @@ function S() {
         FROM ml_predictions p
         JOIN ml_mint_snapshots s ON s.mint_address = p.mint_address
         WHERE p.target = 'peaked_30' AND p.prob IS NOT NULL
+          AND p.timestamp > strftime('%s','now')*1000 - 7*86400000
           AND s.labels_resolved_at IS NOT NULL AND s.peaked_30 IS NOT NULL
         GROUP BY p.id
       )
@@ -805,8 +827,8 @@ function buildContext() {
   const s = S();
   const overall = s.overallStats.get();
   const baseline = s.baselineRates.get();
-  const calib = s.calibrationStats.get();
-  const edge = s.bestEdgeQuery.all();
+  const calib = cachedHeavy('calibrationStats', () => s.calibrationStats.get());
+  const edge = cachedHeavy('bestEdgeQuery', () => s.bestEdgeQuery.all());
   const drift = (() => { try { return getModelHealth(); } catch { return null; } })();
   const liveStrategies = s.liveStrategies.all();
 
@@ -1603,8 +1625,8 @@ function buildContext() {
 function assessReadiness() {
   const s = S();
   const overall = s.overallStats.get();
-  const calib = s.calibrationStats.get();
-  const edge = s.edgeCheck.get();
+  const calib = cachedHeavy('calibrationStats', () => s.calibrationStats.get());
+  const edge = cachedHeavy('edgeCheck', () => s.edgeCheck.get());
   const drift = (() => { try { return getModelHealth(); } catch { return null; } })();
   const live = s.liveStrategies.all();
 
