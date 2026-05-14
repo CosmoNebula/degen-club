@@ -375,6 +375,11 @@ function onTrade(e) {
         }
       }
       if (!heldLock) {
+        // TEMP DEBUG (2026-05-14): surface every write on a held mint that's
+        // making it past the lock, so we can see which path is leaking.
+        if (isHeld) {
+          console.log(`[held-lock-leak] ${e.mint.slice(0,8)}… src=${source} migrated=${mint.migrated} ammSub=${isAmmSubscribed(e.mint)}`);
+        }
         s.updateMintOnTrade.run(
           mcapSol, priceSol || 0, e.vSolInBondingCurve || 0, e.vTokensInBondingCurve || 0,
           now, mcapSol, source, now, e.mint
