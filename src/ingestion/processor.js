@@ -13,6 +13,7 @@ import { checkCashbackFlag } from './helius.js';
 import { trackBuyer, checkVelocityRunnerProfile, markFired } from '../scoring/coin-velocity.js';
 import { getIngestionPaused } from '../ml/disk-monitor.js';
 import { updateMigratorStatsForMint } from '../scoring/migrator-stats.js';
+import { triggerWebhookResync } from './helius-webhooks.js';
 
 const cashbackInflight = new Set();
 export function ensureCashback(mintAddress, bondingCurveKey, currentValue) {
@@ -427,6 +428,10 @@ function onMigrate(e) {
     } catch (err) {
       console.error('[migrator-stats] update', err.message);
     }
+    // Phase 2 AMM ingestion: kick off a webhook re-sync so the new migrated
+    // mint enters the post-mig ingestion list within ~3s (debounced). Without
+    // this, the mint waits up to 1h for the hourly sync to pick it up.
+    triggerWebhookResync();
   } catch (err) {
     console.error('[processor] migrate', err.message);
   }
