@@ -496,17 +496,22 @@ export async function evaluateStrategy(strategyJson, performanceContext) {
   });
 }
 
-// Convenience wrapper for ad-hoc text reasoning (no schema, returns raw text)
+// Convenience wrapper for ad-hoc text reasoning (no schema, returns raw text).
+// 2026-05-13: --allow-dangerously-skip-permissions removed — Claude CLI 2.1.140+
+// refuses it under root and prints a warning that breaks JSON parsing. We
+// already block tools via --disallowedTools so there's nothing the model can
+// do that needs permissions. cwd=/tmp mirrors consultClaude (no project
+// CLAUDE.md auto-load).
 export async function freeformThought(systemPrompt, userPrompt, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
     const args = [
       '--print',
       '--output-format', 'json',
+      '--disallowedTools', '*',
       '--append-system-prompt', systemPrompt,
-      '--allow-dangerously-skip-permissions',
       userPrompt,
     ];
-    const proc = spawn(CLAUDE_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn(CLAUDE_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd: '/tmp' });
     let stdout = '';
     const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {}; reject(new Error('timeout')); }, timeoutMs);
     proc.stdout.on('data', d => { stdout += d.toString(); });
