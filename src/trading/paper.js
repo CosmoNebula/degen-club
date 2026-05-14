@@ -6,6 +6,20 @@ import { estimateBuyFriction, estimateSellFriction } from '../scoring/mint-micro
 import { triggerWebhookResync } from '../ingestion/helius-webhooks.js';
 import { addHeldMint, removeHeldMint } from './held-mints.js';
 import { subscribePumpAmm, unsubscribePumpAmm } from '../ingestion/onchain-amm-price.js';
+import { warmUpPriceForMint } from '../ingestion/onchain-price.js';
+
+// Audit fix D — fire-and-forget BC warm-up. On position open we want a fresh
+// onchain-curve write to mints.last_price_sol within ~100ms, without waiting
+// for the reconcile-then-subscribe-then-first-notification chain (which can
+// take 30s+ on a new mint). One getAccountInfo call, decode, write. Costs 1
+// Helius credit per position open.
+function warmUpHeldMint(mintAddress) {
+  try {
+    const row = db().prepare('SELECT bonding_curve_key, migrated FROM mints WHERE mint_address = ?').get(mintAddress);
+    if (!row || row.migrated || !row.bonding_curve_key) return;
+    warmUpPriceForMint(mintAddress, row.bonding_curve_key).catch(() => {});
+  } catch {}
+}
 import { Worker, isMainThread } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -314,7 +328,7 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
     );
     const positionId = result.lastInsertRowid;
     db().prepare("UPDATE paper_positions SET position_mode = 'live', pending_fill = 1 WHERE id = ?").run(positionId);
-    addHeldMint(mintAddress); subscribePumpAmm(mintAddress);
+    addHeldMint(mintAddress); subscribePumpAmm(mintAddress); warmUpHeldMint(mintAddress);
     triggerWebhookResync();
     if (entryScore && entryScore !== 1.0) {
       db().prepare('UPDATE paper_positions SET entry_score = ? WHERE id = ?').run(entryScore, positionId);
@@ -361,7 +375,7 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
     );
     const positionId = insertResult.lastInsertRowid;
     db().prepare("UPDATE paper_positions SET pending_fill = 1 WHERE id = ?").run(positionId);
-    addHeldMint(mintAddress); subscribePumpAmm(mintAddress);
+    addHeldMint(mintAddress); subscribePumpAmm(mintAddress); warmUpHeldMint(mintAddress);
     triggerWebhookResync();
     if (entryScore && entryScore !== 1.0) {
       db().prepare('UPDATE paper_positions SET entry_score = ? WHERE id = ?').run(entryScore, positionId);
@@ -440,7 +454,7 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
     fillPrice, entrySol, tokenAmount, tokenAmount, entryMcap || 0, now, now
   );
   s.bumpOpened.run(strategy);
-  addHeldMint(mintAddress); subscribePumpAmm(mintAddress);
+  addHeldMint(mintAddress); subscribePumpAmm(mintAddress); warmUpHeldMint(mintAddress);
   triggerWebhookResync();
   if (entryScore && entryScore !== 1.0) {
     db().prepare('UPDATE paper_positions SET entry_score = ? WHERE id = ?').run(entryScore, result.lastInsertRowid);

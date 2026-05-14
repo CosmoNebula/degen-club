@@ -322,12 +322,28 @@ function onTrade(e) {
     // (helius-tx events) and only matters when the mint has prior activity.
     const isStaleEvent = !!(e.timestamp && mint.last_trade_at &&
                            e.timestamp < mint.last_trade_at - STALE_TRADE_MS);
+    // Audit fix B (2026-05-14) — reserve-price gatekeeping. When we have a
+    // recent reserve-decoded price (onchain-curve / onchain-amm wrote within
+    // RESERVE_FRESH_MS), trade-implied prices that diverge from it by more
+    // than RESERVE_DEVIATION are MEV/router manipulation (Jupiter routing,
+    // sandwich attacks, off-curve execution). The actual BC marginal price
+    // doesn't move that much in one trade; only trade implied prices do.
+    // Killing them on every write path closes the main remaining leak after
+    // dust/spike filters.
+    const RESERVE_DEVIATION = 0.35;     // 35% — wider than spike-up to avoid false positives on big real moves
+    const RESERVE_FRESH_MS = 30 * 1000; // reserve write must be recent for gate to apply
+    const curveAge = now - (mint.last_curve_write_at || 0);
+    const curveFresh = mint.last_curve_write_at && curveAge < RESERVE_FRESH_MS;
+    const reserveRefPrice = curveFresh ? (mint.last_price_sol || 0) : 0;
+    const isReserveMismatch = reserveRefPrice > 0 && px > 0 &&
+                             Math.abs(px - reserveRefPrice) / reserveRefPrice > RESERVE_DEVIATION;
     const isJunkPrice = !mint.rugged && (
       isDust ||
       isSpikeUp ||
       isSpikeDown ||
       isAbsurdPeakJump ||
       isStaleEvent ||
+      isReserveMismatch ||
       (!mint.migrated && px < PRICE_FLOOR) ||
       (mint.migrated && px < MIGRATED_PRICE_FLOOR)
     );

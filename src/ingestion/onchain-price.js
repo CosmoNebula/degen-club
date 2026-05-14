@@ -40,6 +40,40 @@ const _pendingByReqId = new Map(); // reqId -> { mint, kind: 'sub'|'unsub' }
 
 function lamportsToSol(n) { return Number(n) / 1e9; }
 
+// One-shot getAccountInfo via Helius RPC. Used by warmUpPriceForMint() on
+// position open AND by the per-sub staleness polling loop (Audit fixes
+// 2026-05-14 — A: polling backup, D: warm-up).
+// Returns the same shape as accountSubscribe notifications: ['<b64>', 'base64'].
+async function fetchAccountInfoOnce(pubkey) {
+  try {
+    const res = await fetch(RPC_HTTP, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 'price-poll', method: 'getAccountInfo',
+        params: [pubkey, { encoding: 'base64', commitment: 'processed' }],
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    const data = j?.result?.value?.data;
+    if (!Array.isArray(data) || !data.length) return null;
+    return data;
+  } catch { return null; }
+}
+
+// Audit fix D — when a position opens, paper.js calls this to seed a fresh
+// onchain-curve price immediately, without waiting for the next reconcile +
+// WSS subscribe (up to 30s + sub latency). Cheap: 1 Helius credit per call.
+export async function warmUpPriceForMint(mintAddress, bondingCurveKey) {
+  if (!mintAddress || !bondingCurveKey) return false;
+  const data = await fetchAccountInfoOnce(bondingCurveKey);
+  if (!data) return false;
+  decodeAndUpdate(mintAddress, data);
+  return true;
+}
+
 function decodeAndUpdate(mintAddress, accountInfoData) {
   try {
     const buf = Buffer.from(accountInfoData[0], accountInfoData[1] || 'base64');
@@ -157,6 +191,7 @@ function reconcile() {
   }
 }
 
+let _pingInterval = null;
 function connect() {
   if (!_running) return;
   console.log(`[onchain-price] connecting to ${RPC_WS}`);
@@ -165,12 +200,24 @@ function connect() {
   _ws.on('open', () => {
     console.log('[onchain-price] connected');
     _reconnectMs = RECONNECT_MIN_MS;
+    _lastMsgAt = Date.now();  // reset stale clock
     // Re-issue all subs from scratch (subId mappings are connection-scoped)
     const prev = [..._subs.entries()];
     _subs.clear();
     for (const [mint, s] of prev) subscribe(mint, s.bondingCurveKey);
     reconcile();
+    // Audit fix C — WSS heartbeat. Send ping every 20s, the 'pong' handler
+    // updates _lastMsgAt so the stale watchdog doesn't false-positive when
+    // there are simply no curve trades happening. Also detects silent
+    // half-closed connections that don't fire 'close' — if no pong comes
+    // back, the next stale check forces reconnect.
+    if (_pingInterval) clearInterval(_pingInterval);
+    _pingInterval = setInterval(() => {
+      try { if (_ws?.readyState === WebSocket.OPEN) _ws.ping(); } catch {}
+    }, 20 * 1000);
   });
+
+  _ws.on('pong', () => { _lastMsgAt = Date.now(); });
 
   _ws.on('message', (raw) => {
     _lastMsgAt = Date.now();
@@ -199,6 +246,7 @@ function connect() {
 
   _ws.on('close', () => {
     console.log('[onchain-price] disconnected');
+    if (_pingInterval) { clearInterval(_pingInterval); _pingInterval = null; }
     if (_running) setTimeout(connect, _reconnectMs);
     _reconnectMs = Math.min(_reconnectMs * 2, RECONNECT_MAX_MS);
   });
@@ -222,7 +270,30 @@ export function startOnchainPriceFeed() {
       try { _ws.terminate(); } catch {}
     }
   }, 5 * 1000);
-  console.log(`[onchain-price] started · ${RPC_WS} · reconcile every ${REFRESH_INTERVAL_MS / 1000}s · stale-WS watchdog 30s/5s`);
+  // Audit fix A — per-sub polling backup. Every 5s, iterate active subs and
+  // check last_curve_write_at on each mint's row. If >10s stale, poll
+  // getAccountInfo and decode. Keeps held-position price feed alive even
+  // during WSS disconnects or per-sub silent failures (which can happen
+  // independently of the global WSS connection). Cost: ~1 Helius credit per
+  // stale poll. With ~5 held mints all stale = 5 credits/5s = 3.6k/hr —
+  // negligible vs the 10M monthly budget.
+  setInterval(() => {
+    if (!_running || _subs.size === 0) return;
+    const d = db();
+    const stmt = d.prepare('SELECT last_curve_write_at FROM mints WHERE mint_address = ?');
+    const now = Date.now();
+    for (const [mint, s] of _subs) {
+      const row = stmt.get(mint);
+      const lastCurve = row?.last_curve_write_at || 0;
+      if (now - lastCurve > 10 * 1000 && s.bondingCurveKey) {
+        // stale — poll directly
+        fetchAccountInfoOnce(s.bondingCurveKey).then(data => {
+          if (data) decodeAndUpdate(mint, data);
+        }).catch(() => {});
+      }
+    }
+  }, 5 * 1000);
+  console.log(`[onchain-price] started · ${RPC_WS} · reconcile every ${REFRESH_INTERVAL_MS / 1000}s · stale-WS watchdog 30s/5s · per-sub poll backup 10s/5s`);
 }
 
 export function stopOnchainPriceFeed() {
