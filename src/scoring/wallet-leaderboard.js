@@ -110,9 +110,18 @@ function loadCandidatesWithExtraStats() {
         -- Trade volume cap: 1500/30d = 50/day average. Humans rarely pick
         -- more than 50 distinct mints/day. Was 4500 (150/day) — too permissive.
         AND COALESCE(trade_count_30d, 0) <= 1500
-        -- Explicit category filter: the bot's own classification flags
-        -- SCALPER/BOT/BUNDLE based on multi-feature heuristics. Trust it.
-        AND COALESCE(category, 'NOT_SURE') NOT IN ('SCALPER', 'BOT', 'BUNDLE')
+        -- 2026-05-14: BUNDLE/SCALPER stay banned. BOT category gets a carveout
+        -- for proven winners — some elite MEV bots find genuine alpha and
+        -- their entries are worth tracking even if we'd never copy their
+        -- exit cadence. Threshold: ≥10 SOL realized over 30d AND ≥55% WR.
+        AND (
+          COALESCE(category, 'NOT_SURE') NOT IN ('SCALPER', 'BOT', 'BUNDLE')
+          OR (
+            category = 'BOT'
+            AND COALESCE(realized_pnl_30d, 0) >= 10
+            AND COALESCE(win_rate_30d, 0) >= 0.55
+          )
+        )
         -- Trades-per-position: bots churn the same mint many times.
         -- Humans buy once, sell once or in stages. Lowered cap 5 → 3.
         AND COALESCE(trades_per_position, 0) <= 3
@@ -475,10 +484,12 @@ function recomputeScopedLeaderboard(scope, { verbose = false } = {}) {
 }
 
 export function recomputeAllLeaderboards({ verbose = false } = {}) {
+  // 2026-05-14: dropped premig/postmig split — user wants just the original
+  // unified top-50. The scoped leaderboards were extra cost without
+  // matching trade gain. Functions stay exported for any callers; just
+  // the periodic recompute now does combined only.
   const combined = recomputeLeaderboard({ verbose });
-  const premig = recomputeScopedLeaderboard('premig', { verbose });
-  const postmig = recomputeScopedLeaderboard('postmig', { verbose });
-  return { combined, premig, postmig };
+  return { combined };
 }
 
 export function scopedLeaderboardAddresses(scope, maxRank = SLOTS) {
