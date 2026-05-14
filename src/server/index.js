@@ -486,6 +486,50 @@ export function startServer(getIngestionStatus) {
     res.json({ rows, meta });
   });
 
+  // Phase 1 scoped leaderboards — pre/post-migration hunter rankings.
+  // Returns top N from wallet_leaderboard_{scope} where scope = premig | postmig.
+  app.get('/api/leaderboard/:scope', (req, res) => {
+    const scope = req.params.scope === 'postmig' ? 'postmig' : 'premig';
+    const limit = Math.min(50, Number(req.query.limit) || 50);
+    const table = `wallet_leaderboard_${scope}`;
+    const rows = db().prepare(`
+      SELECT wl.rank, wl.tier, wl.address, wl.score, wl.realized_pnl_30d,
+             wl.win_rate_30d, wl.closed_30d, wl.avg_multiple_30d,
+             wl.sniper_ratio, wl.avg_hold_seconds, wl.components_json,
+             wl.computed_at, w.label, w.category, w.last_activity_at
+      FROM ${table} wl
+      LEFT JOIN wallets w ON w.address = wl.address
+      ORDER BY wl.rank ASC LIMIT ?
+    `).all(limit);
+    for (const r of rows) {
+      try { r.components = JSON.parse(r.components_json || '{}'); } catch { r.components = {}; }
+      delete r.components_json;
+    }
+    const meta = db().prepare(`SELECT MAX(computed_at) AS computed_at, COUNT(*) AS n FROM ${table}`).get();
+    res.json({ scope, rows, meta });
+  });
+
+  // Wallets present on BOTH scoped leaderboards = elite generalists. Score
+  // and rank shown for each scope so you can see which kind of edge a wallet
+  // is stronger on.
+  app.get('/api/leaderboard/intersection', (req, res) => {
+    const limit = Math.min(50, Number(req.query.limit) || 50);
+    const rows = db().prepare(`
+      SELECT
+        p.address,
+        p.rank AS premig_rank, p.score AS premig_score,
+        p.realized_pnl_30d AS premig_pnl, p.win_rate_30d AS premig_wr, p.closed_30d AS premig_closed,
+        q.rank AS postmig_rank, q.score AS postmig_score,
+        q.realized_pnl_30d AS postmig_pnl, q.win_rate_30d AS postmig_wr, q.closed_30d AS postmig_closed,
+        w.label, w.category
+      FROM wallet_leaderboard_premig p
+      JOIN wallet_leaderboard_postmig q ON q.address = p.address
+      LEFT JOIN wallets w ON w.address = p.address
+      ORDER BY (p.rank + q.rank) ASC LIMIT ?
+    `).all(limit);
+    res.json({ rows });
+  });
+
   app.post('/api/leaderboard/recompute', async (req, res) => {
     try {
       const m = await import('../scoring/wallet-leaderboard.js');

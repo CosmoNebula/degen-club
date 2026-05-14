@@ -668,6 +668,59 @@ function botFlagsBadges(flags) {
 let ringsSort = 'paper_net_sol';
 let _ringsCache = [];
 
+// Scoped leaderboard render — used by Pre-Mig and Post-Mig side-by-side
+// columns in the Scopes tab. Compact form (rank/addr/score/PnL/WR/closed/×).
+function renderScopedLeaderboard(tbodyId, rows) {
+  const el = document.getElementById(tbodyId);
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<tr><td colspan="7" class="empty">No qualifying wallets yet (post-mig board fills as held positions accumulate trade data).</td></tr>';
+    return;
+  }
+  el.innerHTML = rows.map(r => {
+    const tierColor = r.tier === 'KOL' ? 'var(--gold,#f4c430)' : r.tier === 'HIGH' ? 'var(--green)' : 'var(--muted)';
+    const pnlCls = (r.realized_pnl_30d || 0) > 0 ? 'pos' : (r.realized_pnl_30d || 0) < 0 ? 'neg' : 'muted';
+    const wr = ((r.win_rate_30d || 0) * 100).toFixed(0);
+    const mult = (r.avg_multiple_30d || 0).toFixed(1);
+    const label = r.label ? ` <span class="muted">(${r.label})</span>` : '';
+    return `<tr class="wallet-row" data-wallet="${r.address}" style="cursor:pointer;">
+      <td class="num"><strong style="color:${tierColor};">${r.rank}</strong></td>
+      <td><span class="addr">${r.address.slice(0,6)}…${r.address.slice(-4)}</span>${label}</td>
+      <td class="num">${(r.score || 0).toFixed(0)}</td>
+      <td class="num ${pnlCls}">${(r.realized_pnl_30d || 0).toFixed(2)}</td>
+      <td class="num">${wr}%</td>
+      <td class="num">${r.closed_30d || 0}</td>
+      <td class="num">${mult}×</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderIntersectionTable(rows) {
+  const el = document.getElementById('scopes-intersection-table');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<tr><td colspan="8" class="empty">No wallets on both boards yet — needs more post-mig data to build up. Will populate as held positions accumulate trade history.</td></tr>';
+    return;
+  }
+  el.innerHTML = rows.map(r => {
+    const preWR = ((r.premig_wr || 0) * 100).toFixed(0);
+    const postWR = ((r.postmig_wr || 0) * 100).toFixed(0);
+    const prePnlCls = (r.premig_pnl || 0) > 0 ? 'pos' : 'neg';
+    const postPnlCls = (r.postmig_pnl || 0) > 0 ? 'pos' : 'neg';
+    const label = r.label || (r.category ? r.category : '');
+    return `<tr class="wallet-row" data-wallet="${r.address}" style="cursor:pointer;">
+      <td><span class="addr">${r.address.slice(0,6)}…${r.address.slice(-4)}</span></td>
+      <td class="num">#${r.premig_rank}</td>
+      <td class="num">#${r.postmig_rank}</td>
+      <td class="num ${prePnlCls}">${(r.premig_pnl || 0).toFixed(2)}</td>
+      <td class="num ${postPnlCls}">${(r.postmig_pnl || 0).toFixed(2)}</td>
+      <td class="num">${preWR}%</td>
+      <td class="num">${postWR}%</td>
+      <td>${label}</td>
+    </tr>`;
+  }).join('');
+}
+
 function renderLeaderboardTable(data) {
   const rows = (data && data.rows) || [];
   const meta = data && data.meta;
@@ -2450,6 +2503,15 @@ async function tick() {
     } else if (currentView === 'top50') {
       const data = await fetchJson('/api/leaderboard?limit=50');
       renderLeaderboardTable(data);
+    } else if (currentView === 'scopes') {
+      const [premig, postmig, inter] = await Promise.all([
+        fetchJson('/api/leaderboard/premig?limit=50'),
+        fetchJson('/api/leaderboard/postmig?limit=50'),
+        fetchJson('/api/leaderboard/intersection?limit=30'),
+      ]);
+      renderScopedLeaderboard('scopes-premig-table', premig.rows || []);
+      renderScopedLeaderboard('scopes-postmig-table', postmig.rows || []);
+      renderIntersectionTable(inter.rows || []);
     } else if (currentView === 'rings') {
       const data = await fetchJson(`/api/wallet-rings?limit=200&sort=${ringsSort}`);
       renderRingsTable(data.rings || []);

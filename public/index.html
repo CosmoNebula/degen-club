@@ -222,6 +222,7 @@
         <button class="tab tab-sub" data-tab="mints">🐒 <span>MINTS</span></button>
         <button class="tab tab-sub" data-tab="devs">👑 <span>DEVS</span></button>
         <button class="tab tab-sub" data-tab="top50">🏆 <span>TOP 50</span></button>
+        <button class="tab tab-sub" data-tab="scopes">🎭 <span>SCOPES</span></button>
         <button class="tab tab-sub" data-tab="traders">🎯 <span>TRADERS</span></button>
         <button class="tab tab-sub" data-tab="rings">🕸 <span>RINGS</span></button>
         <button class="tab tab-sub" data-tab="lab">🧪 <span>COIN LAB</span></button>
@@ -352,6 +353,75 @@
           </thead>
           <tbody id="leaderboard-table"><tr><td colspan="14" class="empty">Loading…</td></tr></tbody>
         </table>
+      </div>
+    </section>
+
+    <section class="tab-pane" data-pane="scopes">
+      <div class="pane-header">
+        <h1>🎭 SCOPED LEADERBOARDS</h1>
+        <p>Two independent top-50s: <b>PRE-MIG hunters</b> (best at calling bonding curve runners) and <b>POST-MIG hunters</b> (best at calling AMM post-graduation moves). Wallets that appear on <b>BOTH</b> = elite generalists. Each board recomputed every 15min.</p>
+      </div>
+
+      <details class="section" open data-section="scopes-intersection">
+        <summary class="section-summary">🏆 INTERSECTION — wallets on BOTH boards (the rarest tier)</summary>
+        <div class="table-wrap">
+          <table class="data">
+            <thead>
+              <tr>
+                <th>Wallet</th>
+                <th class="num">PreMig Rank</th>
+                <th class="num">PostMig Rank</th>
+                <th class="num">PreMig PnL</th>
+                <th class="num">PostMig PnL</th>
+                <th class="num">PreMig WR</th>
+                <th class="num">PostMig WR</th>
+                <th>Label</th>
+              </tr>
+            </thead>
+            <tbody id="scopes-intersection-table"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </details>
+
+      <div class="strategy-edit" style="grid-template-columns: 1fr 1fr; margin-top: 16px;">
+        <div>
+          <h3 style="margin: 0 0 10px; font-size: 13px;">📈 PRE-MIG TOP 50 — best bonding curve hunters</h3>
+          <div class="table-wrap" style="max-height: 600px; overflow-y: auto;">
+            <table class="data">
+              <thead>
+                <tr>
+                  <th class="num">#</th>
+                  <th>Wallet</th>
+                  <th class="num">Score</th>
+                  <th class="num">PnL</th>
+                  <th class="num">WR</th>
+                  <th class="num">Closed</th>
+                  <th class="num">×</th>
+                </tr>
+              </thead>
+              <tbody id="scopes-premig-table"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <h3 style="margin: 0 0 10px; font-size: 13px;">🚀 POST-MIG TOP 50 — best AMM hunters</h3>
+          <div class="table-wrap" style="max-height: 600px; overflow-y: auto;">
+            <table class="data">
+              <thead>
+                <tr>
+                  <th class="num">#</th>
+                  <th>Wallet</th>
+                  <th class="num">Score</th>
+                  <th class="num">PnL</th>
+                  <th class="num">WR</th>
+                  <th class="num">Closed</th>
+                  <th class="num">×</th>
+                </tr>
+              </thead>
+              <tbody id="scopes-postmig-table"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </section>
 
