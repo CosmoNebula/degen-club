@@ -32,8 +32,14 @@ from sklearn.metrics import (
 # Targets that should be trained as regression (continuous outputs).
 # Everything else is binary classification.
 REGRESSION_TARGETS = {
-    'peak_pct_max', 'time_to_peak_sec', 'drawdown_from_peak_pct',
-    'time_to_peak_5x_sec',
+    # Active regressions kept post-2026-05-14 prune:
+    'drawdown_from_peak_pct',
+    'hold_1h_pct', 'hold_4h_pct', 'hold_24h_pct',
+    'peak_pct_within_24h', 'max_drawdown_within_24h_pct',
+    'pump_durability_5min',                   # 2026-05-14 timing-aware
+    # Legacy names (still in some pipelines) — kept for routing-correctness
+    # even if dropped from the training set in retrain_all.py.
+    'peak_pct_max', 'time_to_peak_sec', 'time_to_peak_5x_sec',
     'post_mig_peak_pct',
 }
 

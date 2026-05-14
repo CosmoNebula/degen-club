@@ -634,6 +634,23 @@ function runMigrations(d) {
   //                          milestone — different semantics).
   ensureCol(d, 'ml_mint_snapshots', 'hits_2x_within_1h', `INTEGER`);
   ensureCol(d, 'ml_mint_snapshots', 'time_to_peak_5x_sec', `REAL`);
+  // 2026-05-14 timing-aware models — answer "WHEN does this happen" not
+  // just "does it happen ever". Drive entry-now-vs-wait and exit-now-vs-hold.
+  //   peak_within_5min                — binary: did max price within 5min
+  //                                     after snapshot reach ≥+20%? Tells the
+  //                                     bot if the pump is imminent (yes →
+  //                                     fire entry) or distant (no → wait).
+  //   buy_pressure_continues_60s      — binary: in [T, T+60s] is buy_count
+  //                                     ≥ sell_count? Predicts next-minute
+  //                                     buyer-flow direction. Avoids entries
+  //                                     right at flow exhaustion.
+  //   pump_durability_5min            — regression: (peak_price - min_price_in
+  //                                     [peak_ts, peak_ts+5min]) / peak_price.
+  //                                     0 = held the peak, 1 = full retreat.
+  //                                     Drives tier-sell sizing decisions.
+  ensureCol(d, 'ml_mint_snapshots', 'peak_within_5min', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'buy_pressure_continues_60s', `INTEGER`);
+  ensureCol(d, 'ml_mint_snapshots', 'pump_durability_5min', `REAL`);
 
   // Tier 2 #1 — Price reversal count. Beyond raw volatility, count how many
   // times the price flipped direction in the snapshot window. Choppy mints

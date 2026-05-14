@@ -41,6 +41,10 @@ TARGETS = [
     # mints that take 6h to reach 2x. Direct entry-signal for short-horizon
     # strategies.
     {'name': 'hits_2x_within_1h',     'out': 'models/hits_2x_within_1h_v1.pkl',     'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
+    # 2026-05-14 timing-aware models — answer WHEN, not just whether.
+    {'name': 'peak_within_5min',          'out': 'models/peak_within_5min_v1.pkl',          'min_pos': 50,  'kind': 'binary',     'mode': 'pre'},
+    {'name': 'buy_pressure_continues_60s','out': 'models/buy_pressure_continues_60s_v1.pkl','min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
+    {'name': 'pump_durability_5min',      'out': 'models/pump_durability_5min_v1.pkl',      'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
     # Regressions
     # 2026-05-14: peak_pct_max + time_to_peak_sec dropped — R²=0.007 / 0.039
     # respectively, model worse than predicting mean. Also one was the

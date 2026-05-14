@@ -111,7 +111,9 @@ function S() {
               OR alive_at_1h IS NULL OR alive_at_4h IS NULL OR alive_at_24h IS NULL
               OR hits_5x_within_24h IS NULL OR hits_10x_within_24h IS NULL
               OR hold_1h_pct IS NULL OR hold_4h_pct IS NULL OR hold_24h_pct IS NULL
-              OR peak_pct_within_24h IS NULL OR max_drawdown_within_24h_pct IS NULL)
+              OR peak_pct_within_24h IS NULL OR max_drawdown_within_24h_pct IS NULL
+              OR peak_within_5min IS NULL OR buy_pressure_continues_60s IS NULL
+              OR pump_durability_5min IS NULL)
        ORDER BY snapshot_ts DESC LIMIT ?`),
     mintInfo: d.prepare(`SELECT migrated, migrated_at FROM mints WHERE mint_address = ?`),
     // Returns peak price + the timestamp at which peak occurred (regression targets)
@@ -158,6 +160,14 @@ function S() {
     // still bounded by the 24h horizon.
     minPriceInWindowRange: d.prepare(`SELECT MIN(price_sol) AS min_price
        FROM trades WHERE mint_address = ? AND timestamp >= ? AND timestamp <= ? AND price_sol > 0 AND is_junk = 0`),
+    // bsRatioWindow: count of buys/sells in [start_ts, end_ts]. Used for
+    // buy_pressure_continues_60s. Excludes junk trades.
+    bsRatioWindow: d.prepare(`SELECT
+       SUM(CASE WHEN is_buy = 1 THEN 1 ELSE 0 END) AS buys,
+       SUM(CASE WHEN is_buy = 0 THEN 1 ELSE 0 END) AS sells,
+       COUNT(*) AS total
+       FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ?
+         AND COALESCE(is_junk, 0) = 0`),
     update: d.prepare(`UPDATE ml_mint_snapshots SET
        migrated = ?, peaked_30 = ?, peaked_100 = ?, peaked_300 = ?, peaked_500 = ?,
        peak_pct_max = ?, time_to_peak_sec = ?, will_die_fast = ?,
@@ -173,6 +183,9 @@ function S() {
        hold_24h_pct = COALESCE(?, hold_24h_pct),
        peak_pct_within_24h = COALESCE(?, peak_pct_within_24h),
        max_drawdown_within_24h_pct = COALESCE(?, max_drawdown_within_24h_pct),
+       peak_within_5min = COALESCE(?, peak_within_5min),
+       buy_pressure_continues_60s = COALESCE(?, buy_pressure_continues_60s),
+       pump_durability_5min = COALESCE(?, pump_durability_5min),
        labels_resolved_at = ?
        WHERE mint_address = ? AND snapshot_age_sec = ?`),
     updateDieFastOnly: d.prepare(`UPDATE ml_mint_snapshots SET will_die_fast = ?
@@ -255,6 +268,53 @@ function computeTimeToPeak5xSec(mintAddress, snapshotTs, snapshotPrice) {
   if (!peakRow?.peak_ts) return null;
   const deltaSec = Math.max(0, Math.round((peakRow.peak_ts - triggerTs) / 1000));
   return Math.min(deltaSec, TIME_TO_PEAK_CAP_SEC);
+}
+
+// peak_within_5min: 1 if max price in [snapshot_ts, snapshot_ts+5min]
+// reaches ≥+20% above snapshot price. Predicts "imminent pump" — drives
+// the entry-now-vs-wait decision for fast-flip strategies.
+const PEAK_WITHIN_5MIN_WINDOW_MS = 5 * 60 * 1000;
+const PEAK_WITHIN_5MIN_RATIO = 1.20;
+function computePeakWithin5min(mintAddress, snapshotTs, snapshotPrice) {
+  if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
+  const target = snapshotTs + PEAK_WITHIN_5MIN_WINDOW_MS;
+  if (Date.now() < target) return null; // not enough forward data yet
+  const row = S().maxPriceWithin.get(mintAddress, snapshotTs, target);
+  const maxPrice = row?.max_price;
+  if (maxPrice == null || maxPrice <= 0) return 0;
+  return maxPrice >= snapshotPrice * PEAK_WITHIN_5MIN_RATIO ? 1 : 0;
+}
+
+// buy_pressure_continues_60s: 1 if buy_count ≥ sell_count in [T, T+60s].
+// Predicts next-minute flow direction. Avoids entries at flow exhaustion.
+const BS_CONTINUES_WINDOW_MS = 60 * 1000;
+function computeBuyPressureContinues60s(mintAddress, snapshotTs) {
+  const target = snapshotTs + BS_CONTINUES_WINDOW_MS;
+  if (Date.now() < target) return null;
+  const row = S().bsRatioWindow.get(mintAddress, snapshotTs, target);
+  if (!row || (row.total || 0) === 0) return null; // no trades — undefined
+  return (row.buys || 0) >= (row.sells || 0) ? 1 : 0;
+}
+
+// pump_durability_5min: regression. After the peak hits (within 30min of
+// snapshot), how much does price retreat in the next 5min?
+//   value = (peak_price - min_price_in_[peak_ts, peak_ts+5min]) / peak_price
+// Range: 0 (held the peak) to 1 (full retreat to zero). NULL if no peak
+// within 30min of snapshot or if snapshot price is junk.
+const PUMP_DURABILITY_PEAK_WINDOW_MS = 30 * 60 * 1000;
+const PUMP_DURABILITY_RETREAT_WINDOW_MS = 5 * 60 * 1000;
+function computePumpDurability5min(mintAddress, snapshotTs, snapshotPrice) {
+  if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
+  const peakWindowEnd = snapshotTs + PUMP_DURABILITY_PEAK_WINDOW_MS;
+  if (Date.now() < peakWindowEnd + PUMP_DURABILITY_RETREAT_WINDOW_MS) return null;
+  const peakRow = S().maxPriceInWindow.get(mintAddress, snapshotTs, peakWindowEnd);
+  if (!peakRow || !peakRow.max_price || peakRow.max_price <= snapshotPrice) return null;
+  const minRow = S().minPriceInWindowRange.get(
+    mintAddress, peakRow.peak_ts, peakRow.peak_ts + PUMP_DURABILITY_RETREAT_WINDOW_MS
+  );
+  if (minRow?.min_price == null || minRow.min_price <= 0) return null;
+  const retreat = Math.max(0, (peakRow.max_price - minRow.min_price) / peakRow.max_price);
+  return Math.min(retreat, 0.99);
 }
 
 // alive_at_Xh: 1 if ANY trade occurred in the 5-min window ending at
@@ -377,6 +437,10 @@ function resolveBatch(rows, label = 'resolve') {
       const hold24h = computeHoldPct(r.mint_address, r.snapshot_ts, r.last_price_sol, HOLD_24H_MS);
       const peakPct24h = computePeakPctWithin24h(r.mint_address, r.snapshot_ts, r.last_price_sol);
       const maxDd24h = computeMaxDrawdownWithin24h(r.mint_address, r.snapshot_ts, r.last_price_sol);
+      // 2026-05-14 timing-aware labels
+      const peakIn5min = computePeakWithin5min(r.mint_address, r.snapshot_ts, r.last_price_sol);
+      const bsContinues = computeBuyPressureContinues60s(r.mint_address, r.snapshot_ts);
+      const pumpDur5min = computePumpDurability5min(r.mint_address, r.snapshot_ts, r.last_price_sol);
       s.update.run(
         migrated,
         peakPct >= 0.30 ? 1 : 0,
@@ -395,6 +459,7 @@ function resolveBatch(rows, label = 'resolve') {
         hits5x24h, hits10x24h,
         hold1h, hold4h, hold24h,
         peakPct24h, maxDd24h,
+        peakIn5min, bsContinues, pumpDur5min,
         now,
         r.mint_address,
         r.snapshot_age_sec,
