@@ -125,7 +125,7 @@ function analyzeTrading(startTs) {
     win_rate: closed.length > 0 ? wins.length / closed.length : 0,
     pnl_sol: closed.reduce((s, p) => s + (p.realized_pnl_sol || 0), 0),
     avg_pct: closed.length > 0
-      ? closed.reduce((s, p) => s + (p.highest_pct || 0), 0) / closed.length
+      ? closed.reduce((s, p) => s + (p.highest_pct || 0), 0) / closed.length * 100
       : 0,
     by_strategy: byStrategy,
     exit_reasons: exitReasons,
@@ -163,7 +163,8 @@ function analyzePriceAccuracy(startTs) {
     if (!real || !real.real_peak || !p.entry_price) continue;
     checked++;
     const realPeakPct = ((real.real_peak / p.entry_price) - 1) * 100;
-    const recordedPeakPct = p.highest_pct || 0;
+    // highest_pct is stored as a fraction (0.8 = +80%), convert to percent.
+    const recordedPeakPct = (p.highest_pct || 0) * 100;
     const diff = recordedPeakPct - realPeakPct;
     if (Math.abs(diff) > 20) {
       flagged.push({
@@ -243,11 +244,11 @@ function main() {
 
   if (trade.best_trade) {
     const bt = trade.best_trade;
-    console.log(`\nBest trade:  ${bt.mint_address.slice(0,8)}… · ${bt.strategy} · ${fmtSol(bt.realized_pnl_sol)} · peak +${(bt.highest_pct || 0).toFixed(1)}% · ${bt.exit_reason}`);
+    console.log(`\nBest trade:  ${bt.mint_address.slice(0,8)}… · ${bt.strategy} · ${fmtSol(bt.realized_pnl_sol)} · peak +${((bt.highest_pct || 0)*100).toFixed(1)}% · ${bt.exit_reason}`);
   }
   if (trade.worst_trade) {
     const wt = trade.worst_trade;
-    console.log(`Worst trade: ${wt.mint_address.slice(0,8)}… · ${wt.strategy} · ${fmtSol(wt.realized_pnl_sol)} · peak +${(wt.highest_pct || 0).toFixed(1)}% · ${wt.exit_reason}`);
+    console.log(`Worst trade: ${wt.mint_address.slice(0,8)}… · ${wt.strategy} · ${fmtSol(wt.realized_pnl_sol)} · peak +${((wt.highest_pct || 0)*100).toFixed(1)}% · ${wt.exit_reason}`);
   }
 
   console.log(`\n--- PRICE ACCURACY SPOT-CHECK ---`);
