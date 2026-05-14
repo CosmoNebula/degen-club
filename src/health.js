@@ -17,20 +17,27 @@ const HEALTH_PATH = path.resolve(__dirname, '..', 'data', 'health.json');
 // Cache for 60s. open_positions and last_trade_at refresh every tick since
 // they're cheap (open count is small; MAX(timestamp) hits the index tail).
 const COUNTS_CACHE_TTL_MS = 60 * 1000;
+const HOT_CACHE_TTL_MS = 10 * 1000;
 let _cachedCounts = null;
 let _cachedAt = 0;
+let _cachedHot = null;
+let _cachedHotAt = 0;
 function getCounts() {
   const now = Date.now();
   const d = db();
-  // Hot path: open_positions + last_trade_at every tick (cheap).
-  let hot = {};
-  try {
-    hot = d.prepare(`
-      SELECT
-        (SELECT COUNT(*) FROM paper_positions WHERE status='open') AS open_positions,
-        (SELECT MAX(timestamp) FROM trades) AS last_trade_at
-    `).get() || {};
-  } catch { /* leave defaults */ }
+  // MAX(timestamp) on trades has no index → 4.45M-row tablescan, ~470ms.
+  // The dashboard "last trade Xs ago" widget can tolerate 10s display lag,
+  // so cache the hot path too.
+  if (!_cachedHot || (now - _cachedHotAt) > HOT_CACHE_TTL_MS) {
+    try {
+      _cachedHot = d.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM paper_positions WHERE status='open') AS open_positions,
+          (SELECT MAX(timestamp) FROM trades) AS last_trade_at
+      `).get() || {};
+      _cachedHotAt = now;
+    } catch { _cachedHot = _cachedHot || {}; }
+  }
   // Cold path: the 3 full-table COUNT(*) on trades/mints/wallets, every 60s.
   if (!_cachedCounts || (now - _cachedAt) > COUNTS_CACHE_TTL_MS) {
     try {
@@ -43,7 +50,7 @@ function getCounts() {
       _cachedAt = now;
     } catch { _cachedCounts = _cachedCounts || {}; }
   }
-  return { ..._cachedCounts, ...hot };
+  return { ..._cachedCounts, ..._cachedHot };
 }
 
 export function startHealthHeartbeat({ pp, onchainTrades }) {
