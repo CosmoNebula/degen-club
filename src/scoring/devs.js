@@ -6,14 +6,19 @@ function S() {
   const d = db();
   cached = {
     allCreators: d.prepare('SELECT wallet FROM creators'),
-    // 2026-05-14: only recompute creators with recent activity. Their
-    // classification is derived from launch_count + mint outcomes, which
-    // only change when they LAUNCH a new mint or one of their mints
-    // migrates/rugs. A creator silent for 72h has stale state by definition.
+    // 2026-05-14: only recompute creators who LAUNCHED a mint or had one
+    // migrate/rug in the recent window. last_active_at was too broad —
+    // 99.7% of creators "active" because old mints still trade. What
+    // matters for classification is new launches + mint outcomes.
     activeCreators: d.prepare(`
-      SELECT wallet FROM creators
-      WHERE last_active_at IS NOT NULL
-        AND last_active_at > ?
+      SELECT DISTINCT creator_wallet AS wallet
+      FROM mints
+      WHERE creator_wallet IS NOT NULL
+        AND (
+          created_at > ?
+          OR (migrated = 1 AND migrated_at > ?)
+          OR (rugged = 1 AND rugged_at > ?)
+        )
     `),
     creatorMints: d.prepare(`
       SELECT mint_address, peak_market_cap_sol, current_market_cap_sol,
@@ -183,7 +188,7 @@ const DEVS_ACTIVE_WINDOW_DAYS = 7;
 async function recomputeAllCreatorsAsync() {
   const s = S();
   const cutoff = Date.now() - DEVS_ACTIVE_WINDOW_DAYS * 86400 * 1000;
-  const active = s.activeCreators.all(cutoff);
+  const active = s.activeCreators.all(cutoff, cutoff, cutoff);
   for (let i = 0; i < active.length; i++) {
     try { recomputeCreator(active[i].wallet); } catch (err) { console.error('[devs]', err.message); }
     // Per-creator yield keeps WSS / heartbeat / live processing breathing.
