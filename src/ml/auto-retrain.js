@@ -244,20 +244,21 @@ function adaptiveTick() {
   }
 }
 
-// 2026-05-13: wall-clock-aligned schedule. Previously: "15 min after boot, then
-// every 2h on whatever cadence that creates." That meant every bot restart
-// re-fired a retrain and the schedule drifted. Now: retrains fire at even-hour
-// wall-clock slots in local TZ (00:00, 02:00, 04:00, ... 22:00). Bot restarts
-// no longer trigger retrains; we just wait for the next aligned slot.
+// 2026-05-13 PM: every-hour wall-clock-aligned schedule (was even hours / 2h
+// cadence on the 2-CPU box). 4-CPU resize means retrain doesn't preempt the
+// trading loop, so we retrain every hour at HH:00 ET. Bot restarts no longer
+// trigger retrains; we just wait for the next aligned hour.
 // TZ is set via systemd Environment=TZ=America/New_York so "wall clock" = ET.
 function nextAlignedRetrainAt(fromMs = Date.now()) {
   const d = new Date(fromMs);
-  const hour = d.getHours();
-  // Round up to the next even hour. If we're EXACTLY on an even hour, take
-  // the NEXT one to avoid double-firing if startup races the boundary.
-  const nextEvenHour = (hour % 2 === 0) ? hour + 2 : hour + 1;
   const target = new Date(d);
-  target.setHours(nextEvenHour, 0, 0, 0);
+  // Round up to the next top-of-hour. If we're exactly on HH:00:00, take
+  // HH+1 to avoid double-firing if startup races the boundary.
+  if (d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0) {
+    target.setHours(d.getHours() + 1, 0, 0, 0);
+  } else {
+    target.setHours(d.getHours() + 1, 0, 0, 0);
+  }
   return target;
 }
 
@@ -278,7 +279,7 @@ export function startAutoRetrain() {
   // Adaptive trigger DISABLED per user request — was firing too frequently
   // (30-60 min cadence) and redundant with the fixed schedule.
   // setInterval(adaptiveTick, ADAPTIVE_CHECK_MS);
-  console.log(`[auto-retrain] scheduled · wall-clock 2h slots (00,02,04,..,22 ET) · NO retrain-on-restart · adaptive disabled`);
+  console.log(`[auto-retrain] scheduled · wall-clock 1h slots (every HH:00 ET) · NO retrain-on-restart · adaptive disabled`);
 }
 
 // Manual trigger via API (useful for "retrain now" button)
