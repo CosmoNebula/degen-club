@@ -42,10 +42,12 @@ const strategies = [
       exit: {
         stop_loss_pct: 25,
         take_profit_tiers: [
-          { trigger_pct: 30, sell_pct: 50 },
-          { trigger_pct: 80, sell_pct: 50 },
+          { trigger_pct: 30, sell_pct: 60 },     // lock 60% fast
+          { trigger_pct: 80, sell_pct: 100 },    // full exit on remaining
         ],
-        trailing_stop: { arm_pct: 25, trail_pct: 18 },
+        // No trailing stop — quick-flip strategy uses tier sells + breakeven
+        // SL after T1 + 15min max hold. Trail above T2 would never fire (T2
+        // closes 100%); trail below T2 would shake us out before T2.
         max_hold_min: 15,
         prediction_exit: { target: 'will_die_fast', op: '>', value: 0.85 },
         breakeven_after_tier1: 1,
@@ -92,7 +94,10 @@ const strategies = [
           { trigger_pct: 400, sell_pct: 25 },
           { trigger_pct: 1000, sell_pct: 25 },
         ],
-        trailing_stop: { arm_pct: 150, trail_pct: 55 },
+        // Trail arms AFTER T3 fires (+1000%). Once we've locked 70% of position
+        // via 3 tiers, the residual 30% rides a wide trail to capture full
+        // runner upside. Arm at +1100% so trail never kicks in before T3.
+        trailing_stop: { arm_pct: 1100, trail_pct: 55 },
         max_hold_min: 240,
         prediction_exit: { target: 'will_die_fast', op: '>', value: 0.95 },
         breakeven_after_tier1: 0,
@@ -130,7 +135,9 @@ const strategies = [
           { trigger_pct: 180, sell_pct: 30 },
           { trigger_pct: 500, sell_pct: 25 },
         ],
-        trailing_stop: { arm_pct: 50, trail_pct: 35 },
+        // Trail arms after T2 fires (+180%). Protects the residual bag (after
+        // T1+T2 sold 55%) on a 35% trail. Stays above T2 so T2 fires normally.
+        trailing_stop: { arm_pct: 250, trail_pct: 35 },
         max_hold_min: 90,
         prediction_exit: { target: 'will_die_fast', op: '>', value: 0.90 },
       },
