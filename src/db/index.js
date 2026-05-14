@@ -321,6 +321,11 @@ function runMigrations(d) {
   // ASC LIMIT 30. Composite (mint, is_buy, timestamp) lets the planner seek
   // directly to the right rows and read them in timestamp order, no sort.
   d.exec(`CREATE INDEX IF NOT EXISTS idx_trades_mint_buy_ts ON trades(mint_address, is_buy, timestamp)`);
+  // devs.bundleOverlap query: WHERE m.creator_wallet=? AND t.is_buy=1 AND
+  // t.seconds_from_creation<=5 AND w.bundle_cluster_id IS NOT NULL. The
+  // creator_wallet filter was a 178k-row mints tablescan per creator;
+  // index makes it O(1). Drops bundleOverlap from ~800ms to <50ms.
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_mints_creator ON mints(creator_wallet)`);
 
   d.exec(`CREATE TABLE IF NOT EXISTS gate_rejections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
