@@ -246,8 +246,20 @@ function onTrade(e) {
     // real ~5e-7 market — corrupted peak_market_cap_sol to 2085 SOL and made
     // the dashboard display 2x reality. Reject mint-state updates from
     // sub-0.01-SOL trades on migrated mints; the trade row is still stored.
-    const DUST_TRADE_SOL = 0.01;
+    // 2026-05-13 PM: dust filter was migrated-only at 0.01 SOL. OLIVIA (peak
+    // recorded 866 SOL on a single 0.0029 SOL buy) and SIGEON (peak 754 SOL
+    // via a sequence of 0.0107 SOL bot ratchets) both happened pre-migration —
+    // neither got filtered. Two fixes: (1) extend to pre-mig once the mint has
+    // real interest (mcap > 30 SOL) so brand-new launches with legit tiny
+    // first-buys still accept; (2) bump threshold 0.01 → 0.02 because bots
+    // size their dust trades to JUST above 0.01 to evade the old gate.
+    const DUST_TRADE_SOL = 0.02;
+    const DUST_BC_MIN_MCAP_SOL = 30;
     const isDustOnAmm = mint.migrated && (solAmount || 0) < DUST_TRADE_SOL;
+    const isDustOnMatureBc = !mint.migrated &&
+                            (solAmount || 0) < DUST_TRADE_SOL &&
+                            (mint.current_market_cap_sol || 0) > DUST_BC_MIN_MCAP_SOL;
+    const isDust = isDustOnAmm || isDustOnMatureBc;
     // Spike-out guard: if this trade's implied price is >5x the prior price
     // AND the prior price was set in the last 5 min AND we're already past
     // the bonding-curve floor, treat as an off-pool quote artifact.
@@ -310,7 +322,7 @@ function onTrade(e) {
     const isStaleEvent = !!(e.timestamp && mint.last_trade_at &&
                            e.timestamp < mint.last_trade_at - STALE_TRADE_MS);
     const isJunkPrice = !mint.rugged && (
-      isDustOnAmm ||
+      isDust ||
       isSpikeUp ||
       isSpikeDown ||
       isAbsurdPeakJump ||
