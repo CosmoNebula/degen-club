@@ -160,6 +160,30 @@ function classifyCreator(c) {
   return { category, flags };
 }
 
+// 2026-05-14: was a tight for-loop over ~34k creators with a JOIN-heavy
+// SQL query per iteration. Single sweep = 30-60 min of solid main-thread
+// blocking, wedging WSS connections and stalling everything. Now yields
+// to the event loop after each BATCH so other I/O can be serviced.
+const DEVS_BATCH_SIZE = 50;
+const DEVS_BATCH_YIELD_MS = 25;
+async function recomputeAllCreatorsAsync() {
+  const s = S();
+  const all = s.allCreators.all();
+  for (let i = 0; i < all.length; i += DEVS_BATCH_SIZE) {
+    const batch = all.slice(i, i + DEVS_BATCH_SIZE);
+    for (const r of batch) {
+      try { recomputeCreator(r.wallet); } catch (err) { console.error('[devs]', err.message); }
+    }
+    // Yield: 25ms between batches lets the event loop service WSS, fetches,
+    // setInterval ticks. Total sweep wall-time stretches longer but the
+    // bot stays responsive throughout.
+    await new Promise(resolve => setTimeout(resolve, DEVS_BATCH_YIELD_MS));
+  }
+  return all.length;
+}
+
+// Sync version retained for the manual CLI path in case anything still
+// imports it. Bot scheduler uses the async version.
 export function recomputeAllCreators() {
   const s = S();
   const all = s.allCreators.all();
@@ -171,20 +195,14 @@ export function recomputeAllCreators() {
 
 export function startDevSweep() {
   setTimeout(() => {
-    try {
-      const n = recomputeAllCreators();
-      console.log(`[devs] initial classification: ${n} creators`);
-    } catch (err) {
-      console.error('[devs] initial', err.message);
-    }
+    recomputeAllCreatorsAsync()
+      .then(n => console.log(`[devs] initial classification: ${n} creators (batched)`))
+      .catch(err => console.error('[devs] initial', err.message));
   }, 8000);
 
   setInterval(() => {
-    try {
-      const n = recomputeAllCreators();
-      if (n > 0) console.log(`[devs] recomputed ${n} creators`);
-    } catch (err) {
-      console.error('[devs] sweep', err.message);
-    }
+    recomputeAllCreatorsAsync()
+      .then(n => { if (n > 0) console.log(`[devs] recomputed ${n} creators (batched)`); })
+      .catch(err => console.error('[devs] sweep', err.message));
   }, 10 * 60 * 1000);
 }
