@@ -31,7 +31,7 @@ import { db } from '../db/index.js';
 const SLOTS = 50;
 const KOL_SLOTS = 10;
 const HIGH_END = 25;
-const RECOMPUTE_INTERVAL_MS = 30 * 60 * 1000;  // 2026-05-13: 1h → 30min for faster reaction to degradation (D2)
+const RECOMPUTE_INTERVAL_MS = 15 * 60 * 1000;  // 2026-05-13 PM: 30min → 15min after 4-CPU resize. Faster reaction to hot streaks and degradation; recompute is ~3s on ~3k candidates, no impact.
 // Auto-untrack: wallets that fall off top-50 for AUTO_UNTRACK_DROPS consecutive
 // recomputes get tracked=0. At 30-min cadence, 3 drops = ~1.5h sticky window.
 // Prevents single bad hour from kicking out a long-standing high-quality wallet,
@@ -501,7 +501,9 @@ export function startWalletLeaderboard() {
   // causing WebSocket heartbeat misses. The filter for HFT scalpers (which
   // were the dominant noise) solves both that problem AND the Helius credit
   // burn from per-event webhook delivery on scalper wallets.
-  const RECOMPUTE_AUTO_INTERVAL_MS = 2 * 60 * 60 * 1000;  // 2h
+  // 2026-05-13 PM: AUTO_INTERVAL was 2h while the module constant said 30min —
+  // log was lying. Unified on RECOMPUTE_INTERVAL_MS (now 15min) so the actual
+  // recompute matches what we say. Each pass is ~3s on ~3k candidates.
   setTimeout(() => {
     try { recomputeAllLeaderboards({ verbose: true }); }
     catch (err) { console.error('[leaderboard] initial', err.message); }
@@ -509,6 +511,6 @@ export function startWalletLeaderboard() {
   setInterval(() => {
     try { recomputeAllLeaderboards({ verbose: true }); }
     catch (err) { console.error('[leaderboard] tick', err.message); }
-  }, RECOMPUTE_AUTO_INTERVAL_MS);
+  }, RECOMPUTE_INTERVAL_MS);
   console.log(`[leaderboard] started · combined + premig + postmig recompute every ${RECOMPUTE_INTERVAL_MS / 60000}min`);
 }

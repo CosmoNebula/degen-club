@@ -19,7 +19,7 @@ const SCRIPT = path.join(ML_ROOT, 'scripts', 'retrain_all.py');
 const LAST_TRAIN_META = path.join(ML_ROOT, 'data', '.last_train_meta.json');
 
 const FIRST_RUN_DELAY_MS = 15 * 60 * 1000;   // 15 min after boot
-const REPEAT_INTERVAL_MS = 2 * 60 * 60 * 1000;   // 2026-05-13: dropped hourly→2h. Observed DO hourly-avg CPU pegged at 96% with hourly retrains AND A1/A2 universal eval running. Retrain alone takes ~18 min wall-time and dominates the hour. 2h cadence + nice/ionice (see below) restores ~75-80% steady-state. Models still retrain 12x/day, plenty for label-resolve rate. Adaptive trigger remains disabled.
+const REPEAT_INTERVAL_MS = 1 * 60 * 60 * 1000;   // 2026-05-13 PM: restored to hourly after 4-CPU droplet resize. Original 2h cadence was a CPU-pressure throttle on the 2-CPU box (96% peak during retrain + A1 universal eval). With 4 cores the retrain subprocess sits on its own core via nice/ionice and doesn't preempt the trading loop, so 24x/day fresh models is safe and helps react to regime shifts faster.
 
 // Adaptive trigger (added 2026-05-11): check every 5min for either
 // (a) NEW_LABELS > N since last retrain AND last retrain ≥ 30min ago, or

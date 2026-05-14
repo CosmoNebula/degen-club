@@ -31,7 +31,7 @@ const TARGETS = [
   { age: 1800, tolerance: 120 },
   { age: 3600, tolerance: 300 },
 ];
-const SWEEP_INTERVAL_MS = 10 * 1000;
+const SWEEP_INTERVAL_MS = 5 * 1000;  // 2026-05-13 PM: 10s → 5s after 4-CPU resize. Snapshot sweep is the heartbeat for ML prediction freshness; tighter cadence means new mints get scored sooner after each age-window boundary and agent-executor reacts faster.
 
 let stmts = null;
 function S() {
@@ -759,13 +759,12 @@ function takeSnapshot(mint, target, snapshotTs) {
   const dt = new Date(mint.created_at);
 
   // A1 (Phase D, 2026-05-13): Universal snapshot eval. Originally fired at
-  // every age ≥ 60s (60/120/300/600/900/1800/3600). Throttled 2026-05-13 PM
-  // to the four core ages (60/300/900/3600) when DO hourly CPU avg crept
-  // above headroom during retrain windows. The 120s/600s/1800s ages were
-  // mostly confirmatory — same mint, similar features, redundant evals
-  // due to the 8s debounce anyway. Cuts eval volume ~40%, no material
-  // signal loss. Skip 15s/30s ages — too early to read sniper/bundle state.
-  const A1_EVAL_AGES = new Set([60, 300, 900, 3600]);
+  // every age ≥ 60s (60/120/300/600/900/1800/3600). Throttled mid-2026-05-13
+  // to four core ages (60/300/900/3600) on the 2-CPU box. RESTORED to the
+  // full mature-mint set on 2026-05-13 PM after 4-CPU resize — extra cores
+  // absorb the eval volume, debounce in agent-executor still dedups bursts.
+  // 15s/30s ages remain skipped (too early to read sniper/bundle state).
+  const A1_EVAL_AGES = new Set([60, 120, 300, 600, 900, 1800, 3600]);
   if (A1_EVAL_AGES.has(target)) {
     const reasonSuffix = agg.trackedBuyers >= 1 ? `-tracked-${agg.trackedBuyers}` : '';
     import('./agent-executor.js').then(m => {
