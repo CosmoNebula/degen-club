@@ -317,6 +317,10 @@ function runMigrations(d) {
   // which can be 1000s of rows on busy entities. This index makes it O(1).
   // Critical hot path — fires on every buy.
   d.exec(`CREATE INDEX IF NOT EXISTS idx_trades_mint_wallet_buy ON trades(mint_address, wallet, is_buy)`);
+  // runner-score tradesTo5SOL: WHERE mint=? AND is_buy=1 ORDER BY timestamp
+  // ASC LIMIT 30. Composite (mint, is_buy, timestamp) lets the planner seek
+  // directly to the right rows and read them in timestamp order, no sort.
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_trades_mint_buy_ts ON trades(mint_address, is_buy, timestamp)`);
 
   d.exec(`CREATE TABLE IF NOT EXISTS gate_rejections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
