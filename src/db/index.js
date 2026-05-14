@@ -311,6 +311,12 @@ function runMigrations(d) {
   // and seek directly to the recent-buys range. Index build is ~30s at
   // startup on the current table size — one-time cost.
   d.exec(`CREATE INDEX IF NOT EXISTS idx_trades_buy_recency ON trades(is_buy, timestamp, seconds_from_creation)`);
+  // walletAlreadyBought: SELECT 1 FROM trades WHERE mint=? AND wallet=?
+  // AND is_buy=1 LIMIT 1. Without a (mint,wallet) index the planner scans
+  // either all trades for that mint OR all trades for that wallet, both of
+  // which can be 1000s of rows on busy entities. This index makes it O(1).
+  // Critical hot path — fires on every buy.
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_trades_mint_wallet_buy ON trades(mint_address, wallet, is_buy)`);
 
   d.exec(`CREATE TABLE IF NOT EXISTS gate_rejections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
