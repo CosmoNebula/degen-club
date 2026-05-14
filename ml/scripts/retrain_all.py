@@ -47,10 +47,9 @@ TARGETS = [
     # cause of retrain crashes (stratify split on integer-second values).
     # drawdown_from_peak_pct kept (R²=0.70, strong).
     {'name': 'drawdown_from_peak_pct', 'out': 'models/drawdown_from_peak_pct_v1.pkl', 'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
-    # time_to_peak_5x_sec: seconds from "+50% milestone" to "peak after". Drives
-    # WHEN to tighten trailing stop on a running position. Existing
-    # time_to_peak_sec is from snapshot — different semantics, different use.
-    {'name': 'time_to_peak_5x_sec',    'out': 'models/time_to_peak_5x_sec_v1.pkl',    'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
+    # 2026-05-14: time_to_peak_5x_sec dropped — R²=-0.055 (noise) AND was
+    # crashing the retrain via the integer-seconds stratify bug. Same class
+    # of issue as the other 3 useless regressions.
     # ---------- LONG-HORIZON "HOLD-TO-MATURITY" (added 2026-05-12) ----------
     # The labels above all answer "did this pump fast?" — these answer "is this
     # worth holding?". Models trained on these let the agent propose buy-and-
@@ -118,9 +117,11 @@ def record_history(target, kind, model_path):
         None,
     )
     try:
-        # Read-only WAL mode — bot keeps writing freely, we get a consistent
-        # snapshot at transaction start. Zero copy, zero contention. 2026-05-12.
-        conn = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True, timeout=10)
+        # 2026-05-14: was opened read-only — write was silently failing on
+        # every record_history insert (table stayed stuck on May 12 entries).
+        # Open writable; bot's WAL mode means we don't block its writes.
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn.execute('PRAGMA journal_mode = WAL')
         conn.execute(
             'INSERT INTO ml_model_history (target, kind, trained_at, n_train, n_val, n_pos, '
             'auc_pr, auc_roc, brier, lift, baseline_rate, mae, median_ae, r2, log_transform, '
