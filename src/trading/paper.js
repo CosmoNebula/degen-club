@@ -45,6 +45,24 @@ const _fastFailWarned = new Set();
 // recovery above floor and on position close.
 const TRAIL_CONFIRM_MS = 3000;
 const _trailBreachStartedAt = new Map();
+// 2026-05-14: 2-tick tier confirmation. Position monitor sees a tier
+// trigger → marks it pending. Only fires when seen AGAIN on a subsequent
+// monitor tick (different ms). Filters phantom one-shot ticks (sandwich
+// victim, stale WSS push) from arming tier sells. Keyed: positionId-tierN.
+const _tierPendingSince = new Map();
+const TIER_CONFIRM_MS = 1500; // must persist ≥1.5s across ≥2 ticks
+function tierConfirmed(positionId, tierN) {
+  const key = `${positionId}-${tierN}`;
+  const now = Date.now();
+  const first = _tierPendingSince.get(key);
+  if (!first) { _tierPendingSince.set(key, now); return false; }
+  return (now - first) >= TIER_CONFIRM_MS;
+}
+function clearTierPending(positionId) {
+  for (const k of _tierPendingSince.keys()) {
+    if (k.startsWith(`${positionId}-`)) _tierPendingSince.delete(k);
+  }
+}
 
 // Effective paper latency. Defaults to live-measured Helius p90 — replaces the
 // old static config.paper.latencyMs guess. If the dashboard explicitly sets
@@ -487,6 +505,7 @@ function broadcastEntryToTelegram({ strategy, mintAddress, entryPrice, entrySol,
 function finalizePosition(p, exitPrice, exitMcap, exitReason) {
   const s = S();
   _trailBreachStartedAt.delete(p.id);
+  clearTierPending(p.id);
   let finalSol;
   if (p.position_mode === 'live') {
     if (_pendingSells.has(p.id)) return;
@@ -973,13 +992,13 @@ function checkPosition(p) {
     }
   }
 
-  if (!t1Hit && peakPctRaw >= t1Trig) {
+  if (!t1Hit && peakPctRaw >= t1Trig && tierConfirmed(p.id, 1)) {
     p = fireTier(p, 1, strat.tier1_sell_pct, currentPrice, m.current_market_cap_sol || 0);
   }
-  if (!t2Hit && peakPctRaw >= t2Trig) {
+  if (!t2Hit && peakPctRaw >= t2Trig && tierConfirmed(p.id, 2)) {
     p = fireTier(p, 2, strat.tier2_sell_pct, currentPrice, m.current_market_cap_sol || 0);
   }
-  if (!t3Hit && peakPctRaw >= t3Trig && (strat.tier3_trail_pct || 0) <= 0) {
+  if (!t3Hit && peakPctRaw >= t3Trig && (strat.tier3_trail_pct || 0) <= 0 && tierConfirmed(p.id, 3)) {
     p = fireTier(p, 3, strat.tier3_sell_pct, currentPrice, m.current_market_cap_sol || 0);
   }
 

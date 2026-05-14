@@ -62,6 +62,15 @@ function S() {
     getMint: d.prepare('SELECT * FROM mints WHERE mint_address = ?'),
     countDistinctBuyers: d.prepare('SELECT COUNT(DISTINCT wallet) AS n FROM trades WHERE mint_address = ? AND is_buy = 1'),
     walletAlreadyBought: d.prepare('SELECT 1 FROM trades WHERE mint_address = ? AND wallet = ? AND is_buy = 1 LIMIT 1'),
+    // Sandwich-victim detector: latest prior trade on this mint within a
+    // 1-second window. Used to detect "big trade → small trade" pattern
+    // where the small trade is MEV-distorted. (mint, wallet, is_buy)
+    // index makes this lookup O(1).
+    latestPriorTrade: d.prepare(`
+      SELECT sol_amount FROM trades
+      WHERE mint_address = ? AND timestamp >= ?
+      ORDER BY timestamp DESC LIMIT 1
+    `),
     insertTrade: d.prepare(`INSERT OR IGNORE INTO trades
       (signature, mint_address, wallet, is_buy, sol_amount, token_amount, price_sol, market_cap_sol,
        seconds_from_creation, is_sniper, is_first_block, buyer_rank, wallet_label, timestamp, is_junk)
@@ -353,6 +362,24 @@ function onTrade(e) {
     const reserveRefPrice = curveFresh ? (mint.last_price_sol || 0) : 0;
     const isReserveMismatch = reserveRefPrice > 0 && px > 0 &&
                              Math.abs(px - reserveRefPrice) / reserveRefPrice > RESERVE_DEVIATION;
+    // 2026-05-14: sandwich-victim detector. Pattern: big-buy → SMALL-buy at
+    // distorted price → big-sell, all within 1 second. The small buy IS the
+    // victim — its implied price is whatever the front-runner pushed the
+    // pool to. Detection: if this is a small (<0.05 SOL) trade AND there
+    // was a much-larger trade on this mint within the last 1s in EITHER
+    // direction (the front-run), flag this as suspicious. We don't have
+    // the back-run yet, but the asymmetric pair (big-then-small) is enough.
+    const SANDWICH_WINDOW_MS = 1000;
+    const SANDWICH_SMALL_SOL = 0.05;
+    const SANDWICH_LARGE_RATIO = 10;
+    let isSandwichVictim = false;
+    if ((solAmount || 0) < SANDWICH_SMALL_SOL && mint.last_trade_at &&
+        (now - mint.last_trade_at) < SANDWICH_WINDOW_MS) {
+      const prior = s.latestPriorTrade.get(e.mint, now - SANDWICH_WINDOW_MS);
+      if (prior && (prior.sol_amount || 0) >= (solAmount || 0) * SANDWICH_LARGE_RATIO) {
+        isSandwichVictim = true;
+      }
+    }
     const isJunkPrice = !mint.rugged && (
       isDust ||
       isSpikeUp ||
@@ -360,6 +387,7 @@ function onTrade(e) {
       isAbsurdPeakJump ||
       isStaleEvent ||
       isReserveMismatch ||
+      isSandwichVictim ||
       (!mint.migrated && px < PRICE_FLOOR) ||
       (mint.migrated && px < MIGRATED_PRICE_FLOOR)
     );
