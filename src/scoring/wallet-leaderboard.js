@@ -359,6 +359,132 @@ export function leaderboardAddresses(maxRank = SLOTS) {
     .all(maxRank).map(r => r.address);
 }
 
+// Phase 1: dual scoped leaderboards. Same disqualifier gate as the combined
+// board, but stats are sourced from premig_* / postmig_* columns instead of
+// the totals. Recomputed alongside the main leaderboard.
+//
+// Scoring formula (per scope) — same shape as combined, just lower weights
+// for fields we don't track scoped (migrator_pre_mig_buys, early_entry_rate,
+// rug_rate_30d). Score weighted on:
+//   PnL (capped 500) × 5
+//   Win rate × 100
+//   Sample log × 20
+//   Multiple (capped 10) × 10
+const SCOPED_PNL_CAP = 500;
+const SCOPED_MULTIPLE_CAP = 10;
+
+function scoreScoped(c) {
+  const pnl = Math.min(c.realized_pnl_30d || 0, SCOPED_PNL_CAP) * 5;
+  const wr = (c.win_rate_30d || 0) * 100;
+  const sampleLog = Math.log10((c.closed_30d || 0) + 1) * 20;
+  const mult = Math.min(c.avg_multiple_30d || 0, SCOPED_MULTIPLE_CAP) * 10;
+  const score = pnl + wr + sampleLog + mult;
+  return {
+    score: Number(score.toFixed(3)),
+    components: {
+      pnl: Number(pnl.toFixed(3)),
+      win_rate: Number(wr.toFixed(2)),
+      sample_log: Number(sampleLog.toFixed(2)),
+      multiple: Number(mult.toFixed(2)),
+    },
+  };
+}
+
+function recomputeScopedLeaderboard(scope, { verbose = false } = {}) {
+  const d = db();
+  const prefix = scope === 'premig' ? 'premig' : 'postmig';
+  const table = `wallet_leaderboard_${scope}`;
+  // Sample requirement is lower for scoped boards — scoped windows have less
+  // data than total. Postmig especially is sparse early after deploy.
+  const minClosed = scope === 'premig' ? 10 : 5;
+  const candidates = d.prepare(`
+    SELECT
+      w.address,
+      COALESCE(w.${prefix}_realized_pnl_30d, 0) AS realized_pnl_30d,
+      COALESCE(w.${prefix}_closed_30d, 0) AS closed_30d,
+      CASE WHEN COALESCE(w.${prefix}_closed_30d, 0) > 0
+        THEN CAST(COALESCE(w.${prefix}_wins_30d, 0) AS REAL) / w.${prefix}_closed_30d
+        ELSE 0 END AS win_rate_30d,
+      CASE WHEN COALESCE(w.${prefix}_multiple_count_30d, 0) > 0
+        THEN COALESCE(w.${prefix}_multiple_sum_30d, 0) / w.${prefix}_multiple_count_30d
+        ELSE 0 END AS avg_multiple_30d,
+      COALESCE(w.sniper_ratio, 0) AS sniper_ratio,
+      COALESCE(w.avg_hold_seconds, 0) AS avg_hold_seconds
+    FROM wallets w
+    WHERE COALESCE(w.${prefix}_closed_30d, 0) >= ?
+      AND COALESCE(w.sniper_ratio, 0) <= 0.30
+      AND COALESCE(w.first_block_ratio, 0) <= 0.20
+      AND COALESCE(w.avg_hold_seconds, 0) >= 60
+      AND COALESCE(w.trade_count_30d, 0) <= 1500
+      AND COALESCE(w.category, 'NOT_SURE') NOT IN ('SCALPER', 'BOT', 'BUNDLE')
+      AND COALESCE(w.bundle_cluster_id, '') = ''
+  `).all(minClosed);
+
+  if (!candidates.length) {
+    if (verbose) console.log(`[leaderboard-${scope}] no candidates yet — skipping`);
+    return { scanned: 0, top: 0 };
+  }
+
+  const scored = candidates.map(c => ({ ...c, ...scoreScoped(c) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, SLOTS);
+
+  const insert = d.prepare(`INSERT INTO ${table}
+    (address, rank, tier, score, realized_pnl_30d, win_rate_30d, closed_30d,
+     avg_multiple_30d, sniper_ratio, avg_hold_seconds, components_json, label, computed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  const fetchLabel = d.prepare('SELECT label FROM wallets WHERE address = ?');
+  const now = Date.now();
+
+  const tx = d.transaction(() => {
+    d.exec(`DELETE FROM ${table}`);
+    scored.forEach((c, i) => {
+      const rank = i + 1;
+      // Tier label is purely positional on scoped boards (no separate floors).
+      const tier = rank <= KOL_SLOTS ? 'KOL' : rank <= HIGH_END ? 'HIGH' : 'TRACKED';
+      const label = fetchLabel.get(c.address)?.label || null;
+      insert.run(
+        c.address, rank, tier, c.score,
+        c.realized_pnl_30d, c.win_rate_30d, c.closed_30d,
+        c.avg_multiple_30d, c.sniper_ratio, c.avg_hold_seconds,
+        JSON.stringify(c.components), label, now,
+      );
+    });
+  });
+  tx();
+
+  if (verbose) {
+    const top3 = scored.slice(0, 3).map(c => `${c.address.slice(0, 6)}=${c.score.toFixed(1)}`).join(', ');
+    console.log(`[leaderboard-${scope}] scanned ${candidates.length} · top ${scored.length} · top3=${top3}`);
+  }
+  return { scanned: candidates.length, top: scored.length };
+}
+
+export function recomputeAllLeaderboards({ verbose = false } = {}) {
+  const combined = recomputeLeaderboard({ verbose });
+  const premig = recomputeScopedLeaderboard('premig', { verbose });
+  const postmig = recomputeScopedLeaderboard('postmig', { verbose });
+  return { combined, premig, postmig };
+}
+
+export function scopedLeaderboardAddresses(scope, maxRank = SLOTS) {
+  const table = `wallet_leaderboard_${scope}`;
+  return db().prepare(`SELECT address FROM ${table} WHERE rank <= ? ORDER BY rank`)
+    .all(maxRank).map(r => r.address);
+}
+
+// Wallets present on BOTH scoped boards — elite generalists.
+export function leaderboardIntersection(maxRank = SLOTS) {
+  return db().prepare(`
+    SELECT p.address, p.rank AS premig_rank, q.rank AS postmig_rank,
+           p.score AS premig_score, q.score AS postmig_score
+    FROM wallet_leaderboard_premig p
+    JOIN wallet_leaderboard_postmig q ON q.address = p.address
+    WHERE p.rank <= ? AND q.rank <= ?
+    ORDER BY (p.rank + q.rank) ASC
+  `).all(maxRank, maxRank);
+}
+
 export function tierFor(address) {
   const r = db().prepare('SELECT tier FROM wallet_leaderboard WHERE address = ?').get(address);
   return r ? r.tier : null;
@@ -377,12 +503,12 @@ export function startWalletLeaderboard() {
   // burn from per-event webhook delivery on scalper wallets.
   const RECOMPUTE_AUTO_INTERVAL_MS = 2 * 60 * 60 * 1000;  // 2h
   setTimeout(() => {
-    try { recomputeLeaderboard({ verbose: true }); }
+    try { recomputeAllLeaderboards({ verbose: true }); }
     catch (err) { console.error('[leaderboard] initial', err.message); }
   }, 60 * 1000);
   setInterval(() => {
-    try { recomputeLeaderboard({ verbose: true }); }
+    try { recomputeAllLeaderboards({ verbose: true }); }
     catch (err) { console.error('[leaderboard] tick', err.message); }
   }, RECOMPUTE_AUTO_INTERVAL_MS);
-  console.log(`[leaderboard] started · top-50 recompute every ${RECOMPUTE_INTERVAL_MS / 60000}min (humans-only filter, sticky auto-untrack ${AUTO_UNTRACK_DROPS} drops)`);
+  console.log(`[leaderboard] started · combined + premig + postmig recompute every ${RECOMPUTE_INTERVAL_MS / 60000}min`);
 }

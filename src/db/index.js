@@ -171,6 +171,24 @@ function runMigrations(d) {
   ensureCol(d, 'mints', 'last_price_source', `TEXT`);
   ensureCol(d, 'mints', 'last_price_source_at', `INTEGER`);
 
+  // Phase 1 (2026-05-13) — pre/post-migration scoped wallet stats. Lets us
+  // build two separate top-50 leaderboards: pre-mig hunters (bonding curve
+  // entries) vs post-mig hunters (AMM entries). Scope is determined per
+  // holding by comparing first_buy_at vs mint.migrated_at: if first_buy was
+  // before migration (or mint never migrated), the holding is pre-mig;
+  // otherwise post-mig. Aggregated counters get updated on each
+  // recomputeWallet() pass alongside the existing un-scoped totals.
+  ensureCol(d, 'wallets', 'premig_closed_30d', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'wallets', 'premig_realized_pnl_30d', `REAL DEFAULT 0`);
+  ensureCol(d, 'wallets', 'premig_wins_30d', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'wallets', 'premig_multiple_sum_30d', `REAL DEFAULT 0`);
+  ensureCol(d, 'wallets', 'premig_multiple_count_30d', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'wallets', 'postmig_closed_30d', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'wallets', 'postmig_realized_pnl_30d', `REAL DEFAULT 0`);
+  ensureCol(d, 'wallets', 'postmig_wins_30d', `INTEGER DEFAULT 0`);
+  ensureCol(d, 'wallets', 'postmig_multiple_sum_30d', `REAL DEFAULT 0`);
+  ensureCol(d, 'wallets', 'postmig_multiple_count_30d', `INTEGER DEFAULT 0`);
+
   ensureCol(d, 'paper_positions', 'strategy', `TEXT`);
   ensureCol(d, 'paper_positions', 'entry_mcap_sol', `REAL DEFAULT 0`);
   ensureCol(d, 'paper_positions', 'exit_mcap_sol', `REAL`);
@@ -393,6 +411,29 @@ function runMigrations(d) {
   )`);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_leaderboard_rank ON wallet_leaderboard(rank ASC)`);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_leaderboard_tier ON wallet_leaderboard(tier)`);
+
+  // Phase 1 (2026-05-13) — pre/post-migration scoped leaderboards. Same
+  // shape as wallet_leaderboard. Pre-mig surfaces wallets best at calling
+  // bonding curve runners; post-mig surfaces wallets best at calling
+  // post-migration AMM moves. Wallets that rank on both = elite generalists.
+  for (const scope of ['premig', 'postmig']) {
+    d.exec(`CREATE TABLE IF NOT EXISTS wallet_leaderboard_${scope} (
+      address TEXT PRIMARY KEY,
+      rank INTEGER NOT NULL,
+      tier TEXT NOT NULL,
+      score REAL NOT NULL,
+      realized_pnl_30d REAL DEFAULT 0,
+      win_rate_30d REAL DEFAULT 0,
+      closed_30d INTEGER DEFAULT 0,
+      avg_multiple_30d REAL DEFAULT 0,
+      sniper_ratio REAL DEFAULT 0,
+      avg_hold_seconds INTEGER DEFAULT 0,
+      components_json TEXT,
+      label TEXT,
+      computed_at INTEGER NOT NULL
+    )`);
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_leaderboard_${scope}_rank ON wallet_leaderboard_${scope}(rank ASC)`);
+  }
 
   // Base table for ML training snapshots. Historically this table was created
   // implicitly via ensureCol's ALTER TABLE chain — which silently no-ops on a

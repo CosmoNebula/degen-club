@@ -11,7 +11,7 @@
 // tracked wallets (manually_tracked = 1) are always included regardless of rank.
 
 import { db } from '../db/index.js';
-import { leaderboardAddresses } from '../scoring/wallet-leaderboard.js';
+import { leaderboardAddresses, scopedLeaderboardAddresses } from '../scoring/wallet-leaderboard.js';
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '';
 const WEBHOOK_URL = process.env.HELIUS_WEBHOOK_URL || '';
@@ -34,10 +34,14 @@ function addressesChanged(prev, next) {
 }
 
 function topWallets() {
+  // Phase 1: union of combined + premig + postmig top-50s. Many wallets
+  // overlap so the actual count stays low. Watching all three lets us
+  // capture trades from any scoped-leader so their stats stay fresh.
   const top50 = leaderboardAddresses(50);
-  // Always include manually-tracked wallets even if not on the leaderboard.
+  const premig50 = scopedLeaderboardAddresses('premig', 50);
+  const postmig50 = scopedLeaderboardAddresses('postmig', 50);
   const manual = db().prepare(`SELECT address FROM wallets WHERE manually_tracked = 1`).all().map(r => r.address);
-  return [...new Set([...top50, ...manual])];
+  return [...new Set([...top50, ...premig50, ...postmig50, ...manual])];
 }
 
 // Mint addresses we currently hold open positions on. Subscribing the mint

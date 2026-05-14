@@ -19,7 +19,8 @@ function S() {
       SUM(CASE WHEN seconds_from_creation <= ? OR (buyer_rank IS NOT NULL AND buyer_rank <= ?) THEN 1 ELSE 0 END) AS first_block_count
       FROM trades WHERE wallet = ? AND is_buy = 1`),
     holdings: d.prepare(`
-      SELECT wh.*, m.last_price_sol, m.current_market_cap_sol, m.created_at AS mint_created_at, m.migrated
+      SELECT wh.*, m.last_price_sol, m.current_market_cap_sol, m.created_at AS mint_created_at,
+             m.migrated, m.migrated_at
       FROM wallet_holdings wh
       LEFT JOIN mints m ON m.mint_address = wh.mint_address
       WHERE wh.wallet = ?
@@ -38,6 +39,10 @@ function S() {
       trades_per_position = ?, graduated_touched = ?,
       sell_100pct_count = ?, sell_100pct_ratio = ?,
       category = ?, bot_flags = ?, copy_friendly = ?,
+      premig_closed_30d = ?, premig_realized_pnl_30d = ?,
+      premig_wins_30d = ?, premig_multiple_sum_30d = ?, premig_multiple_count_30d = ?,
+      postmig_closed_30d = ?, postmig_realized_pnl_30d = ?,
+      postmig_wins_30d = ?, postmig_multiple_sum_30d = ?, postmig_multiple_count_30d = ?,
       last_activity_at = ?
       WHERE address = ?`),
     trackedBuyersOnMint: d.prepare(`
@@ -83,6 +88,12 @@ export function recomputeWallet(address) {
   let lastActivity = 0;
   let graduatedTouched = 0;
   let sell100pctCount = 0;
+  // Phase 1: pre/post-migration scoped stats. Pre-mig = first buy on bonding
+  // curve OR mint never migrated. Post-mig = first buy on AMM.
+  let premigClosed30d = 0, premigRealized30d = 0, premigWins30d = 0;
+  let premigMultipleSum30d = 0, premigMultipleCount30d = 0;
+  let postmigClosed30d = 0, postmigRealized30d = 0, postmigWins30d = 0;
+  let postmigMultipleSum30d = 0, postmigMultipleCount30d = 0;
 
   for (const h of rows) {
     const bought = h.tokens_bought || 0;
@@ -107,6 +118,11 @@ export function recomputeWallet(address) {
     if (realizedThis < worst) worst = realizedThis;
 
     const isClosed = soldFrac >= config.traders.fullExitPctThreshold;
+    // Scope classification: pre-mig if mint never migrated OR first buy
+    // happened before migration; post-mig if first buy was after migration.
+    // Holdings with no first_buy_at are treated as pre-mig (default, matches
+    // older BC-era data).
+    const isPostMig = !!(h.migrated_at && h.first_buy_at && h.first_buy_at >= h.migrated_at);
     if (isClosed) {
       closed++;
       if (realizedThis > 0) wins++;
@@ -122,6 +138,26 @@ export function recomputeWallet(address) {
         closed30d++;
         realized30d += realizedThis;
         if (realizedThis > 0) wins30d++;
+        const multiple = invested > 0
+          ? (out + Math.max(0, bought - sold) * (h.last_price_sol || 0)) / invested
+          : null;
+        if (isPostMig) {
+          postmigClosed30d++;
+          postmigRealized30d += realizedThis;
+          if (realizedThis > 0) postmigWins30d++;
+          if (multiple != null && isFinite(multiple)) {
+            postmigMultipleSum30d += multiple;
+            postmigMultipleCount30d++;
+          }
+        } else {
+          premigClosed30d++;
+          premigRealized30d += realizedThis;
+          if (realizedThis > 0) premigWins30d++;
+          if (multiple != null && isFinite(multiple)) {
+            premigMultipleSum30d += multiple;
+            premigMultipleCount30d++;
+          }
+        }
       }
       // 7d window (subset of 30d) — parallel tracking for momentum.
       if (h.last_activity_at && h.last_activity_at >= cutoff7d) {
@@ -168,6 +204,8 @@ export function recomputeWallet(address) {
     tradesPerPosition, graduatedTouched,
     sell100pctCount, sell100pctRatio,
     category, JSON.stringify(flags), copyFriendly ? 1 : 0,
+    premigClosed30d, premigRealized30d, premigWins30d, premigMultipleSum30d, premigMultipleCount30d,
+    postmigClosed30d, postmigRealized30d, postmigWins30d, postmigMultipleSum30d, postmigMultipleCount30d,
     lastActivity || now,
     address
   );
