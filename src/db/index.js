@@ -170,6 +170,11 @@ function runMigrations(d) {
   // and see which writer is dominating for held positions.
   ensureCol(d, 'mints', 'last_price_source', `TEXT`);
   ensureCol(d, 'mints', 'last_price_source_at', `INTEGER`);
+  // 2026-05-14: per-source timestamp for reserve-decoded writers (onchain-curve
+  // pre-mig, onchain-amm post-mig). Held-mint lock in processor.js uses this
+  // to detect when the primary reserve-decoder is stale, distinct from the
+  // global last_price_source_at which gets touched by helius-tx fallbacks too.
+  ensureCol(d, 'mints', 'last_curve_write_at', `INTEGER`);
 
   // Phase 1 (2026-05-13) — pre/post-migration scoped wallet stats. Lets us
   // build two separate top-50 leaderboards: pre-mig hunters (bonding curve

@@ -72,8 +72,9 @@ function decodeAndUpdate(mintAddress, accountInfoData) {
       peak_market_cap_sol = MAX(peak_market_cap_sol, ?),
       last_trade_at = ?,
       last_price_source = ?,
-      last_price_source_at = ?
-      WHERE mint_address = ?`).run(mcapSol, priceSol, mcapSol, _now, 'onchain-curve', _now, mintAddress);
+      last_price_source_at = ?,
+      last_curve_write_at = ?
+      WHERE mint_address = ?`).run(mcapSol, priceSol, mcapSol, _now, 'onchain-curve', _now, _now, mintAddress);
   } catch (err) {
     // Self-healing: per-mint failure counter. After N decode failures, blacklist
     // the mint to stop log spam and avoid wasted work. Some pump.fun bonding

@@ -367,24 +367,28 @@ function onTrade(e) {
       // for >FALLBACK_THRESHOLD_MS, allow helius-tx to write (webhook is
       // independent of WSS reliability). pumpportal always blocked for held.
       const FALLBACK_THRESHOLD_MS = 15 * 1000;
-      const lastSrc = mint.last_price_source || '';
-      const lastSrcAt = mint.last_price_source_at || 0;
-      const primaryStale = (now - lastSrcAt) > FALLBACK_THRESHOLD_MS;
+      // Use last_curve_write_at (updated ONLY by onchain-curve / onchain-amm,
+      // never by helius-tx) for the staleness check. If we used the global
+      // last_price_source_at, helius-tx fallback writes would touch it and
+      // self-perpetuate the fallback forever — locking the held-mint price
+      // feed onto trade-derived data even after onchain-curve resumed.
+      const curveWriteAt = mint.last_curve_write_at || 0;
+      const primaryStale = (now - curveWriteAt) > FALLBACK_THRESHOLD_MS;
       let heldLock = false;
       if (isHeld) {
         const primary = !mint.migrated ? 'onchain-curve'
                       : isAmmSubscribed(e.mint) ? 'onchain-amm'
-                      : null; // no reserve-decoder subscription → helius-tx is canonical
+                      : null;
         if (primary) {
-          // Primary reserve-decoded source is supposed to write.
-          // Block writes EXCEPT: helius-tx as fallback when primary is stale.
-          if (source === 'helius-tx' && (lastSrc !== primary || primaryStale)) {
-            heldLock = false; // smart fallback to helius-tx
+          // Helius-tx is allowed as fallback ONLY when the reserve-decoder
+          // is actually stale. Once it fires again, primaryStale flips false
+          // on the next trade evaluation and helius-tx is blocked again.
+          if (source === 'helius-tx' && primaryStale) {
+            heldLock = false;
           } else {
             heldLock = true;
           }
         } else {
-          // No primary (post-mig before AMM sub) — helius-tx canonical, block pumpportal
           heldLock = source !== 'helius-tx';
         }
       }

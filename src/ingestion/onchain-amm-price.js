@@ -235,8 +235,9 @@ class OnchainAmmClient extends EventEmitter {
         peak_market_cap_sol = MAX(peak_market_cap_sol, ?),
         last_trade_at = ?,
         last_price_source = 'onchain-amm',
-        last_price_source_at = ?
-        WHERE mint_address = ?`).run(mcapSol, priceSol, mcapSol, now, now, mint);
+        last_price_source_at = ?,
+        last_curve_write_at = ?
+        WHERE mint_address = ?`).run(mcapSol, priceSol, mcapSol, now, now, now, mint);
     } catch (err) { console.error('[onchain-amm] write', err.message); }
   }
 
