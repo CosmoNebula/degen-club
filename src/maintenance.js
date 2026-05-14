@@ -26,6 +26,17 @@ function S() {
           AND COALESCE(last_trade_at, created_at) < ?
       ) LIMIT ?
     `),
+    // 2026-05-14: prune trades on migrated mints whose last_trade_at is older
+    // than retention. Wallet stats from migrator-hunter are persisted, so old
+    // raw trades aren't load-bearing — if a migrator is still active, its
+    // trades keep flowing in and last_trade_at stays fresh.
+    pickOldMigratedTradeRowids: d.prepare(`
+      SELECT rowid FROM trades WHERE mint_address IN (
+        SELECT mint_address FROM mints
+        WHERE migrated = 1
+          AND COALESCE(last_trade_at, migrated_at) < ?
+      ) LIMIT ?
+    `),
     pickOrphanHoldingsRowids: d.prepare(`
       SELECT rowid FROM wallet_holdings
       WHERE NOT EXISTS (
@@ -107,11 +118,14 @@ export async function pruneTrades() {
   const quietCutoff = now - config.maintenance.quietRetentionMinutes * 60 * 1000;
   const quietDeleted = await chunkedDelete('trades', s.pickQuietTradeRowids, quietCutoff);
 
+  const migratedCutoff = now - (config.maintenance.migratedRetentionHours || 24 * 7) * 60 * 60 * 1000;
+  const migratedDeleted = await chunkedDelete('trades', s.pickOldMigratedTradeRowids, migratedCutoff);
+
   const oldFlagsCutoff = now - 7 * 24 * 60 * 60 * 1000;
   const flagsDeleted = s.deleteOldFlags.run(oldFlagsCutoff).changes;
 
   const after = s.countTrades.get().n;
-  return { ruggedDeleted, quietDeleted, flagsDeleted, tradesBefore: before, tradesAfter: after };
+  return { ruggedDeleted, quietDeleted, migratedDeleted, flagsDeleted, tradesBefore: before, tradesAfter: after };
 }
 
 export function vacuumDb() {

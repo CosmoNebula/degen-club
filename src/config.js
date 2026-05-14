@@ -177,6 +177,13 @@ volumeSurge: {
     // exclusion is in deleteRuggedTrades + deleteQuietTrades WHERE clauses).
     ruggedRetentionHours: 3 * 24,         // 3 days (was 7d)
     quietRetentionMinutes: 3 * 24 * 60,   // 3 days (was 30d)
+    // 2026-05-14: migrated mints used to be kept FOREVER for migrator-stats.
+    // But wallet stats are persisted on the wallets table after computation,
+    // not recomputed from raw trades — old trades aren't load-bearing. If a
+    // migrator is still active, processor.js keeps writing to it and its
+    // last_trade_at stays fresh. 3-day window covers the post-mig peak
+    // window with margin.
+    migratedRetentionHours: 3 * 24,
     startupDelayMs: 60 * 1000,
   },
 

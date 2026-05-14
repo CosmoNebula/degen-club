@@ -21,7 +21,7 @@ if (!isMainThread) {
   setTimeout(async () => {
     try {
       const r = await pruneTrades();
-      console.log(`[maintenance-worker] startup prune: rugged=${r.ruggedDeleted} quiet=${r.quietDeleted} flags=${r.flagsDeleted} trades ${r.tradesBefore}→${r.tradesAfter}`);
+      console.log(`[maintenance-worker] startup prune: rugged=${r.ruggedDeleted} quiet=${r.quietDeleted} migrated=${r.migratedDeleted} flags=${r.flagsDeleted} trades ${r.tradesBefore}→${r.tradesAfter}`);
       const a = await pruneAuxData();
       console.log(`[maintenance-worker] startup aux: orphan_holdings=${a.orphanHoldings} stale_mints=${a.staleMints} copy_signals=${a.oldCopySignals} volume_signals=${a.oldVolumeSignals}`);
     } catch (err) {
@@ -32,8 +32,8 @@ if (!isMainThread) {
   setInterval(async () => {
     try {
       const r = await pruneTrades();
-      if (r.ruggedDeleted + r.quietDeleted + r.flagsDeleted > 0) {
-        console.log(`[maintenance-worker] sweep: rugged=${r.ruggedDeleted} quiet=${r.quietDeleted} flags=${r.flagsDeleted} trades ${r.tradesBefore}→${r.tradesAfter}`);
+      if (r.ruggedDeleted + r.quietDeleted + r.migratedDeleted + r.flagsDeleted > 0) {
+        console.log(`[maintenance-worker] sweep: rugged=${r.ruggedDeleted} quiet=${r.quietDeleted} migrated=${r.migratedDeleted} flags=${r.flagsDeleted} trades ${r.tradesBefore}→${r.tradesAfter}`);
       }
       const a = await pruneAuxData();
       const auxTotal = a.orphanHoldings + a.staleMints + a.oldCopySignals + a.oldVolumeSignals;
