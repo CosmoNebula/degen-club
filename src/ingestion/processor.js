@@ -217,7 +217,11 @@ function onTrade(e) {
     const priceSol = tokenAmount > 0 ? solAmount / tokenAmount : null;
     const wallet = e.traderPublicKey || '';
 
-    const uniqueBuyersSoFar = s.countDistinctBuyers.get(e.mint).n;
+    // 2026-05-14: COUNT(DISTINCT wallet) per trade was the dominant loop
+    // blocker (5-50 calls/sec × 150-300ms each). mints.unique_buyer_count
+    // is already maintained on every buy — read that instead, increment
+    // via walletAlreadyBought check below.
+    const uniqueBuyersSoFar = mint.unique_buyer_count || 0;
     const isNewBuyer = isBuy && wallet && !s.walletAlreadyBought.get(e.mint, wallet);
     const buyerRank = isNewBuyer ? uniqueBuyersSoFar + 1 : null;
 
@@ -426,8 +430,10 @@ function onTrade(e) {
 
     if (isBuy) {
       s.holdingBuy.run(wallet, e.mint, tokenAmount, solAmount, now, now, isSniper, isFirstBlock, buyerRank);
-      const updated = s.countDistinctBuyers.get(e.mint).n;
-      s.bumpUniqueBuyers.run(updated, e.mint);
+      // Incremental unique-buyer maintenance — increment only on new buyers.
+      // walletAlreadyBought check above already runs the cheap index lookup.
+      const updated = uniqueBuyersSoFar + (isNewBuyer ? 1 : 0);
+      if (isNewBuyer) s.bumpUniqueBuyers.run(updated, e.mint);
       if (updated === 5 && mint.cashback_enabled === null) {
         ensureCashback(e.mint, mint.bonding_curve_key, mint.cashback_enabled);
       }
