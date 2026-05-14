@@ -166,10 +166,17 @@ volumeSurge: {
 
   maintenance: {
     intervalMs: 30 * 60 * 1000,
-    // ML-collection mode: keep trades long enough for labels to resolve (6h)
-    // plus a comfortable buffer for training set assembly. Was 12h rugged.
-    ruggedRetentionHours: 7 * 24,        // 7 days
-    quietRetentionMinutes: 30 * 24 * 60,  // 30 days for active trades
+    // 2026-05-14: shrunk from 30d quiet / 7d rugged. The bot retrains hourly
+    // and pump.fun meta moves daily — 30+ days of failed-launch trades was
+    // dead weight bloating the live DB to 4.45M trades. All ML labels resolve
+    // within 24h (peaked_*, alive_*, rug_within, hits_5x_within_24h), so 3-day
+    // retention gives a generous buffer for label backfill. Older trades flow
+    // to MEGA Parquet via cold-archive before pruning — the bot's "memory"
+    // lives in the trained models + archive + migrator-stats aggregates, not
+    // raw trade rows. Migrated mints stay forever (not touched here — that
+    // exclusion is in deleteRuggedTrades + deleteQuietTrades WHERE clauses).
+    ruggedRetentionHours: 3 * 24,         // 3 days (was 7d)
+    quietRetentionMinutes: 3 * 24 * 60,   // 3 days (was 30d)
     startupDelayMs: 60 * 1000,
   },
 
