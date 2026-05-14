@@ -428,10 +428,6 @@ function onMigrate(e) {
     } catch (err) {
       console.error('[migrator-stats] update', err.message);
     }
-    // Phase 2 AMM ingestion: kick off a webhook re-sync so the new migrated
-    // mint enters the post-mig ingestion list within ~3s (debounced). Without
-    // this, the mint waits up to 1h for the hourly sync to pick it up.
-    triggerWebhookResync();
   } catch (err) {
     console.error('[processor] migrate', err.message);
   }

@@ -57,35 +57,20 @@ function heldMintAddresses() {
   `).all().map(r => r.mint_address);
 }
 
-// Phase 2 AMM ingestion (2026-05-13): subscribe to every recently-migrated
-// mint so we see post-migration retail trades — not just trades involving
-// our top-50 tracked wallets. This lets us discover post-mig hunters who
-// don't pre-buy on the bonding curve. Window: 6h since migration (most
-// trading action is in the first few hours). Cap: 1500 most recent so we
-// stay well under Helius's 100k address-per-webhook limit and don't flood
-// our SQLite writer during burst periods.
-const POSTMIG_INGESTION_WINDOW_HOURS = 6;
-const POSTMIG_INGESTION_CAP = 1500;
-function recentlyMigratedMintAddresses() {
-  const cutoff = Date.now() - POSTMIG_INGESTION_WINDOW_HOURS * 60 * 60 * 1000;
-  return db().prepare(`
-    SELECT mint_address FROM mints
-    WHERE migrated = 1
-      AND rugged = 0
-      AND migrated_at IS NOT NULL
-      AND migrated_at > ?
-    ORDER BY migrated_at DESC
-    LIMIT ?
-  `).all(cutoff, POSTMIG_INGESTION_CAP).map(r => r.mint_address);
-}
+// Phase 2 AMM ingestion (recently-migrated mint subscription) was reverted
+// 2026-05-13 after observed credit cost: enhanced webhook deliveries are
+// ~5 credits each, and 70 mints × 4 events/sec ≈ 72k credits/hr — would
+// blow the 10M monthly budget. Instead: rely on additional strategies
+// entering positions on runners we'd otherwise miss; once they're held,
+// the existing held-mint subscription (Phase 1 of the migration-data work)
+// captures every trade for free-of-extra-cost.
 
 function subscriptionAddresses() {
   const wallets = topWallets();
   const heldMints = heldMintAddresses();
-  const recentMigratedMints = recentlyMigratedMintAddresses();
   return {
-    combined: [...new Set([...wallets, ...heldMints, ...recentMigratedMints])],
-    wallets, heldMints, recentMigratedMints,
+    combined: [...new Set([...wallets, ...heldMints])],
+    wallets, heldMints,
   };
 }
 
@@ -175,7 +160,7 @@ export async function syncHunterWebhook() {
   if (!HELIUS_API_KEY) { console.warn('[helius-wh] HELIUS_API_KEY missing — skipping'); return; }
   if (!WEBHOOK_URL) { console.warn('[helius-wh] HELIUS_WEBHOOK_URL missing — skipping'); return; }
 
-  const { combined: addresses, wallets, heldMints, recentMigratedMints } = subscriptionAddresses();
+  const { combined: addresses, wallets, heldMints } = subscriptionAddresses();
   if (!addresses.length) { console.log('[helius-wh] no addresses to subscribe — skipping'); return; }
 
   if (!_webhookId) {
@@ -199,7 +184,7 @@ export async function syncHunterWebhook() {
     }
   }
 
-  const summary = `${addresses.length} addrs (${wallets.length} wallets + ${heldMints.length} held + ${recentMigratedMints.length} recent-mig)`;
+  const summary = `${addresses.length} addrs (${wallets.length} wallets + ${heldMints.length} held)`;
   if (_webhookId) {
     if (!addressesChanged(_lastSyncedAddresses, addresses)) {
       console.log(`[helius-wh] skip — address list unchanged · ${summary}`);
