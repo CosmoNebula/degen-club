@@ -64,15 +64,32 @@ function exec(cmd, args, opts = {}) {
 // Days that have trades in the DB but no archive_manifest row yet, AND are old
 // enough to be candidates for pruning. We exclude today (UTC) — the day isn't
 // complete yet, so partial archives would later need to be re-archived.
+//
+// 2026-05-14: DISTINCT strftime on trades was a 4.45M-row tablescan
+// (~6.3s cold, ~1.1s warm). Cache for 30min and invalidate when a day
+// gets archived. Archive sweep runs every ~6h, so cache is plenty fresh.
+const FIND_UNARCHIVED_TTL_MS = 30 * 60 * 1000;
+let _cachedUnarchivedDays = null;
+let _cachedUnarchivedAt = 0;
+function invalidateUnarchivedCache() {
+  _cachedUnarchivedDays = null;
+  _cachedUnarchivedAt = 0;
+}
 function findUnarchivedDays() {
+  const now = Date.now();
+  if (_cachedUnarchivedDays && (now - _cachedUnarchivedAt) < FIND_UNARCHIVED_TTL_MS) {
+    return _cachedUnarchivedDays.slice();
+  }
   const todayUTC = new Date().toISOString().slice(0, 10);
-  return db().prepare(`
+  _cachedUnarchivedDays = db().prepare(`
     SELECT DISTINCT strftime('%Y-%m-%d', timestamp/1000, 'unixepoch') AS day
     FROM trades
     WHERE day < ?
       AND day NOT IN (SELECT date_key FROM archive_manifest)
     ORDER BY day ASC
   `).all(todayUTC).map(r => r.day);
+  _cachedUnarchivedAt = now;
+  return _cachedUnarchivedDays.slice();
 }
 
 async function archiveDay(day) {
@@ -91,6 +108,7 @@ async function archiveDay(day) {
     db().prepare(`INSERT OR REPLACE INTO archive_manifest
       (date_key, rows, size_bytes, min_ts, max_ts, parquet_path, mega_path, archived_at)
       VALUES (?, 0, 0, NULL, NULL, NULL, NULL, ?)`).run(day, Date.now());
+    invalidateUnarchivedCache();
     return { day, rows: 0, skipped: true };
   }
 
@@ -110,6 +128,7 @@ async function archiveDay(day) {
     day, info.rows, info.size_bytes, info.min_ts, info.max_ts,
     stagingPath, remotePath, Date.now()
   );
+  invalidateUnarchivedCache();
 
   // 5. delete local staging file (it's safe in MEGA now)
   try { fs.unlinkSync(stagingPath); } catch {}

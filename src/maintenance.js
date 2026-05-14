@@ -22,9 +22,14 @@ function S() {
       )
     `),
     deleteOldFlags: d.prepare('DELETE FROM rug_flags WHERE fired_at < ?'),
+    // 2026-05-14: NOT IN against the wallets table planned as a re-eval per
+    // row (~3.2s block at 4.45M-row scale). NOT EXISTS with PK lookup on
+    // wallets.address is sub-100ms.
     deleteOrphanHoldings: d.prepare(`
       DELETE FROM wallet_holdings
-      WHERE wallet NOT IN (SELECT address FROM wallets)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM wallets WHERE wallets.address = wallet_holdings.wallet
+      )
     `),
     deleteStaleMints: d.prepare(`
       DELETE FROM mints

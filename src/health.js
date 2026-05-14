@@ -17,27 +17,23 @@ const HEALTH_PATH = path.resolve(__dirname, '..', 'data', 'health.json');
 // Cache for 60s. open_positions and last_trade_at refresh every tick since
 // they're cheap (open count is small; MAX(timestamp) hits the index tail).
 const COUNTS_CACHE_TTL_MS = 60 * 1000;
-const HOT_CACHE_TTL_MS = 10 * 1000;
 let _cachedCounts = null;
 let _cachedAt = 0;
-let _cachedHot = null;
-let _cachedHotAt = 0;
-function getCounts() {
+function getCounts({ pp, onchainTrades }) {
   const now = Date.now();
   const d = db();
-  // MAX(timestamp) on trades has no index → 4.45M-row tablescan, ~470ms.
-  // The dashboard "last trade Xs ago" widget can tolerate 10s display lag,
-  // so cache the hot path too.
-  if (!_cachedHot || (now - _cachedHotAt) > HOT_CACHE_TTL_MS) {
-    try {
-      _cachedHot = d.prepare(`
-        SELECT
-          (SELECT COUNT(*) FROM paper_positions WHERE status='open') AS open_positions,
-          (SELECT MAX(timestamp) FROM trades) AS last_trade_at
-      `).get() || {};
-      _cachedHotAt = now;
-    } catch { _cachedHot = _cachedHot || {}; }
-  }
+  // open_positions only — small table (<1000 rows), index on status.
+  let open_positions = 0;
+  try {
+    open_positions = d.prepare(`SELECT COUNT(*) AS n FROM paper_positions WHERE status='open'`).get()?.n || 0;
+  } catch { /* leave 0 */ }
+  // last_trade_at: previously MAX(timestamp) FROM trades → 4.45M-row tablescan
+  // at ~450ms. Use in-memory lastEventAt from the two trade feeds instead —
+  // same value, zero SQL.
+  const last_trade_at = Math.max(
+    pp?.status?.()?.lastEventAt || 0,
+    onchainTrades?.lastEventAt || 0,
+  ) || null;
   // Cold path: the 3 full-table COUNT(*) on trades/mints/wallets, every 60s.
   if (!_cachedCounts || (now - _cachedAt) > COUNTS_CACHE_TTL_MS) {
     try {
@@ -50,7 +46,7 @@ function getCounts() {
       _cachedAt = now;
     } catch { _cachedCounts = _cachedCounts || {}; }
   }
-  return { ..._cachedCounts, ..._cachedHot };
+  return { ..._cachedCounts, open_positions, last_trade_at };
 }
 
 export function startHealthHeartbeat({ pp, onchainTrades }) {
@@ -61,7 +57,7 @@ export function startHealthHeartbeat({ pp, onchainTrades }) {
       const ppStatus = pp?.status?.() || {};
       const ot = onchainTrades || {};
 
-      const counts = getCounts();
+      const counts = getCounts({ pp, onchainTrades });
 
       const dbFile = (() => {
         try {
