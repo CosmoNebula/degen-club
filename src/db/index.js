@@ -458,6 +458,15 @@ function runMigrations(d) {
   ensureCol(d, 'strategy_state', 'dca_max_age_min', `INTEGER DEFAULT 30`);
   ensureCol(d, 'strategy_state', 'dca_max_dca', `INTEGER DEFAULT 1`);
 
+  // 2026-05-15: per-strategy prediction-driven exit. When pred_exit_target
+  // is set, the position monitor reads the most-recent ml_predictions row
+  // for (mint, target) and fires a PRED_EXIT exit when the threshold matches.
+  // Lets strategies use models like local_top_60s, unique_sellers_next_60s,
+  // drawdown_20pct_300s as smart real-time exit signals.
+  ensureCol(d, 'strategy_state', 'pred_exit_target', `TEXT`);
+  ensureCol(d, 'strategy_state', 'pred_exit_op',     `TEXT DEFAULT '>'`);
+  ensureCol(d, 'strategy_state', 'pred_exit_value',  `REAL`);
+
   d.exec(`UPDATE paper_positions SET tokens_remaining = token_amount WHERE tokens_remaining IS NULL OR tokens_remaining = 0`);
   // Removed: hardcoded-whitelist DELETE that wiped any strategy not in a stale list.
   // It nuked migratorHunter/kingFollow/preKing/quickFlip15 every time init() ran

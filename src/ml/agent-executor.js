@@ -78,10 +78,11 @@ function S() {
         peak_floor_arm_pct, peak_floor_exit_pct,
         peak_floor_arm2_pct, peak_floor_exit2_pct,
         peak_floor_arm3_pct, peak_floor_exit3_pct,
+        pred_exit_target, pred_exit_op, pred_exit_value,
         dca_enabled, dca_trigger_pct, dca_size_pct,
         dca_min_age_sec, dca_max_age_min, dca_max_dca,
         updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
   };
   return stmts;
 }
@@ -436,6 +437,13 @@ function syncStrategyStateRow(strategyId, recipe) {
   const pf2Exit = (pf2.exit_pct || 0) / 100;
   const pf3Arm = (pf3.arm_pct || 0) / 100;
   const pf3Exit = (pf3.exit_pct || 0) / 100;
+  // 2026-05-15: ML-prediction-driven exit. When the model's latest prob
+  // satisfies the operator, exit immediately (handled in paper.js).
+  // Recipe shape: { target: 'local_top_60s', op: '>', value: 0.5 }.
+  const predExit = exit.prediction_exit || {};
+  const predExitTarget = predExit.target || null;
+  const predExitOp = (predExit.op === '<' || predExit.op === '<=' || predExit.op === '>=' || predExit.op === '==') ? predExit.op : '>';
+  const predExitValue = (predExit.target && predExit.value != null) ? predExit.value : null;
   // DCA section. Default disabled — agent must opt in explicitly. Recipe
   // values use the same percent-not-fraction convention as exit.stop_loss_pct.
   const dca = recipe.dca || {};
@@ -463,6 +471,7 @@ function syncStrategyStateRow(strategyId, recipe) {
     tier3Trail,
     exit.breakeven_after_tier1 ? 1 : 0,
     pf1Arm, pf1Exit, pf2Arm, pf2Exit, pf3Arm, pf3Exit,
+    predExitTarget, predExitOp, predExitValue,
     dcaEnabled, dcaTriggerFraction, dcaSizeFraction,
     dca.min_age_sec || 60,
     dca.max_age_min || 30,

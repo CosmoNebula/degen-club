@@ -160,6 +160,13 @@ function S() {
           AND timestamp > (strftime('%s','now')*1000 - 600000)
         ORDER BY timestamp DESC LIMIT 30
       )`),
+    // 2026-05-15: PRED_EXIT support — most recent prob for (mint, target)
+    // in the last 5 minutes. Anything older we treat as missing (the model
+    // would have re-fired by then if conditions still held).
+    getPredForTarget: d.prepare(`SELECT prob, timestamp FROM ml_predictions
+      WHERE mint_address = ? AND target = ? AND prob IS NOT NULL
+        AND timestamp > (strftime('%s','now')*1000 - 300000)
+      ORDER BY timestamp DESC LIMIT 1`),
     openPositionsForMint: d.prepare("SELECT * FROM paper_positions WHERE mint_address = ? AND status = 'open'"),
     convertToMoonbag: d.prepare(`UPDATE paper_positions SET
       tokens_remaining = ?, sol_realized_so_far = ?,
@@ -1147,6 +1154,24 @@ function checkPosition(p) {
   // floor-style exits (PEAK_FLOOR, BREAKEVEN_SL) already handled it via a
   // stricter trigger; only fires when this would be the active floor.
   else if (realizedLockActive && peakPctRaw <= REALIZED_LOCK_FLOOR) exitReason = 'REALIZED_LOCK';
+  // 2026-05-15: PRED_EXIT — strategy-level ML prediction triggers an immediate
+  // exit. Gated by a 60-second min-age so we don't react to stale predictions
+  // for newly opened positions. Threshold + op + target come from
+  // strategy_state.pred_exit_*, populated from the recipe's exit.prediction_exit.
+  // IIFE keeps this as a single else-if so the cascade below continues
+  // cleanly when the prob check doesn't fire.
+  else if (strat.pred_exit_target && strat.pred_exit_value != null && ageSec >= 60 && (() => {
+    try {
+      const row = s.getPredForTarget.get(p.mint_address, strat.pred_exit_target);
+      if (!row || row.prob == null) return false;
+      const v = row.prob, thr = strat.pred_exit_value, op = strat.pred_exit_op || '>';
+      return (op === '>'  && v >  thr) ||
+             (op === '>=' && v >= thr) ||
+             (op === '<'  && v <  thr) ||
+             (op === '<=' && v <= thr) ||
+             (op === '==' && v === thr);
+    } catch { return false; }
+  })()) exitReason = 'PRED_EXIT';
   else if (!breakevenArmed && peakPctRaw <= strat.sl_pct) {
     // Smart SL — require ML confirmation that the coin is actually dying
     // before cutting. 2026-05-12 data: SL_HIT trades had +649% avg post-exit
