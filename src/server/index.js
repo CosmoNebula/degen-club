@@ -734,12 +734,13 @@ export function startServer(getIngestionStatus) {
     refresh();
     setInterval(refresh, intervalMs);
   }
-  // Refresh every 10s — the analytics queries can block the event loop for
-  // ~0.5-1.5s when the DB is under heavy write load from the trade firehose,
-  // so refreshing less often = fewer blocking events. 10s staleness is fine
-  // for missed-ops + exit analysis (which change slowly).
-  prewarm('exits/analysis', 10000, () => computeExitsAnalysis());
-  prewarm('rejections/missed', 10000, () => computeMissedRejections());
+  // 2026-05-15: bumped from 10s → 30s. Each refresh costs 600-1000ms of
+  // sync better-sqlite3 main-thread work (the rejections peaks CTE scans
+  // post-rejection trades for every rejected mint in the session). At 10s
+  // that was ~7-10% loop chew for an analytics endpoint dashboard polls
+  // at the same cadence; 30s is still well under "stale" for missed-ops.
+  prewarm('exits/analysis', 30000, () => computeExitsAnalysis());
+  prewarm('rejections/missed', 30000, () => computeMissedRejections());
 
   app.get('/api/exits/analysis', (req, res) => {
     res.json(cached('exits/analysis', { summary: [], rows: [] }));

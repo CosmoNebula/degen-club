@@ -548,6 +548,12 @@ function runMigrations(d) {
   )`);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_ml_unresolved ON ml_mint_snapshots(labels_resolved_at) WHERE labels_resolved_at IS NULL`);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_ml_snapshot_ts ON ml_mint_snapshots(snapshot_ts DESC)`);
+  // 2026-05-15: label-resolver's findUnresolved was using idx_ml_snapshot_ts
+  // (covers 999K rows) and filtering by labels_resolved_at IS NULL in-memory
+  // — 8.5s cold. Partial index on snapshot_ts WHERE labels_resolved_at IS NULL
+  // covers only the ~70k unresolved subset; range scan over the slice older
+  // than 6h is sub-100ms.
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_ml_unresolved_ts ON ml_mint_snapshots(snapshot_ts) WHERE labels_resolved_at IS NULL`);
 
   // ML features for top-buyer presence (added with leaderboard system).
   // Models will pick these up on the next retrain cycle.
