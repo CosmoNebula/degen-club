@@ -18,12 +18,16 @@ const CHECK_INTERVAL_MS = 60 * 60 * 1000;  // hourly check
 // query JOINs against). migrates_within_15min / post_mig_* live on different
 // tables and need their own calibration query — excluded here to prevent
 // "no such column" errors that crashed the bot overnight (2026-05-12).
+// 2026-05-15: dropped peaked_100 (redundant with hits_2x_within_1h),
+// will_die_fast (majority-class predictor + inverse of alive_at_1h),
+// alive_at_4h (0.997 correlation with alive_at_1h). See retrain_all.py
+// comments for the full rationale.
 const TARGETS = [
-  'peaked_30', 'peaked_100', 'peaked_300', 'migrated', 'will_die_fast',
+  'peaked_30', 'peaked_300', 'migrated',
   'rug_within_5min', 'hits_2x_within_1h',
   // Long-horizon "hold-to-maturity" binary targets (added 2026-05-12).
   // All live on ml_mint_snapshots so they fit the same calibration-query shape.
-  'alive_at_1h', 'alive_at_4h', 'alive_at_24h',
+  'alive_at_1h', 'alive_at_24h',
   'hits_5x_within_24h', 'hits_10x_within_24h',
 ];
 

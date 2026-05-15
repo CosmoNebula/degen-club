@@ -72,6 +72,7 @@ def load_all_models():
                 'target': target,
                 'mode': mode,
                 'log_transform': bool(bundle.get('log_transform', False)),
+                'signed_log_transform': bool(bundle.get('signed_log_transform', False)),
                 'meta': {
                     'trained_at_ms': bundle.get('trained_at_ms'),
                     'n_train': bundle.get('n_train'),
@@ -79,6 +80,7 @@ def load_all_models():
                     'metrics': bundle.get('metrics'),
                     'mode': mode,
                     'log_transform': bool(bundle.get('log_transform', False)),
+                    'signed_log_transform': bool(bundle.get('signed_log_transform', False)),
                     'file': f.name,
                 },
             }
@@ -126,7 +128,13 @@ def _predict(target: str, features: Dict[str, float]) -> float:
         y = float(m['model'].predict(df)[0])
         if m['log_transform']:
             y = float(np.expm1(y))
-        return max(0.0, y)  # nothing negative
+            return max(0.0, y)
+        if m['signed_log_transform']:
+            # Inverse signed-log: sign(y) * (exp(|y|) - 1). Preserves sign so
+            # losses come through as negative values (hold_*_pct can be < 0).
+            y = float(np.sign(y) * np.expm1(abs(y)))
+            return y
+        return max(0.0, y)
     return float(m['model'].predict_proba(df)[0, 1])
 
 

@@ -43,11 +43,18 @@ REGRESSION_TARGETS = {
     'post_mig_peak_pct',
 }
 
-# Regression targets with heavy-tailed distributions get log1p-transformed
-# during training. Inverse (expm1) applied at predict time. Critical for
-# targets where the bulk is near 0 but a long tail of huge values exists
-# (e.g. peak_pct_max: median=0, max=138 → log compresses to learnable range).
-LOG_TRANSFORM_TARGETS = {'peak_pct_max', 'time_to_peak_sec', 'time_to_peak_5x_sec'}
+# Regression targets with heavy-tailed POSITIVE distributions get log1p-
+# transformed during training. Inverse (expm1) applied at predict time.
+# (Note: the original three entries here were dropped 2026-05-14; kept the
+# set for any future positive-only heavy-tail target.)
+LOG_TRANSFORM_TARGETS = set()
+# Signed log transform for targets that can be negative AND heavy-tailed in
+# both directions — e.g. hold-period returns where mints rug to -100% or
+# moon to +10000%. Uses sign(y) * log1p(|y|), inverse sign(y) * expm1(|y|).
+# Added 2026-05-15: hold_*_pct trained as raw pct returned R²=-0.018/-0.191
+# (worse than mean). The signed-log transform compresses both tails so the
+# learner isn't dominated by rare outliers.
+SIGNED_LOG_TRANSFORM_TARGETS = {'hold_1h_pct', 'hold_4h_pct', 'hold_24h_pct'}
 
 # Same feature list as extract — keep in sync
 FEATURE_COLS = [
@@ -158,11 +165,18 @@ def train_regression(X_train, y_train, X_val, y_val, target_name, args):
     print(f'[train] target stats (raw) · mean={y_train.mean():.3f} · median={y_train.median():.3f} · max={y_train.max():.2f}')
 
     use_log = target_name in LOG_TRANSFORM_TARGETS
+    use_signed_log = target_name in SIGNED_LOG_TRANSFORM_TARGETS
     if use_log:
         # log1p handles 0s safely (log1p(0) = 0). Inverse is expm1.
         y_train_t = np.log1p(np.clip(y_train, a_min=0, a_max=None))
         y_val_t = np.log1p(np.clip(y_val, a_min=0, a_max=None))
         print(f'[train] log-transformed · mean={y_train_t.mean():.3f} · median={y_train_t.median():.3f} · max={y_train_t.max():.3f}')
+    elif use_signed_log:
+        # Signed-log: sign(y) * log1p(|y|). Compresses both tails symmetrically.
+        # Inverse: sign(y) * expm1(|y|).
+        y_train_t = np.sign(y_train) * np.log1p(np.abs(y_train))
+        y_val_t = np.sign(y_val) * np.log1p(np.abs(y_val))
+        print(f'[train] signed-log-transformed · min={y_train_t.min():.3f} · median={np.median(y_train_t):.3f} · max={y_train_t.max():.3f}')
     else:
         y_train_t = y_train
         y_val_t = y_val
@@ -185,12 +199,18 @@ def train_regression(X_train, y_train, X_val, y_val, target_name, args):
     # Compute metrics in original (un-transformed) space — that's what users care about
     if use_log:
         y_val_pred = np.expm1(y_val_pred_t)
-        # Also report log-space metrics for comparison
+        r2_log = float(r2_score(y_val_t, y_val_pred_t)) if len(y_val) > 1 else 0.0
+    elif use_signed_log:
+        # Inverse signed-log: sign(t) * expm1(|t|).
+        y_val_pred = np.sign(y_val_pred_t) * np.expm1(np.abs(y_val_pred_t))
         r2_log = float(r2_score(y_val_t, y_val_pred_t)) if len(y_val) > 1 else 0.0
     else:
         y_val_pred = y_val_pred_t
         r2_log = None
-    y_val_pred = np.clip(y_val_pred, 0, None)  # nothing negative
+    # Signed-log targets can be negative legitimately (hold_*_pct losses).
+    # Only clip-to-zero for the positive-only targets.
+    if not use_signed_log:
+        y_val_pred = np.clip(y_val_pred, 0, None)
     mae = float(mean_absolute_error(y_val, y_val_pred))
     medae = float(median_absolute_error(y_val, y_val_pred))
     r2 = float(r2_score(y_val, y_val_pred)) if len(y_val) > 1 else 0.0
@@ -395,6 +415,7 @@ def main():
         'target': args.target,
         'mode': 'regression' if is_regression else 'classification',
         'log_transform': is_regression and args.target in LOG_TRANSFORM_TARGETS,
+        'signed_log_transform': is_regression and args.target in SIGNED_LOG_TRANSFORM_TARGETS,
         'trained_at_ms': int(time.time() * 1000),
         'n_train': len(y_train),
         'n_val': len(y_val),

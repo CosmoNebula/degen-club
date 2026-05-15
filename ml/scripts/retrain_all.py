@@ -29,11 +29,14 @@ DB_PATH = Path(os.environ.get('DEGEN_DB_PATH') or str(ML_ROOT.parent / 'data' / 
 TARGETS = [
     # ---------- PRE-MIGRATION (csv=training.csv, features-mode=pre) ----------
     # Binary classifiers
+    # 2026-05-15 cull: dropped peaked_100 (0.902 corr with hits_2x_within_1h,
+    # same signal), will_die_fast (Lift 1.13 with 88.5% base = predicts
+    # majority class + -0.742 corr with alive_at_1h = inverse duplicate),
+    # alive_at_4h (0.997 corr with alive_at_1h). Keep hits_2x_within_1h
+    # and alive_at_1h as the survivors of those pairs.
     {'name': 'peaked_30',             'out': 'models/peaked_30_v1.pkl',             'min_pos': 50,  'kind': 'binary',     'mode': 'pre'},
-    {'name': 'peaked_100',            'out': 'models/peaked_100_v1.pkl',            'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
     {'name': 'peaked_300',            'out': 'models/peaked_300_v1.pkl',            'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
     {'name': 'migrated',              'out': 'models/migrated_v1.pkl',              'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
-    {'name': 'will_die_fast',         'out': 'models/will_die_fast_v1.pkl',         'min_pos': 50,  'kind': 'binary',     'mode': 'pre'},
     {'name': 'rug_within_5min',       'out': 'models/rug_within_5min_v1.pkl',       'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
     {'name': 'migrates_within_15min', 'out': 'models/migrates_within_15min_v1.pkl', 'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
     # hits_2x_within_1h: time-bounded version of peaked_100 — catches medium
@@ -60,7 +63,8 @@ TARGETS = [
     # hold strategies, not just flip strategies. Each needs 25h+ of trade
     # history to compute; resolver backfills as snapshots age past 24h.
     {'name': 'alive_at_1h',            'out': 'models/alive_at_1h_v1.pkl',            'min_pos': 50,  'kind': 'binary',     'mode': 'pre'},
-    {'name': 'alive_at_4h',            'out': 'models/alive_at_4h_v1.pkl',            'min_pos': 50,  'kind': 'binary',     'mode': 'pre'},
+    # 2026-05-15: alive_at_4h dropped — 0.997 correlation with alive_at_1h on
+    # live predictions, essentially identical signal at twice the data cost.
     {'name': 'alive_at_24h',           'out': 'models/alive_at_24h_v1.pkl',           'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
     {'name': 'hits_5x_within_24h',     'out': 'models/hits_5x_within_24h_v1.pkl',     'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
     {'name': 'hits_10x_within_24h',    'out': 'models/hits_10x_within_24h_v1.pkl',    'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
@@ -75,7 +79,10 @@ TARGETS = [
     {'name': 'max_drawdown_within_24h_pct',   'out': 'models/max_drawdown_within_24h_pct_v1.pkl',   'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
     # ---------- POST-MIGRATION (csv=training_postmig.csv, features-mode=post) ----------
     {'name': 'post_mig_hits_2x',  'out': 'models/post_mig_hits_2x_v1.pkl',  'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
-    {'name': 'post_mig_rugs_1h',  'out': 'models/post_mig_rugs_1h_v1.pkl',  'min_pos': 30,  'kind': 'binary',     'mode': 'post'},
+    # 2026-05-15: post_mig_rugs_1h dropped — AUC-ROC 0.581 (barely above random
+    # 0.5), Lift 0.75 (worse than baseline). Model is actively confused. Either
+    # the label is wrong or post-mig rug dynamics need different features than
+    # pre-mig signals capture.
     # 2026-05-14: post_mig_peak_pct dropped — R² = -0.085 (actively misleading,
     # worse than predicting the mean).
 ]
