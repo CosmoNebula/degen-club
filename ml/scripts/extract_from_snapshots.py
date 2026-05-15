@@ -143,6 +143,8 @@ LABEL_COLS = [
     'hits_5x_within_24h', 'hits_10x_within_24h',
     'hold_1h_pct', 'hold_4h_pct', 'hold_24h_pct',
     'peak_pct_within_24h', 'max_drawdown_within_24h_pct',
+    # 2026-05-14 timing-aware labels.
+    'peak_within_5min', 'buy_pressure_continues_60s', 'pump_durability_5min',
 ]
 
 
