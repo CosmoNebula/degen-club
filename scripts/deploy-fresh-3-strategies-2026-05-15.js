@@ -39,19 +39,24 @@ const strategies = [
       rationale: 'Targets pre-mig mints that will graduate to Raydium. Leans on the strongest model we have: `migrated` (AUC-ROC 0.982, Lift 9.08). Timing-confirmed by `migrates_within_15min`. Safety floor via `rug_within_5min` AND the new `drawdown_20pct_300s` predictor (1 if any price in next 5min drops to ≤80% of now — pre-warns the dump). Patient entry window (10min), laddered tier exits matched to the typical graduation pump shape. Pre-mig exits on dump-pressure forecast; post-mig re-evaluation hands off to `post_mig_hits_2x`.',
       entry: {
         conditions: [
-          // Primary: graduation predicted
-          { kind: 'ml_prediction', name: 'migrated',               op: '>=', value: 0.40 },
-          { kind: 'ml_prediction', name: 'migrates_within_15min',  op: '>=', value: 0.10 },
-          // Safety: no impending rug, no impending drawdown
-          { kind: 'ml_prediction', name: 'rug_within_5min',        op: '<',  value: 0.05 },
-          { kind: 'ml_prediction', name: 'drawdown_20pct_300s',    op: '<',  value: 0.30 },
+          // 2026-05-15 loosen: previous thresholds were calibrated to the
+          // _means_ I expected but live distributions are MUCH lower —
+          // migrated avg=0.052, migrates_within_15min avg=0.006. The
+          // combined stack intersected at <0.1% of mints, fired zero times
+          // over 7 hours. Loosened to roughly the top-decile of each model.
+          { kind: 'ml_prediction', name: 'migrated',               op: '>=', value: 0.25 },
+          // migrates_within_15min dropped from the AND-stack — average is
+          // 0.006 so any positive threshold kills the whole stack. Keep
+          // migrated as primary; let runner-trailer cover non-timing cases.
+          { kind: 'ml_prediction', name: 'rug_within_5min',        op: '<',  value: 0.10 },
+          { kind: 'ml_prediction', name: 'drawdown_20pct_300s',    op: '<',  value: 0.50 },
           // Organic interest floor (avoid sniper-dominated rugs)
-          { kind: 'snapshot_feature', name: 'unique_buyers',         op: '>=', value: 12 },
-          { kind: 'snapshot_feature', name: 'pct_sniper_buys',       op: '<=', value: 0.30 },
-          { kind: 'snapshot_feature', name: 'pct_first_block_buys',  op: '<=', value: 0.20 },
-          // Entry window: 5-35 SOL mcap (room to graduate without being mid-pump)
-          { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '>=', value: 5 },
-          { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '<=', value: 35 },
+          { kind: 'snapshot_feature', name: 'unique_buyers',         op: '>=', value: 10 },
+          { kind: 'snapshot_feature', name: 'pct_sniper_buys',       op: '<=', value: 0.35 },
+          { kind: 'snapshot_feature', name: 'pct_first_block_buys',  op: '<=', value: 0.25 },
+          // Entry window: widened. Sub-5 SOL was excluding too many early candidates.
+          { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '>=', value: 4 },
+          { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '<=', value: 45 },
         ],
         // 2026-05-15: bumped 600→1500s. Graduation typically happens
         // 10-30min into a coin's life, and the model needs ≥2min of organic
@@ -94,19 +99,22 @@ const strategies = [
       rationale: 'Catches mints that peak inside 5 minutes (peak_within_5min, AUC 0.952). The unlock is `local_top_60s` as prediction_exit: model predicts whether NOW is within 5% of the max price in (T-60s, T+60s] — when true, we sell rather than waiting for the post-peak drawdown to stop us out. Confirmed by `buy_pressure_continues_60s` (demand sticky) + `unique_buyers_next_60s` (real incoming buyers, Poisson count). Tight stops, no trail, 5-min max hold — matches the "fast pop" thesis.',
       entry: {
         conditions: [
-          { kind: 'ml_prediction', name: 'peak_within_5min',         op: '>=', value: 0.20 },
-          { kind: 'ml_prediction', name: 'buy_pressure_continues_60s', op: '>=', value: 0.45 },
-          // Real demand incoming, not just hype
-          { kind: 'ml_prediction', name: 'unique_buyers_next_60s',   op: '>=', value: 5 },
+          // 2026-05-15 loosen: peak_within_5min avg=0.137, so 0.20 was top
+          // 25%. buy_pressure ≥0.45 was already top 50%. Combined too tight.
+          { kind: 'ml_prediction', name: 'peak_within_5min',         op: '>=', value: 0.12 },
+          { kind: 'ml_prediction', name: 'buy_pressure_continues_60s', op: '>=', value: 0.35 },
+          // Poisson count — mean=1.8/60s window. ≥3 means real demand above
+          // the typical floor without requiring rare bursts.
+          { kind: 'ml_prediction', name: 'unique_buyers_next_60s',   op: '>=', value: 3 },
           // Safety
-          { kind: 'ml_prediction', name: 'rug_within_5min',          op: '<',  value: 0.04 },
-          { kind: 'ml_prediction', name: 'drawdown_20pct_300s',      op: '<',  value: 0.40 },
+          { kind: 'ml_prediction', name: 'rug_within_5min',          op: '<',  value: 0.08 },
+          { kind: 'ml_prediction', name: 'drawdown_20pct_300s',      op: '<',  value: 0.55 },
           // Distribution floors
-          { kind: 'snapshot_feature', name: 'unique_buyers',           op: '>=', value: 8 },
-          { kind: 'snapshot_feature', name: 'pct_sniper_buys',         op: '<=', value: 0.30 },
+          { kind: 'snapshot_feature', name: 'unique_buyers',           op: '>=', value: 6 },
+          { kind: 'snapshot_feature', name: 'pct_sniper_buys',         op: '<=', value: 0.35 },
           // Small/early window — scalper only wants pre-mid-pump mints
           { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '>=', value: 3 },
-          { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '<=', value: 25 },
+          { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '<=', value: 30 },
         ],
         // 2026-05-15: bumped 300→480s. Scalper still wants young coins but
         // 5min was too tight given the train/serve age-skew — model needs
@@ -148,17 +156,20 @@ const strategies = [
       rationale: 'Catches 4x+ runners using `peaked_300` (Lift 7.46) gated by `hits_2x_within_1h` for timing AND `pump_durability_5min` regression (R²=0.601) for "is this pump going to stick." Largest position (0.20 SOL) because the EV per trade is the highest — the model picks confident 4x+ runners at 7.5× the base rate. Laddered tier exits target multi-X outcomes; loose 40% trail above 1000% arms only on real moonshots. `local_top_60s` as prediction_exit acts as the sell-the-top hedge once we are deep in profit — we cap the max-hold at 60min so a thesis-broken mint does not bleed our bag back to zero overnight.',
       entry: {
         conditions: [
-          { kind: 'ml_prediction', name: 'peaked_300',          op: '>=', value: 0.15 },
-          { kind: 'ml_prediction', name: 'hits_2x_within_1h',   op: '>=', value: 0.18 },
-          { kind: 'ml_prediction', name: 'pump_durability_5min', op: '>=', value: 0.50 },
+          // 2026-05-15 loosen: peaked_300 avg=0.045 so 0.15 was top 5%.
+          // hits_2x_within_1h avg=0.091 so 0.18 was top 25%. pump_durability
+          // avg=0.244 so 0.50 was top 20%. Combined too rare.
+          { kind: 'ml_prediction', name: 'peaked_300',          op: '>=', value: 0.10 },
+          { kind: 'ml_prediction', name: 'hits_2x_within_1h',   op: '>=', value: 0.12 },
+          { kind: 'ml_prediction', name: 'pump_durability_5min', op: '>=', value: 0.35 },
           // Safety
-          { kind: 'ml_prediction', name: 'rug_within_5min',     op: '<',  value: 0.06 },
-          { kind: 'ml_prediction', name: 'drawdown_20pct_300s', op: '<',  value: 0.35 },
-          // Distribution
-          { kind: 'snapshot_feature', name: 'unique_buyers',      op: '>=', value: 15 },
-          { kind: 'snapshot_feature', name: 'pct_sniper_buys',    op: '<=', value: 0.30 },
+          { kind: 'ml_prediction', name: 'rug_within_5min',     op: '<',  value: 0.10 },
+          { kind: 'ml_prediction', name: 'drawdown_20pct_300s', op: '<',  value: 0.50 },
+          // Distribution — relaxed a bit
+          { kind: 'snapshot_feature', name: 'unique_buyers',      op: '>=', value: 12 },
+          { kind: 'snapshot_feature', name: 'pct_sniper_buys',    op: '<=', value: 0.35 },
           { kind: 'snapshot_feature', name: 'bundle_buyers',      op: '<=', value: 0 },
-          { kind: 'snapshot_feature', name: 'last_mcap_sol',      op: '<=', value: 30 },
+          { kind: 'snapshot_feature', name: 'last_mcap_sol',      op: '<=', value: 35 },
         ],
         // 2026-05-15: bumped 480→900s. Runners need ≥3min to show the
         // pump_durability signal reliably. Earlier than that, the model
