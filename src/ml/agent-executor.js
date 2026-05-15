@@ -341,16 +341,33 @@ function evalEntry(recipe, mintAddress, features, preds) {
   }
 
   let evaluated = 0;
+  let passed = 0;
   for (const c of conds) {
     const r = evalCondition(c, ctx);
-    if (r === false) return false;       // hard reject
-    if (r === 'skip') continue;          // no data, no opinion
-    if (r === true) evaluated++;
+    if (r === false) {
+      // 2026-05-15: near-miss visibility. If ≥50% of conditions evaluated
+      // to true before this one failed, log it — these are the close calls
+      // worth knowing about. Below 50% is "obvious mismatch" and noisy.
+      if (evaluated >= 4 && passed / Math.max(1, evaluated) >= 0.5) {
+        const recipeName = (recipe && recipe.name) || 'unknown';
+        const condDesc = c.kind === 'ml_prediction' ? `${c.name}${c.op}${c.value}`
+                       : c.kind === 'snapshot_feature' ? `${c.name}${c.op}${c.value}`
+                       : c.kind;
+        const actualVal = c.kind === 'ml_prediction' ? (ctx.preds?.[c.name])
+                        : c.kind === 'snapshot_feature' ? (ctx.features?.[c.name])
+                        : null;
+        const actStr = (typeof actualVal === 'number') ? actualVal.toFixed(3) : String(actualVal);
+        console.log(`[entry-reject] ${recipeName} · ${mintAddress.slice(0,8)}… · failed ${condDesc} (actual=${actStr}) · ${passed}/${evaluated} prior gates passed`);
+      }
+      return false;
+    }
+    if (r === 'skip') { evaluated++; continue; }
+    if (r === true) { evaluated++; passed++; }
   }
   // Safety: if EVERY gate skipped (no real signal applied), don't enter.
   // Strategies must have at least one core gate (ml_prediction / feature) that
   // actually evaluates so we're never entering on pure absence-of-bad-news.
-  if (evaluated === 0) return false;
+  if (passed === 0) return false;
   return true;
 }
 
