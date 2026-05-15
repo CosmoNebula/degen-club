@@ -734,13 +734,14 @@ export function startServer(getIngestionStatus) {
     refresh();
     setInterval(refresh, intervalMs);
   }
-  // 2026-05-15: bumped from 10s → 30s. Each refresh costs 600-1000ms of
-  // sync better-sqlite3 main-thread work (the rejections peaks CTE scans
-  // post-rejection trades for every rejected mint in the session). At 10s
-  // that was ~7-10% loop chew for an analytics endpoint dashboard polls
-  // at the same cadence; 30s is still well under "stale" for missed-ops.
-  prewarm('exits/analysis', 30000, () => computeExitsAnalysis());
-  prewarm('rejections/missed', 30000, () => computeMissedRejections());
+  // 2026-05-15 (PM): bumped 30s → 120s. With session_rejects growing into
+  // the thousands and the peaks CTE scanning post-rejection trades per mint,
+  // refresh cost climbed to 6-13s — wedging HTTP enough to 502 cloudflared.
+  // 120s is plenty for missed-ops analytics (data shifts over minutes), and
+  // the peaks-CTE 24h cap (see computeMissedRejections) keeps each fire
+  // bounded.
+  prewarm('exits/analysis', 60000, () => computeExitsAnalysis());
+  prewarm('rejections/missed', 120000, () => computeMissedRejections());
 
   app.get('/api/exits/analysis', (req, res) => {
     res.json(cached('exits/analysis', { summary: [], rows: [] }));
@@ -792,10 +793,16 @@ export function startServer(getIngestionStatus) {
         SELECT * FROM gate_rejections WHERE first_rejected_at >= ?
       ),
       peaks AS (
+        -- 2026-05-15 (PM): 24h cap on the trade scan. Per-mint trade history
+        -- was unbounded (session_start onwards), so as the session ran for
+        -- days the join cost ballooned to 6-13s and wedged HTTP. The
+        -- "did this rejected mint pump?" question only cares about the
+        -- first 24h of post-rejection price action; older data is noise.
         SELECT sr.mint_address, COALESCE(MAX(t.market_cap_sol), 0) AS peak_after
         FROM session_rejects sr
         LEFT JOIN trades t ON t.mint_address = sr.mint_address
                           AND t.timestamp >= sr.first_rejected_at
+                          AND t.timestamp <= sr.first_rejected_at + 86400000
         GROUP BY sr.mint_address
       )
       SELECT
