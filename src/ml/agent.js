@@ -217,21 +217,20 @@ function S() {
     // peaked_30 predictions × 878k labeled snapshots → 35-40s per call,
     // dragging the loop through whatever path triggered the agent consult.
     // 7 days of calibration data is plenty for Brier score statistical power.
+    // 2026-05-15: join pinned to snapshot_age_sec=60. Labels are per-mint;
+    // every age has the same value once resolved. The unbounded join was
+    // fanning out 9× across snapshot ages and chewing the event loop.
     calibrationStats: d.prepare(`
-      WITH per_pred AS (
-        SELECT p.id, p.prob, MAX(s.peaked_30) AS actual
-        FROM ml_predictions p
-        JOIN ml_mint_snapshots s ON s.mint_address = p.mint_address
-        WHERE p.target = 'peaked_30'
-          AND p.prob IS NOT NULL
-          AND p.timestamp > strftime('%s','now')*1000 - 7*86400000
-          AND s.labels_resolved_at IS NOT NULL
-          AND s.peaked_30 IS NOT NULL
-        GROUP BY p.id
-      )
       SELECT COUNT(*) AS n,
-             AVG((prob - actual) * (prob - actual)) AS brier
-      FROM per_pred
+             AVG((p.prob - s.peaked_30) * (p.prob - s.peaked_30)) AS brier
+      FROM ml_predictions p
+      JOIN ml_mint_snapshots s
+        ON s.mint_address = p.mint_address AND s.snapshot_age_sec = 60
+      WHERE p.target = 'peaked_30'
+        AND p.prob IS NOT NULL
+        AND p.timestamp > strftime('%s','now')*1000 - 7*86400000
+        AND s.labels_resolved_at IS NOT NULL
+        AND s.peaked_30 IS NOT NULL
     `),
     // Recent strategy performance
     strategyPerf: d.prepare(`SELECT
@@ -247,34 +246,31 @@ function S() {
        (SELECT COUNT(*) FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL) AS snapshots_labeled,
        (SELECT COUNT(*) FROM ml_predictions) AS predictions_total
     `),
+    // 2026-05-15: pinned to snapshot_age_sec=60 (see calibrationStats above).
     bestEdgeQuery: d.prepare(`
-      WITH per_pred AS (
-        SELECT p.id, p.target, p.prob,
-               MAX(s.peaked_30) AS p30, MAX(s.peaked_100) AS p100,
-               MAX(s.migrated) AS mig, MAX(s.peak_pct_max) AS peak_pct
-        FROM ml_predictions p
-        JOIN ml_mint_snapshots s ON s.mint_address = p.mint_address
-        WHERE p.prob IS NOT NULL AND p.prob > 0.30
-          AND s.labels_resolved_at IS NOT NULL
-          AND p.timestamp > strftime('%s','now')*1000 - 7*86400000
-        GROUP BY p.id
-      )
-      SELECT target, COUNT(*) AS n,
-             AVG(p30) AS p30_rate, AVG(p100) AS p100_rate,
-             AVG(mig) AS mig_rate, AVG(peak_pct) AS avg_peak_pct
-      FROM per_pred GROUP BY target
+      SELECT p.target, COUNT(*) AS n,
+             AVG(s.peaked_30) AS p30_rate, AVG(s.peaked_100) AS p100_rate,
+             AVG(s.migrated) AS mig_rate, AVG(s.peak_pct_max) AS avg_peak_pct
+      FROM ml_predictions p
+      JOIN ml_mint_snapshots s
+        ON s.mint_address = p.mint_address AND s.snapshot_age_sec = 60
+      WHERE p.prob IS NOT NULL AND p.prob > 0.30
+        AND s.labels_resolved_at IS NOT NULL
+        AND p.timestamp > strftime('%s','now')*1000 - 7*86400000
+      GROUP BY p.target
     `),
     // Edge check — top-30%-prob peaked_30 picks vs population baseline.
     // This is what actually matters: do the model's confident picks pump?
+    // 2026-05-15: pinned to snapshot_age_sec=60 (see calibrationStats above).
     edgeCheck: d.prepare(`
       WITH per_pred AS (
-        SELECT p.id, p.prob, MAX(s.peaked_30) AS actual
+        SELECT p.prob, s.peaked_30 AS actual
         FROM ml_predictions p
-        JOIN ml_mint_snapshots s ON s.mint_address = p.mint_address
+        JOIN ml_mint_snapshots s
+          ON s.mint_address = p.mint_address AND s.snapshot_age_sec = 60
         WHERE p.target = 'peaked_30' AND p.prob IS NOT NULL
           AND p.timestamp > strftime('%s','now')*1000 - 7*86400000
           AND s.labels_resolved_at IS NOT NULL AND s.peaked_30 IS NOT NULL
-        GROUP BY p.id
       )
       SELECT
         (SELECT AVG(actual) FROM per_pred WHERE prob > 0.30) AS top_rate,

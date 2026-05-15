@@ -46,17 +46,21 @@ function S() {
 // cross product and blocking the event loop for 10+ minutes, freezing the
 // bot and tripping the loop watchdog (2026-05-12). 50K samples per decile
 // bucket is plenty for stable calibration estimates.
+// 2026-05-15: pinned join to snapshot_age_sec=60 so the PK index hits an exact
+// row instead of fanning out across 9 ages per mint (was 80s/target × 13 =
+// 17min freeze daily). Labels are per-mint, identical across ages once
+// resolved; age=60 covers 97.7% of resolved mints.
 function calibrationFor(target) {
   const rows = db().prepare(`
-    SELECT p.prob, MAX(s.${target}) AS actual
+    SELECT p.prob, s.${target} AS actual
     FROM (
       SELECT id, mint_address, prob FROM ml_predictions
       WHERE prob IS NOT NULL AND target = ?
       ORDER BY timestamp DESC LIMIT 50000
     ) p
-    JOIN ml_mint_snapshots s ON s.mint_address = p.mint_address
+    JOIN ml_mint_snapshots s
+      ON s.mint_address = p.mint_address AND s.snapshot_age_sec = 60
     WHERE s.labels_resolved_at IS NOT NULL AND s.${target} IS NOT NULL
-    GROUP BY p.id
   `).all(target);
   if (rows.length < 50) return { target, n: rows.length, deciles: [], usable: false };
   const buckets = Array.from({ length: 10 }, (_, i) => ({
