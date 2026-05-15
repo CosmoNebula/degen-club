@@ -345,19 +345,28 @@ function evalEntry(recipe, mintAddress, features, preds) {
   for (const c of conds) {
     const r = evalCondition(c, ctx);
     if (r === false) {
-      // 2026-05-15: near-miss visibility. If ≥50% of conditions evaluated
-      // to true before this one failed, log it — these are the close calls
-      // worth knowing about. Below 50% is "obvious mismatch" and noisy.
+      // 2026-05-15: near-miss persistence. If ≥50% of prior conditions
+      // passed, write the rejection to ml_agent_log for later analysis.
+      // Stdout would flood at hundreds of mints/hour; the DB row is cheap
+      // and queryable for "what gates rejected which mints" reports.
       if (evaluated >= 4 && passed / Math.max(1, evaluated) >= 0.5) {
-        const recipeName = (recipe && recipe.name) || 'unknown';
-        const condDesc = c.kind === 'ml_prediction' ? `${c.name}${c.op}${c.value}`
-                       : c.kind === 'snapshot_feature' ? `${c.name}${c.op}${c.value}`
-                       : c.kind;
-        const actualVal = c.kind === 'ml_prediction' ? (ctx.preds?.[c.name])
-                        : c.kind === 'snapshot_feature' ? (ctx.features?.[c.name])
-                        : null;
-        const actStr = (typeof actualVal === 'number') ? actualVal.toFixed(3) : String(actualVal);
-        console.log(`[entry-reject] ${recipeName} · ${mintAddress.slice(0,8)}… · failed ${condDesc} (actual=${actStr}) · ${passed}/${evaluated} prior gates passed`);
+        try {
+          const recipeName = (recipe && recipe.name) || 'unknown';
+          const actualVal = c.kind === 'ml_prediction' ? (ctx.preds?.[c.name])
+                          : c.kind === 'snapshot_feature' ? (ctx.features?.[c.name])
+                          : null;
+          db().prepare(`INSERT INTO ml_agent_log
+            (timestamp, level, category, strategy_id, message, data_json)
+            VALUES (?, 'info', 'entry-reject', ?, ?, ?)`).run(
+            Date.now(), recipeName,
+            `failed ${c.kind}.${c.name}${c.op}${c.value} (actual=${typeof actualVal === 'number' ? actualVal.toFixed(3) : String(actualVal)})`,
+            JSON.stringify({
+              mint: mintAddress, recipe: recipeName,
+              kind: c.kind, name: c.name, op: c.op, threshold: c.value,
+              actual: actualVal,
+              passed_prior: passed, evaluated_prior: evaluated,
+            }));
+        } catch {}
       }
       return false;
     }
