@@ -44,7 +44,7 @@ const strategies = [
           // migrated avg=0.052, migrates_within_15min avg=0.006. The
           // combined stack intersected at <0.1% of mints, fired zero times
           // over 7 hours. Loosened to roughly the top-decile of each model.
-          { kind: 'ml_prediction', name: 'migrated',               op: '>=', value: 0.02 },
+          { kind: 'ml_prediction', name: 'migrated',               op: '>=', value: 0.01 },
           // migrates_within_15min dropped from the AND-stack — average is
           // 0.006 so any positive threshold kills the whole stack. Keep
           // migrated as primary; let runner-trailer cover non-timing cases.
@@ -104,10 +104,10 @@ const strategies = [
           // 2026-05-15 loosen: peak_within_5min avg=0.137, so 0.20 was top
           // 25%. buy_pressure ≥0.45 was already top 50%. Combined too tight.
           { kind: 'ml_prediction', name: 'peak_within_5min',         op: '>=', value: 0.05 },
-          { kind: 'ml_prediction', name: 'buy_pressure_continues_60s', op: '>=', value: 0.35 },
-          // Poisson count — mean=1.8/60s. Loosened from 3 to 2 after 10min
-          // batch showed max=2.92 against threshold=3 (always just-under).
-          { kind: 'ml_prediction', name: 'unique_buyers_next_60s',   op: '>=', value: 2 },
+          { kind: 'ml_prediction', name: 'buy_pressure_continues_60s', op: '>=', value: 0.20 },
+          // Poisson count — mean=1.8/60s. Loosened to ≥1 in current
+          // bearish regime; revisit when fire rate picks up.
+          { kind: 'ml_prediction', name: 'unique_buyers_next_60s',   op: '>=', value: 1 },
           // Safety
           { kind: 'ml_prediction', name: 'rug_within_5min',          op: '<',  value: 0.08 },
           { kind: 'ml_prediction', name: 'drawdown_20pct_300s',      op: '<',  value: 0.55 },
@@ -164,7 +164,7 @@ const strategies = [
           // 2026-05-15 loosen: peaked_300 avg=0.045 so 0.15 was top 5%.
           // hits_2x_within_1h avg=0.091 so 0.18 was top 25%. pump_durability
           // avg=0.244 so 0.50 was top 20%. Combined too rare.
-          { kind: 'ml_prediction', name: 'peaked_300',          op: '>=', value: 0.05 },
+          { kind: 'ml_prediction', name: 'peaked_300',          op: '>=', value: 0.03 },
           { kind: 'ml_prediction', name: 'hits_2x_within_1h',   op: '>=', value: 0.10 },
           { kind: 'ml_prediction', name: 'pump_durability_5min', op: '>=', value: 0.25 },
           // Safety

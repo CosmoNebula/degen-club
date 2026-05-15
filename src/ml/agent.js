@@ -69,7 +69,10 @@ const RECENT_ORPHANS_MAX = 8;
 // agent fired them 7+ times in a 5h session = ~4 min of cumulative
 // loop blocking. Cache for 10 min — these are calibration stats over
 // historical predictions, they barely change minute-to-minute.
-const HEAVY_QUERY_TTL_MS = 10 * 60 * 1000;
+// 2026-05-15 (PM): bumped 10min → 60min. Even at 10min TTL the cache
+// miss was wedging the main loop ~9s each time. Calibration data shifts
+// over hours, not minutes; 60min is plenty fresh for agent introspection.
+const HEAVY_QUERY_TTL_MS = 60 * 60 * 1000;
 const _heavyCache = new Map(); // key → { v, at }
 function cachedHeavy(key, fn) {
   const now = Date.now();
@@ -833,8 +836,11 @@ function logThought(level, category, strategyId, message, data) {
 // real numerical comparisons, not vague hand-wavey reasoning.
 function buildContext() {
   const s = S();
-  const overall = s.overallStats.get();
-  const baseline = s.baselineRates.get();
+  // 2026-05-15 (PM): overallStats was the un-cached one — three sub-SELECT
+  // COUNT(*) on tables totaling >7M rows. ~1-3s every introspection. Add
+  // it to the heavy cache so it shares the 60min TTL with siblings.
+  const overall = cachedHeavy('overallStats', () => s.overallStats.get());
+  const baseline = cachedHeavy('baselineRates', () => s.baselineRates.get());
   const calib = cachedHeavy('calibrationStats', () => s.calibrationStats.get());
   const edge = cachedHeavy('bestEdgeQuery', () => s.bestEdgeQuery.all());
   const drift = (() => { try { return getModelHealth(); } catch { return null; } })();
