@@ -149,7 +149,11 @@ startTruthSocialIngest();
 startMetaSynthesis();
 startNewsCleanup();
 startIntelligenceCondensate();
-startAnomalyDetector();
+// 2026-05-15 (PM): anomaly detector DISABLED. Fires `[anomaly] WATCH ...`
+// log lines (theme clusters, dev-cluster bursts, etc.) but nothing
+// downstream gates on them — pure observability noise. Re-enable when an
+// anomaly signal is wired into a gate or alert.
+// startAnomalyDetector();
 startMigratedTracker();
 startMigrationSnapshot(getSolUsd);
 startSessionLogger();

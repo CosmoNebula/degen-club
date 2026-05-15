@@ -72,24 +72,16 @@ if (!isMainThread) {
     } catch (err) { console.error('[traders-worker] scoped backfill', err.message); }
   }, 60_000);
 
-  // Wallet-ring detection: hourly. Heavy SQL scan (pairwise wallet overlap on
-  // ≥10-mint-buy universe) — expensive, so it lives in this worker.
-  setInterval(() => {
-    try {
-      const r = detectRings({ verbose: true });
-      console.log(`[traders-worker] ring sweep: ${r.rings} rings · ${r.wallets} wallets · ${r.ms}ms`);
-    } catch (err) { console.error('[traders-worker] ring sweep', err.message); }
-  }, RINGS_INTERVAL_MS);
+  // 2026-05-15 (PM): wallet-ring detection DISABLED. detectRings is a
+  // 90-244s wm-self-join (`SELECT wallet, COUNT(DISTINCT mint_address) total
+  // FROM trades ... GROUP BY wallet HAVING total >= ?, JOIN wm a wm b ON
+  // mint_address`) and stores ring_id on wallets. Audit: no strategy recipe
+  // gates on ring_id anywhere in the live set, so this is pure analytics
+  // CPU + WAL contention — was a documented cause of WSS/RPC disconnect
+  // cascades. Re-enable if/when a recipe wires ring membership into a gate.
+  console.log('[traders-worker] ring sweep DISABLED (no recipe consumes ring_id)');
 
-  // Run rings shortly after boot too. Stagger 90s after stale cleanup.
-  setTimeout(() => {
-    try {
-      const r = detectRings({ verbose: true });
-      console.log(`[traders-worker] startup rings: ${r.rings} rings · ${r.wallets} wallets · ${r.ms}ms`);
-    } catch (err) { console.error('[traders-worker] startup rings', err.message); }
-  }, 120_000);
-
-  console.log(`[traders-worker] started · sweep every ${sweepInterval}ms · stale cleanup ${STALE_INTERVAL_MS / 60000}min · ring sweep ${RINGS_INTERVAL_MS / 60000}min`);
+  console.log(`[traders-worker] started · sweep every ${sweepInterval}ms · stale cleanup ${STALE_INTERVAL_MS / 60000}min · ring sweep DISABLED`);
 }
 
 // ---------- Main side ----------
