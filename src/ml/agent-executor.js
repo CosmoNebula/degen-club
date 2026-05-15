@@ -75,10 +75,13 @@ function S() {
         tier2_trigger_pct, tier2_sell_pct,
         tier3_trigger_pct, tier3_sell_pct, tier3_trail_pct,
         breakeven_after_tier1,
+        peak_floor_arm_pct, peak_floor_exit_pct,
+        peak_floor_arm2_pct, peak_floor_exit2_pct,
+        peak_floor_arm3_pct, peak_floor_exit3_pct,
         dca_enabled, dca_trigger_pct, dca_size_pct,
         dca_min_age_sec, dca_max_age_min, dca_max_dca,
         updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
   };
   return stmts;
 }
@@ -418,6 +421,21 @@ function syncStrategyStateRow(strategyId, recipe) {
   const t3Trig = (t3.trigger_pct ?? (trail.arm_pct ?? 200)) / 100;
   const t3Sell = (t3.sell_pct ?? 100) / 100;
   const tier3Trail = (trail.trail_pct || 0) / 100;
+  // 2026-05-15: peak-floor cascade. Each tier is { arm_pct, exit_pct } —
+  // when peak ever reaches arm%, exit the remaining bag if current drops
+  // below exit%. Complements the tier sells (which scale out at fixed
+  // thresholds) by guarding the residual bag against post-peak retracement.
+  // INVARIANT: exit_pct MUST be < arm_pct (recipe convention, not enforced
+  // in DB) — otherwise the cascade fires immediately when armed. Recipe
+  // values are percentages (30 = +30%); we divide by 100 for the DB fraction.
+  const pf = (exit.peak_floor_tiers || []).slice(0, 3);
+  const pf1 = pf[0] || {}; const pf2 = pf[1] || {}; const pf3 = pf[2] || {};
+  const pf1Arm = (pf1.arm_pct || 0) / 100;
+  const pf1Exit = (pf1.exit_pct || 0) / 100;
+  const pf2Arm = (pf2.arm_pct || 0) / 100;
+  const pf2Exit = (pf2.exit_pct || 0) / 100;
+  const pf3Arm = (pf3.arm_pct || 0) / 100;
+  const pf3Exit = (pf3.exit_pct || 0) / 100;
   // DCA section. Default disabled — agent must opt in explicitly. Recipe
   // values use the same percent-not-fraction convention as exit.stop_loss_pct.
   const dca = recipe.dca || {};
@@ -444,6 +462,7 @@ function syncStrategyStateRow(strategyId, recipe) {
     t3Trig, t3Sell,
     tier3Trail,
     exit.breakeven_after_tier1 ? 1 : 0,
+    pf1Arm, pf1Exit, pf2Arm, pf2Exit, pf3Arm, pf3Exit,
     dcaEnabled, dcaTriggerFraction, dcaSizeFraction,
     dca.min_age_sec || 60,
     dca.max_age_min || 30,

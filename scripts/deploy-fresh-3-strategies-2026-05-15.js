@@ -53,7 +53,10 @@ const strategies = [
           { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '>=', value: 5 },
           { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '<=', value: 35 },
         ],
-        max_mint_age_sec: 600, // 10 min
+        // 2026-05-15: bumped 600→1500s. Graduation typically happens
+        // 10-30min into a coin's life, and the model needs ≥2min of organic
+        // data to give a reliable read (train/serve age-skew per audit).
+        max_mint_age_sec: 1500, // 25 min
       },
       sizing: { type: 'fixed', sol: 0.18 },
       exit: {
@@ -64,9 +67,17 @@ const strategies = [
           { trigger_pct: 600, sell_pct: 50 },  // moonbag survives past 6x
         ],
         trailing_stop: { arm_pct: 400, trail_pct: 35 },
+        // Peak-floor cascade — catches modest pumps that fade before T1 fires
+        // and locks in profits on near-T2/T3 peaks that retrace. INVARIANT:
+        // exit_pct < arm_pct (else fires immediately when armed).
+        peak_floor_tiers: [
+          { arm_pct: 30,  exit_pct: 5 },    // L1: modest-pump rescue
+          { arm_pct: 120, exit_pct: 60 },   // L2: lock 60% after 2.2x peak
+          { arm_pct: 400, exit_pct: 200 },  // L3: lock 3x after 5x peak
+        ],
         max_hold_min: 30,
-        // Smart exit: incoming dump pressure detector. The Poisson model
-        // predicts count of unique sellers next 60s; 20+ = wave incoming.
+        // Smart exit: incoming dump pressure detector. (Recipe field — not yet
+        // consumed by paper.js, kept as documentation until wired.)
         prediction_exit: { target: 'unique_sellers_next_60s', op: '>', value: 20 },
         breakeven_after_tier1: 1,
       },
@@ -97,7 +108,10 @@ const strategies = [
           { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '>=', value: 3 },
           { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '<=', value: 25 },
         ],
-        max_mint_age_sec: 300, // 5 min
+        // 2026-05-15: bumped 300→480s. Scalper still wants young coins but
+        // 5min was too tight given the train/serve age-skew — model needs
+        // ≥1min of feature data to fire reliably (snapshot_age_sec=60 trained).
+        max_mint_age_sec: 480, // 8 min
       },
       sizing: { type: 'fixed', sol: 0.13 },
       exit: {
@@ -108,8 +122,15 @@ const strategies = [
         ],
         // No trailing stop — 5-min thesis. Tier sells + breakeven + local-top
         // detector do the work.
+        // Peak-floor cascade — only 2 tiers because the 5-min thesis means
+        // we never sit through deep drawdowns. L1 rescues small pumps,
+        // L2 locks profit near T2.
+        peak_floor_tiers: [
+          { arm_pct: 15, exit_pct: 3 },   // L1: quick rescue at +15% peak
+          { arm_pct: 50, exit_pct: 20 },  // L2: lock 20% near T2
+        ],
         max_hold_min: 5,
-        // THE unlock: sell at the local top instead of after drawdown.
+        // Smart exit (documentation — not yet wired in paper.js):
         prediction_exit: { target: 'local_top_60s', op: '>', value: 0.50 },
         breakeven_after_tier1: 1,
         fast_fail: { sec: 90, min_peak_pct: 8, sl_pct: -15 },
@@ -139,7 +160,10 @@ const strategies = [
           { kind: 'snapshot_feature', name: 'bundle_buyers',      op: '<=', value: 0 },
           { kind: 'snapshot_feature', name: 'last_mcap_sol',      op: '<=', value: 30 },
         ],
-        max_mint_age_sec: 480, // 8 min
+        // 2026-05-15: bumped 480→900s. Runners need ≥3min to show the
+        // pump_durability signal reliably. Earlier than that, the model
+        // can't tell a real runner from sniper noise.
+        max_mint_age_sec: 900, // 15 min
       },
       sizing: { type: 'fixed', sol: 0.20 },
       exit: {
@@ -153,9 +177,15 @@ const strategies = [
         // catches the inevitable post-peak dump. Above this point, every
         // additional doubling is house money.
         trailing_stop: { arm_pct: 1000, trail_pct: 40 },
+        // Peak-floor cascade — rides modest pumps via L1 rescue, locks in
+        // multi-X profits on retracements via L2/L3.
+        peak_floor_tiers: [
+          { arm_pct: 60,  exit_pct: 25 },   // L1: near-T1 pump rescue
+          { arm_pct: 200, exit_pct: 100 },  // L2: lock 2x after 3x peak
+          { arm_pct: 500, exit_pct: 300 },  // L3: lock 4x after 6x peak
+        ],
         max_hold_min: 60,
-        // Sell-the-top hedge — once deep in profit, local-top firing means
-        // exit immediately rather than ride the dump.
+        // Smart exit (documentation — not yet wired in paper.js):
         prediction_exit: { target: 'local_top_60s', op: '>', value: 0.60 },
         breakeven_after_tier1: 1,
       },
