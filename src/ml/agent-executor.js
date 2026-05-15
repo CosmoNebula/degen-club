@@ -345,29 +345,31 @@ function evalEntry(recipe, mintAddress, features, preds) {
   for (const c of conds) {
     const r = evalCondition(c, ctx);
     if (r === false) {
-      // 2026-05-15: near-miss persistence. If ≥50% of prior conditions
-      // passed, write the rejection to ml_agent_log for later analysis.
-      // Stdout would flood at hundreds of mints/hour; the DB row is cheap
-      // and queryable for "what gates rejected which mints" reports.
-      if (evaluated >= 4 && passed / Math.max(1, evaluated) >= 0.5) {
-        try {
-          const recipeName = (recipe && recipe.name) || 'unknown';
-          const actualVal = c.kind === 'ml_prediction' ? (ctx.preds?.[c.name])
-                          : c.kind === 'snapshot_feature' ? (ctx.features?.[c.name])
-                          : null;
-          db().prepare(`INSERT INTO ml_agent_log
-            (timestamp, level, category, strategy_id, message, data_json)
-            VALUES (?, 'info', 'entry-reject', ?, ?, ?)`).run(
-            Date.now(), recipeName,
-            `failed ${c.kind}.${c.name}${c.op}${c.value} (actual=${typeof actualVal === 'number' ? actualVal.toFixed(3) : String(actualVal)})`,
-            JSON.stringify({
-              mint: mintAddress, recipe: recipeName,
-              kind: c.kind, name: c.name, op: c.op, threshold: c.value,
-              actual: actualVal,
-              passed_prior: passed, evaluated_prior: evaluated,
-            }));
-        } catch {}
-      }
+      // 2026-05-15: log EVERY entry rejection (first per strategy×mint×gate
+      // — dedup'd via PRIMARY KEY in strategy_entry_rejections). The mint
+      // is rejected by the FIRST failing gate, so we log one row per attempt.
+      // Subsequent ticks for the same (strategy, mint, gate) bump reject_count.
+      try {
+        const recipeName = (recipe && recipe.name) || 'unknown';
+        const actualVal = c.kind === 'ml_prediction' ? (ctx.preds?.[c.name])
+                        : c.kind === 'snapshot_feature' ? (ctx.features?.[c.name])
+                        : null;
+        const actualNum = (typeof actualVal === 'number') ? actualVal : null;
+        const mcapAtRej = features?.last_mcap_sol ?? null;
+        const ageSecAtRej = features?.snapshot_age_sec ?? null;
+        db().prepare(`INSERT INTO strategy_entry_rejections
+          (strategy_id, mint_address, gate_kind, gate_name, gate_op, threshold, actual,
+           rejected_at, reject_count, mcap_at_reject, age_sec_at_reject)
+          VALUES (?,?,?,?,?,?,?,?,1,?,?)
+          ON CONFLICT(strategy_id, mint_address, gate_name) DO UPDATE SET
+            reject_count = reject_count + 1,
+            actual = excluded.actual,
+            mcap_at_reject = excluded.mcap_at_reject,
+            age_sec_at_reject = excluded.age_sec_at_reject`).run(
+          recipeName, mintAddress, c.kind, c.name, c.op || null,
+          (typeof c.value === 'number') ? c.value : null,
+          actualNum, Date.now(), mcapAtRej, ageSecAtRej);
+      } catch {}
       return false;
     }
     if (r === 'skip') { evaluated++; continue; }

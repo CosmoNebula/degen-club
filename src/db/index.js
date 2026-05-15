@@ -357,6 +357,30 @@ function runMigrations(d) {
   d.exec(`CREATE INDEX IF NOT EXISTS idx_rejections_first ON gate_rejections(first_rejected_at DESC)`);
   d.exec(`CREATE INDEX IF NOT EXISTS idx_rejections_reason ON gate_rejections(reason)`);
 
+  // 2026-05-15: per-strategy entry-condition rejection log. gate_rejections
+  // is keyed UNIQUE on mint_address — that's for the LATE gate (anti-snipe,
+  // migrated-while-pending) where there's one verdict per mint. Here we
+  // track ENTRY-stage rejections, which are per (strategy, mint, gate) —
+  // one mint can be rejected by multiple strategies' gates. Dedup by the
+  // composite PK so a mint counts ONCE per gate per strategy across ticks.
+  d.exec(`CREATE TABLE IF NOT EXISTS strategy_entry_rejections (
+    strategy_id TEXT NOT NULL,
+    mint_address TEXT NOT NULL,
+    gate_kind TEXT NOT NULL,            -- ml_prediction | snapshot_feature | composite_score | etc.
+    gate_name TEXT NOT NULL,            -- e.g. 'migrated', 'last_mcap_sol'
+    gate_op TEXT,                       -- '>=' '<' etc.
+    threshold REAL,                     -- the recipe's threshold
+    actual REAL,                        -- value seen at rejection
+    rejected_at INTEGER NOT NULL,       -- first rejection timestamp
+    reject_count INTEGER DEFAULT 1,     -- ticks this gate failed
+    mcap_at_reject REAL,
+    age_sec_at_reject INTEGER,
+    PRIMARY KEY (strategy_id, mint_address, gate_name)
+  )`);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_strat_rej_strat ON strategy_entry_rejections(strategy_id, rejected_at DESC)`);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_strat_rej_gate ON strategy_entry_rejections(gate_name)`);
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_strat_rej_mint ON strategy_entry_rejections(mint_address)`);
+
   ensureCol(d, 'strategy_state', 'tp_trail_arm_pct', `REAL DEFAULT 0`);
   ensureCol(d, 'strategy_state', 'fast_fail_sec', `INTEGER DEFAULT 60`);
   ensureCol(d, 'strategy_state', 'fast_fail_min_peak_pct', `REAL DEFAULT 0.05`);
