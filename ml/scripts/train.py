@@ -37,6 +37,12 @@ REGRESSION_TARGETS = {
     'hold_1h_pct', 'hold_4h_pct', 'hold_24h_pct',
     'peak_pct_within_24h', 'max_drawdown_within_24h_pct',
     'pump_durability_5min',                   # 2026-05-14 timing-aware
+    # 2026-05-15 exit-timing regressions. Without this list membership, the
+    # routing in train_one() falls into the binary classifier path — see the
+    # crash at midnight ET retrain ("class balance: -3728 neg / 8916 pos" on
+    # Poisson counts; HGBClassifier rejects float labels).
+    'pnl_pct_60s', 'pnl_pct_300s',
+    'unique_buyers_next_60s', 'unique_sellers_next_60s',
     # Legacy names (still in some pipelines) — kept for routing-correctness
     # even if dropped from the training set in retrain_all.py.
     'peak_pct_max', 'time_to_peak_sec', 'time_to_peak_5x_sec',

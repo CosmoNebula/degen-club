@@ -47,12 +47,22 @@ def _model_files():
 
 
 def load_all_models():
-    """Load every .pkl in models/ and key by target."""
+    """Load every .pkl in models/ and key by target.
+
+    2026-05-15: build into a fresh local dict, then atomically swap the
+    module-level ref. The old "_models = {}; for ... _models[t] = ..." pattern
+    raced with concurrent /predict-all requests iterating _models.keys() —
+    Python raised "dictionary changed size during iteration" on every hit
+    during the reload window (multiple times per retrain). Python rebinds
+    refs atomically under the GIL, so a request either sees the OLD complete
+    dict or the NEW complete dict.
+    """
     global _models
-    _models = {}
+    new_models = {}
     files = _model_files()
     if not files:
         print(f'[serve] no models in {MODELS_DIR}')
+        _models = new_models
         return
     for f in files:
         try:
@@ -66,7 +76,7 @@ def load_all_models():
                 # back-compat: infer from metrics shape
                 metrics = bundle.get('metrics') or {}
                 mode = metrics.get('mode') or ('regression' if 'r2' in metrics else 'classification')
-            _models[target] = {
+            new_models[target] = {
                 'model': bundle['model'],
                 'feature_cols': bundle['feature_cols'],
                 'target': target,
@@ -87,6 +97,7 @@ def load_all_models():
             print(f'[serve] loaded {target} ({f.name}) · mode={mode} · log={bundle.get("log_transform", False)} · {bundle.get("n_train")} train rows')
         except Exception as e:
             print(f'[serve] {f.name}: load failed — {e}')
+    _models = new_models  # atomic ref swap (see docstring)
     print(f'[serve] {len(_models)} models loaded · targets: {list(_models.keys())}')
 
 
@@ -169,13 +180,18 @@ def predict(payload: FeaturesPayload):
 
 @app.post('/predict-all')
 def predict_all(payload: FeaturesPayload):
-    if not _models:
+    # Snapshot the dict ref once so we're immune to atomic ref-swaps mid-call
+    # (load_all_models swaps the module-level ref atomically). No iteration
+    # over a live dict that another thread might mutate.
+    models = _models
+    if not models:
         raise HTTPException(503, 'no models loaded')
+    targets = list(models.keys())
     out = {}
-    for target in _models.keys():
+    for target in targets:
         try: out[target] = _predict(target, payload.features)
         except Exception: out[target] = None
-    return {'predictions': out, 'targets': list(_models.keys())}
+    return {'predictions': out, 'targets': targets}
 
 
 @app.post('/reload')
