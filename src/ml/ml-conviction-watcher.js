@@ -31,16 +31,22 @@ function S() {
     //   - hits_5x_within_24h >= 0.25: meaningful chance of a 5x runner
     //   - peaked_300 >= 0.20: likely 3x at some point
     //   - hits_10x_within_24h >= 0.10: rare but very high-EV
+    // 2026-05-15: rewrote OR-shape as UNION. The OR pattern made the planner
+    // pick idx_ml_pred_mint (scan-distinct-mint) which is cold-cache slow
+    // (1.6-2.4s on the main thread, every 30s). UNION lets each branch use
+    // idx_ml_predictions_target (target=?, timestamp>?) directly.
     convictionPreds: d.prepare(`
-      SELECT DISTINCT mint_address
-      FROM ml_predictions
-      WHERE timestamp > ?
-        AND (
-          (target = 'migrated' AND prob >= 0.50) OR
-          (target = 'hits_5x_within_24h' AND prob >= 0.25) OR
-          (target = 'peaked_300' AND prob >= 0.20) OR
-          (target = 'hits_10x_within_24h' AND prob >= 0.10)
-        )
+      SELECT mint_address FROM ml_predictions
+      WHERE target = 'migrated' AND timestamp > ? AND prob >= 0.50
+      UNION
+      SELECT mint_address FROM ml_predictions
+      WHERE target = 'hits_5x_within_24h' AND timestamp > ? AND prob >= 0.25
+      UNION
+      SELECT mint_address FROM ml_predictions
+      WHERE target = 'peaked_300' AND timestamp > ? AND prob >= 0.20
+      UNION
+      SELECT mint_address FROM ml_predictions
+      WHERE target = 'hits_10x_within_24h' AND timestamp > ? AND prob >= 0.10
     `),
   };
   return stmts;
@@ -49,7 +55,7 @@ function S() {
 function refresh() {
   try {
     const cutoff = Date.now() - PREDICTION_FRESHNESS_MS;
-    const rows = S().convictionPreds.all(cutoff);
+    const rows = S().convictionPreds.all(cutoff, cutoff, cutoff, cutoff);
     const next = new Set(rows.map(r => r.mint_address));
     // In-place swap so callers always see a coherent set
     _convictionMints.clear();

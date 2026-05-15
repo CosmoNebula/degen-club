@@ -43,6 +43,17 @@ function cacheResponse(key, ttlMs, computeSync) {
   _responseCache.set(key, { v, t: Date.now() });
   return v;
 }
+// Async-compatible sibling — same TTL semantics but the compute function
+// may return a Promise. Concurrent cache-misses can briefly double-compute,
+// which is acceptable for our TTLs (the runaway case is many polls per
+// second, not two near-simultaneous misses).
+async function cacheResponseAsync(key, ttlMs, computeAsync) {
+  const c = _responseCache.get(key);
+  if (c && (Date.now() - c.t) < ttlMs) return c.v;
+  const v = await computeAsync();
+  _responseCache.set(key, { v, t: Date.now() });
+  return v;
+}
 
 function requireLocalOriginForMutations(req, res, next) {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
@@ -1701,6 +1712,12 @@ export function startServer(getIngestionStatus) {
 
   app.get('/api/ml/quality', async (req, res) => {
     try {
+      // 2026-05-15: this handler runs ~50 SQL queries including 29 feature-
+      // stat queries and an all-rows sort for peak percentiles. Total cost
+      // 10-30s of sync better-sqlite3 work, wedging the event loop on every
+      // dashboard refresh (ml.js polls every 30s). Cache the full response
+      // for 60s — data shifts over minutes, no need for fresher.
+      const out = await cacheResponseAsync('ml-quality', 60_000, async () => {
       const d = db();
       const now = Date.now();
       const dayMs = 24 * 60 * 60 * 1000;
@@ -1764,9 +1781,12 @@ export function startServer(getIngestionStatus) {
       `).get();
       // peak_pct_max distribution is heavy-tailed — mean is dominated by a
       // handful of runners. Compute median + p95 in JS for robust headline stats.
+      // 2026-05-15: pinned to snapshot_age_sec=60 so we sort ~180k rows
+      // instead of all 999k (labels are per-mint, identical across ages).
       const peakRows = d.prepare(`
         SELECT peak_pct_max FROM ml_mint_snapshots
         WHERE labels_resolved_at IS NOT NULL AND peak_pct_max IS NOT NULL
+          AND snapshot_age_sec = 60
         ORDER BY peak_pct_max ASC
       `).all();
       let peakMedian = 0, peakP95 = 0;
@@ -1911,7 +1931,7 @@ export function startServer(getIngestionStatus) {
       else if (medAlerts >= 3) grade = 'RED';
       else if (medAlerts > 0) grade = 'YELLOW';
 
-      res.json({
+      return {
         asOf: now,
         grade,
         alerts,
@@ -1955,48 +1975,53 @@ export function startServer(getIngestionStatus) {
           recent_snapshots: recentSnapshots,
           recent_resolutions: recentResolutions,
         },
+      };
       });
+      res.json(out);
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   app.get('/api/ml/status', async (req, res) => {
     try {
-      const d = db();
-      const total = d.prepare(`SELECT COUNT(*) AS n FROM ml_mint_snapshots`).get().n;
-      const resolved = d.prepare(`SELECT COUNT(*) AS n FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL`).get().n;
-      const buckets = d.prepare(`SELECT snapshot_age_sec, COUNT(*) AS n FROM ml_mint_snapshots GROUP BY snapshot_age_sec`).all();
-      const bucketMap = { '60': 0, '300': 0, '900': 0, '3600': 0 };
-      for (const b of buckets) bucketMap[String(b.snapshot_age_sec)] = b.n;
-      const oldest = d.prepare(`SELECT MIN(snapshot_ts) AS t FROM ml_mint_snapshots`).get();
-      const oldestMs = oldest?.t || null;
-      const collectionDays = oldestMs ? (Date.now() - oldestMs) / 86400000 : 0;
-      // sanity: migration rate in resolved data (should be ~1-3%)
-      const migRow = d.prepare(`SELECT AVG(migrated) AS rate FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL`).get();
-      const migRate = migRow?.rate || 0;
-      const peakedRow = d.prepare(`SELECT AVG(peaked_30) AS p30, AVG(peaked_100) AS p100, AVG(peaked_500) AS p500 FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL`).get();
-      // Target for first train: 10K resolved snapshots
-      const targetForFirstTrain = 10000;
-      const pctToTrain = Math.min(100, (resolved / targetForFirstTrain) * 100);
-      const etaDays = collectionDays > 0 && resolved > 0 ? Math.max(0, (targetForFirstTrain - resolved) / (resolved / collectionDays)) : null;
-      res.json({
-        state: total === 0 ? 'WAITING' : 'COLLECTING',
-        totalSnapshots: total,
-        resolvedSnapshots: resolved,
-        resolvedPct: total > 0 ? resolved / total : 0,
-        buckets: bucketMap,
-        collectionDays: +collectionDays.toFixed(2),
-        oldestSnapshotAt: oldestMs,
-        migrationRate: migRate,
-        peakedRates: {
-          p30: peakedRow?.p30 || 0,
-          p100: peakedRow?.p100 || 0,
-          p500: peakedRow?.p500 || 0,
-        },
-        targetForFirstTrain,
-        pctToTrain,
-        etaDaysToTrain: etaDays != null ? +etaDays.toFixed(1) : null,
-        asOf: Date.now(),
+      // 2026-05-15: cached 30s — same heavy COUNT/AVG queries as /api/ml/quality
+      // but smaller subset. Polled by main dashboard's loadML.
+      const out = cacheResponse('ml-status', 30_000, () => {
+        const d = db();
+        const total = d.prepare(`SELECT COUNT(*) AS n FROM ml_mint_snapshots`).get().n;
+        const resolved = d.prepare(`SELECT COUNT(*) AS n FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL`).get().n;
+        const buckets = d.prepare(`SELECT snapshot_age_sec, COUNT(*) AS n FROM ml_mint_snapshots GROUP BY snapshot_age_sec`).all();
+        const bucketMap = { '60': 0, '300': 0, '900': 0, '3600': 0 };
+        for (const b of buckets) bucketMap[String(b.snapshot_age_sec)] = b.n;
+        const oldest = d.prepare(`SELECT MIN(snapshot_ts) AS t FROM ml_mint_snapshots`).get();
+        const oldestMs = oldest?.t || null;
+        const collectionDays = oldestMs ? (Date.now() - oldestMs) / 86400000 : 0;
+        const migRow = d.prepare(`SELECT AVG(migrated) AS rate FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL`).get();
+        const migRate = migRow?.rate || 0;
+        const peakedRow = d.prepare(`SELECT AVG(peaked_30) AS p30, AVG(peaked_100) AS p100, AVG(peaked_500) AS p500 FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL`).get();
+        const targetForFirstTrain = 10000;
+        const pctToTrain = Math.min(100, (resolved / targetForFirstTrain) * 100);
+        const etaDays = collectionDays > 0 && resolved > 0 ? Math.max(0, (targetForFirstTrain - resolved) / (resolved / collectionDays)) : null;
+        return {
+          state: total === 0 ? 'WAITING' : 'COLLECTING',
+          totalSnapshots: total,
+          resolvedSnapshots: resolved,
+          resolvedPct: total > 0 ? resolved / total : 0,
+          buckets: bucketMap,
+          collectionDays: +collectionDays.toFixed(2),
+          oldestSnapshotAt: oldestMs,
+          migrationRate: migRate,
+          peakedRates: {
+            p30: peakedRow?.p30 || 0,
+            p100: peakedRow?.p100 || 0,
+            p500: peakedRow?.p500 || 0,
+          },
+          targetForFirstTrain,
+          pctToTrain,
+          etaDaysToTrain: etaDays != null ? +etaDays.toFixed(1) : null,
+          asOf: Date.now(),
+        };
       });
+      res.json(out);
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 

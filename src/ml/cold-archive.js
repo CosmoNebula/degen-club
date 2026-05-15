@@ -109,6 +109,7 @@ async function archiveDay(day) {
       (date_key, rows, size_bytes, min_ts, max_ts, parquet_path, mega_path, archived_at)
       VALUES (?, 0, 0, NULL, NULL, NULL, NULL, ?)`).run(day, Date.now());
     invalidateUnarchivedCache();
+    _canPruneCache.clear();
     return { day, rows: 0, skipped: true };
   }
 
@@ -161,17 +162,26 @@ export async function archiveOldTrades({ verbose = true } = {}) {
 
 // Returns true if all trades older than `cutoffMs` are safely archived.
 // Caller (prune) uses this as a gate before DELETE.
+// 2026-05-15: cached for 5min — same DISTINCT-strftime cost as
+// findUnarchivedDays (7-8s on 5.5M-row trades table) and called every
+// maintenance sweep. Cache is invalidated whenever archiveAll completes.
+const CAN_PRUNE_TTL_MS = 5 * 60 * 1000;
+const _canPruneCache = new Map();
 export function canPruneBefore(cutoffMs) {
-  const cutoffDay = new Date(cutoffMs).toISOString().slice(0, 10);
-  // Find days that have trades older than cutoff but no manifest entry
+  const key = String(cutoffMs);
+  const c = _canPruneCache.get(key);
+  if (c && (Date.now() - c.t) < CAN_PRUNE_TTL_MS) return c.v;
   const unarchived = db().prepare(`
     SELECT DISTINCT strftime('%Y-%m-%d', timestamp/1000, 'unixepoch') AS day
     FROM trades
     WHERE timestamp < ?
       AND day NOT IN (SELECT date_key FROM archive_manifest)
   `).all(cutoffMs);
-  return { ok: unarchived.length === 0, unarchivedDays: unarchived.map(r => r.day) };
+  const v = { ok: unarchived.length === 0, unarchivedDays: unarchived.map(r => r.day) };
+  _canPruneCache.set(key, { v, t: Date.now() });
+  return v;
 }
+export function _invalidateCanPruneCache() { _canPruneCache.clear(); }
 
 // Mark a day-batch as pruned (called from intelligence-condensate after the
 // DELETE succeeds for that day's rows).
