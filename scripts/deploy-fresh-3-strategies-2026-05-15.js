@@ -54,9 +54,11 @@ const strategies = [
           { kind: 'snapshot_feature', name: 'unique_buyers',         op: '>=', value: 10 },
           { kind: 'snapshot_feature', name: 'pct_sniper_buys',       op: '<=', value: 0.35 },
           { kind: 'snapshot_feature', name: 'pct_first_block_buys',  op: '<=', value: 0.25 },
-          // Entry window: widened. Sub-5 SOL was excluding too many early candidates.
-          { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '>=', value: 4 },
-          { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '<=', value: 45 },
+          // 2026-05-15 (PM): live data showed 80% of high-conviction migrated
+          // picks (≥0.25) are at mcap ≥45 SOL. The 45 cap was killing the
+          // strategy. Pump.fun graduates at ~85 SOL — open up to that.
+          { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '>=', value: 5 },
+          { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '<=', value: 85 },
         ],
         // 2026-05-15: bumped 600→1500s. Graduation typically happens
         // 10-30min into a coin's life, and the model needs ≥2min of organic
@@ -112,9 +114,12 @@ const strategies = [
           // Distribution floors
           { kind: 'snapshot_feature', name: 'unique_buyers',           op: '>=', value: 6 },
           { kind: 'snapshot_feature', name: 'pct_sniper_buys',         op: '<=', value: 0.35 },
-          // Small/early window — scalper only wants pre-mid-pump mints
-          { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '>=', value: 3 },
-          { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '<=', value: 30 },
+          // 2026-05-15 (PM): live data shows 56% of high-conviction
+          // peak_within_5min picks (≥0.12) are at mcap ≥30 SOL. Widening
+          // to 65 captures the modal bucket (25-45) plus the post-organic
+          // zone (45-65) without entering near-graduation territory.
+          { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '>=', value: 4 },
+          { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '<=', value: 65 },
         ],
         // 2026-05-15: bumped 300→480s. Scalper still wants young coins but
         // 5min was too tight given the train/serve age-skew — model needs
@@ -169,7 +174,10 @@ const strategies = [
           { kind: 'snapshot_feature', name: 'unique_buyers',      op: '>=', value: 12 },
           { kind: 'snapshot_feature', name: 'pct_sniper_buys',    op: '<=', value: 0.35 },
           { kind: 'snapshot_feature', name: 'bundle_buyers',      op: '<=', value: 0 },
-          { kind: 'snapshot_feature', name: 'last_mcap_sol',      op: '<=', value: 35 },
+          // 2026-05-15 (PM): peaked_300 signal lives mostly at 25-85 mcap.
+          // Need a floor too — sub-10 mcap is sniper-zone noise.
+          { kind: 'snapshot_feature', name: 'last_mcap_sol',      op: '>=', value: 8 },
+          { kind: 'snapshot_feature', name: 'last_mcap_sol',      op: '<=', value: 75 },
         ],
         // 2026-05-15: bumped 480→900s. Runners need ≥3min to show the
         // pump_durability signal reliably. Earlier than that, the model
