@@ -1993,21 +1993,30 @@ export function startServer(getIngestionStatus) {
 
   app.get('/api/ml/status', async (req, res) => {
     try {
-      // 2026-05-15: cached 30s — same heavy COUNT/AVG queries as /api/ml/quality
-      // but smaller subset. Polled by main dashboard's loadML.
-      const out = cacheResponse('ml-status', 30_000, () => {
+      // 2026-05-15: was 5 separate scans of ml_mint_snapshots (COUNT, COUNT-
+      // WHERE-resolved, GROUP-BY-age, MIN, AVG-set) at 600-1700ms each. Now
+      // ONE scan with conditional aggregates. Bumped TTL 30s→60s (matches
+      // /api/ml/quality — dashboard doesn't need sub-minute training-status
+      // freshness, and bot retrain happens hourly).
+      const out = cacheResponse('ml-status', 60_000, () => {
         const d = db();
-        const total = d.prepare(`SELECT COUNT(*) AS n FROM ml_mint_snapshots`).get().n;
-        const resolved = d.prepare(`SELECT COUNT(*) AS n FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL`).get().n;
-        const buckets = d.prepare(`SELECT snapshot_age_sec, COUNT(*) AS n FROM ml_mint_snapshots GROUP BY snapshot_age_sec`).all();
-        const bucketMap = { '60': 0, '300': 0, '900': 0, '3600': 0 };
-        for (const b of buckets) bucketMap[String(b.snapshot_age_sec)] = b.n;
-        const oldest = d.prepare(`SELECT MIN(snapshot_ts) AS t FROM ml_mint_snapshots`).get();
-        const oldestMs = oldest?.t || null;
+        const row = d.prepare(`SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN labels_resolved_at IS NOT NULL THEN 1 ELSE 0 END) AS resolved,
+          MIN(snapshot_ts) AS oldest_ts,
+          AVG(CASE WHEN labels_resolved_at IS NOT NULL THEN migrated END) AS mig_rate,
+          AVG(CASE WHEN labels_resolved_at IS NOT NULL THEN peaked_30 END) AS p30,
+          AVG(CASE WHEN labels_resolved_at IS NOT NULL THEN peaked_100 END) AS p100,
+          AVG(CASE WHEN labels_resolved_at IS NOT NULL THEN peaked_500 END) AS p500,
+          SUM(CASE WHEN snapshot_age_sec = 60 THEN 1 ELSE 0 END) AS b60,
+          SUM(CASE WHEN snapshot_age_sec = 300 THEN 1 ELSE 0 END) AS b300,
+          SUM(CASE WHEN snapshot_age_sec = 900 THEN 1 ELSE 0 END) AS b900,
+          SUM(CASE WHEN snapshot_age_sec = 3600 THEN 1 ELSE 0 END) AS b3600
+          FROM ml_mint_snapshots`).get();
+        const total = row.total || 0;
+        const resolved = row.resolved || 0;
+        const oldestMs = row.oldest_ts || null;
         const collectionDays = oldestMs ? (Date.now() - oldestMs) / 86400000 : 0;
-        const migRow = d.prepare(`SELECT AVG(migrated) AS rate FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL`).get();
-        const migRate = migRow?.rate || 0;
-        const peakedRow = d.prepare(`SELECT AVG(peaked_30) AS p30, AVG(peaked_100) AS p100, AVG(peaked_500) AS p500 FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL`).get();
         const targetForFirstTrain = 10000;
         const pctToTrain = Math.min(100, (resolved / targetForFirstTrain) * 100);
         const etaDays = collectionDays > 0 && resolved > 0 ? Math.max(0, (targetForFirstTrain - resolved) / (resolved / collectionDays)) : null;
@@ -2016,15 +2025,11 @@ export function startServer(getIngestionStatus) {
           totalSnapshots: total,
           resolvedSnapshots: resolved,
           resolvedPct: total > 0 ? resolved / total : 0,
-          buckets: bucketMap,
+          buckets: { '60': row.b60, '300': row.b300, '900': row.b900, '3600': row.b3600 },
           collectionDays: +collectionDays.toFixed(2),
           oldestSnapshotAt: oldestMs,
-          migrationRate: migRate,
-          peakedRates: {
-            p30: peakedRow?.p30 || 0,
-            p100: peakedRow?.p100 || 0,
-            p500: peakedRow?.p500 || 0,
-          },
+          migrationRate: row.mig_rate || 0,
+          peakedRates: { p30: row.p30 || 0, p100: row.p100 || 0, p500: row.p500 || 0 },
           targetForFirstTrain,
           pctToTrain,
           etaDaysToTrain: etaDays != null ? +etaDays.toFixed(1) : null,
