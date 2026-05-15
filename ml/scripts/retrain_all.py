@@ -77,6 +77,22 @@ TARGETS = [
     # can have very different hold-PnL depending on drawdown along the way.
     {'name': 'peak_pct_within_24h',           'out': 'models/peak_pct_within_24h_v1.pkl',           'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
     {'name': 'max_drawdown_within_24h_pct',   'out': 'models/max_drawdown_within_24h_pct_v1.pkl',   'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
+    # ---------- 2026-05-15 EXIT-TIMING SUITE ----------
+    # Forward-looking labels resolved 60s or 5min after snapshot. Train every
+    # snapshot row with these — gives the agent direct exit-decision signals.
+    # OCEAN-incident audit identified exit logic as #1 PnL leak: 43% of stop-
+    # loss exits had post-exit peaks >30%. These models attack that gap.
+    {'name': 'price_up_60s',            'out': 'models/price_up_60s_v1.pkl',            'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
+    {'name': 'price_up_300s',           'out': 'models/price_up_300s_v1.pkl',           'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
+    {'name': 'drawdown_20pct_300s',     'out': 'models/drawdown_20pct_300s_v1.pkl',     'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
+    {'name': 'local_top_60s',           'out': 'models/local_top_60s_v1.pkl',           'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
+    # Signed-log regressions: pct return at 60s / 5min ahead (can be negative).
+    {'name': 'pnl_pct_60s',             'out': 'models/pnl_pct_60s_v1.pkl',             'min_pos': 200, 'kind': 'regression', 'mode': 'pre'},
+    {'name': 'pnl_pct_300s',            'out': 'models/pnl_pct_300s_v1.pkl',            'min_pos': 200, 'kind': 'regression', 'mode': 'pre'},
+    # Poisson count regressions — buyer/seller volume forecast 60s ahead.
+    # Train.py applies loss='poisson' for these (see POISSON_TARGETS).
+    {'name': 'unique_buyers_next_60s',  'out': 'models/unique_buyers_next_60s_v1.pkl',  'min_pos': 200, 'kind': 'regression', 'mode': 'pre'},
+    {'name': 'unique_sellers_next_60s', 'out': 'models/unique_sellers_next_60s_v1.pkl', 'min_pos': 200, 'kind': 'regression', 'mode': 'pre'},
     # ---------- POST-MIGRATION (csv=training_postmig.csv, features-mode=post) ----------
     {'name': 'post_mig_hits_2x',  'out': 'models/post_mig_hits_2x_v1.pkl',  'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
     # 2026-05-15: post_mig_rugs_1h dropped — AUC-ROC 0.581 (barely above random

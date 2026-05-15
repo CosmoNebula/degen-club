@@ -113,7 +113,12 @@ function S() {
               OR hold_1h_pct IS NULL OR hold_4h_pct IS NULL OR hold_24h_pct IS NULL
               OR peak_pct_within_24h IS NULL OR max_drawdown_within_24h_pct IS NULL
               OR peak_within_5min IS NULL OR buy_pressure_continues_60s IS NULL
-              OR pump_durability_5min IS NULL)
+              OR pump_durability_5min IS NULL
+              OR price_up_60s IS NULL OR price_up_300s IS NULL
+              OR drawdown_20pct_300s IS NULL
+              OR pnl_pct_60s IS NULL OR pnl_pct_300s IS NULL
+              OR unique_buyers_next_60s IS NULL OR unique_sellers_next_60s IS NULL
+              OR local_top_60s IS NULL)
        ORDER BY snapshot_ts DESC LIMIT ?`),
     mintInfo: d.prepare(`SELECT migrated, migrated_at FROM mints WHERE mint_address = ?`),
     // Returns peak price + the timestamp at which peak occurred (regression targets)
@@ -168,6 +173,14 @@ function S() {
        COUNT(*) AS total
        FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ?
          AND COALESCE(is_junk, 0) = 0`),
+    // 2026-05-15: distinct buyer/seller count in a forward window. Feeds the
+    // unique_buyers_next_60s / unique_sellers_next_60s Poisson regressions.
+    uniqueBuyersWindow: d.prepare(`SELECT COUNT(DISTINCT wallet) AS n
+       FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ?
+         AND is_buy = 1 AND COALESCE(is_junk, 0) = 0`),
+    uniqueSellersWindow: d.prepare(`SELECT COUNT(DISTINCT wallet) AS n
+       FROM trades WHERE mint_address = ? AND timestamp > ? AND timestamp <= ?
+         AND is_buy = 0 AND COALESCE(is_junk, 0) = 0`),
     update: d.prepare(`UPDATE ml_mint_snapshots SET
        migrated = ?, peaked_30 = ?, peaked_100 = ?, peaked_300 = ?, peaked_500 = ?,
        peak_pct_max = ?, time_to_peak_sec = ?, will_die_fast = ?,
@@ -186,6 +199,14 @@ function S() {
        peak_within_5min = COALESCE(?, peak_within_5min),
        buy_pressure_continues_60s = COALESCE(?, buy_pressure_continues_60s),
        pump_durability_5min = COALESCE(?, pump_durability_5min),
+       price_up_60s = COALESCE(?, price_up_60s),
+       price_up_300s = COALESCE(?, price_up_300s),
+       drawdown_20pct_300s = COALESCE(?, drawdown_20pct_300s),
+       pnl_pct_60s = COALESCE(?, pnl_pct_60s),
+       pnl_pct_300s = COALESCE(?, pnl_pct_300s),
+       unique_buyers_next_60s = COALESCE(?, unique_buyers_next_60s),
+       unique_sellers_next_60s = COALESCE(?, unique_sellers_next_60s),
+       local_top_60s = COALESCE(?, local_top_60s),
        labels_resolved_at = ?
        WHERE mint_address = ? AND snapshot_age_sec = ?`),
     updateDieFastOnly: d.prepare(`UPDATE ml_mint_snapshots SET will_die_fast = ?
@@ -378,6 +399,59 @@ function computePeakPctWithin24h(mintAddress, snapshotTs, snapshotPrice) {
 // Drives risk-modeling: a mint that 5x'd then bled to 0 has very different
 // hold-PnL than one that 5x'd and held steady — both same peak_pct_within_24h
 // but very different max_drawdown.
+// 2026-05-15 — EXIT-TIMING label suite. Predicts forward over short windows
+// (60s / 5min) from the snapshot moment. All return NULL until the horizon
+// has passed, so COALESCE on UPDATE preserves prior values during backfill.
+const FORWARD_60S_MS = 60 * 1000;
+const FORWARD_300S_MS = 5 * 60 * 1000;
+
+function computePriceUpAt(mintAddress, snapshotTs, snapshotPrice, ageMs) {
+  if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
+  const target = snapshotTs + ageMs;
+  if (Date.now() < target) return null;
+  const row = S().priceAtOrBefore.get(mintAddress, target);
+  if (!row?.price_sol || row.price_sol <= 0) return null;
+  return row.price_sol > snapshotPrice ? 1 : 0;
+}
+
+// Signed pct return — can be negative (we apply signed-log transform in train).
+function computePnlPctAt(mintAddress, snapshotTs, snapshotPrice, ageMs) {
+  if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
+  const target = snapshotTs + ageMs;
+  if (Date.now() < target) return null;
+  const row = S().priceAtOrBefore.get(mintAddress, target);
+  if (!row?.price_sol || row.price_sol <= 0) return null;
+  return (row.price_sol - snapshotPrice) / snapshotPrice;
+}
+
+// 1 if any price in (snapshot_ts, snapshot_ts+ageMs] ≤ 80% of snapshot price.
+function computeDrawdownAlarm(mintAddress, snapshotTs, snapshotPrice, ageMs, pctFloor) {
+  if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
+  const target = snapshotTs + ageMs;
+  if (Date.now() < target) return null;
+  const row = S().minPriceWithin.get(mintAddress, snapshotTs, target);
+  if (row?.min_price == null || row.min_price <= 0) return 0;
+  return row.min_price <= snapshotPrice * pctFloor ? 1 : 0;
+}
+
+function computeUniqueCountForward(stmt, mintAddress, snapshotTs, ageMs) {
+  const target = snapshotTs + ageMs;
+  if (Date.now() < target) return null;
+  return stmt.get(mintAddress, snapshotTs, target)?.n ?? 0;
+}
+
+// "Is now the local top?" — current price within 5% of max in (T-60s, T+60s].
+// Trains a sell-the-top signal: high probability + we're holding = sell.
+function computeLocalTop60s(mintAddress, snapshotTs, snapshotPrice) {
+  if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
+  const target = snapshotTs + FORWARD_60S_MS;
+  if (Date.now() < target) return null;
+  const row = S().maxPriceInWindow.get(mintAddress, snapshotTs - FORWARD_60S_MS, target);
+  const maxPrice = row?.max_price;
+  if (maxPrice == null || maxPrice <= 0) return 0;
+  return snapshotPrice >= maxPrice * 0.95 ? 1 : 0;
+}
+
 function computeMaxDrawdownWithin24h(mintAddress, snapshotTs, snapshotPrice) {
   if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
   const target = snapshotTs + HOLD_24H_MS;
@@ -441,6 +515,15 @@ function resolveBatch(rows, label = 'resolve') {
       const peakIn5min = computePeakWithin5min(r.mint_address, r.snapshot_ts, r.last_price_sol);
       const bsContinues = computeBuyPressureContinues60s(r.mint_address, r.snapshot_ts);
       const pumpDur5min = computePumpDurability5min(r.mint_address, r.snapshot_ts, r.last_price_sol);
+      // 2026-05-15 exit-timing labels
+      const priceUp60s = computePriceUpAt(r.mint_address, r.snapshot_ts, r.last_price_sol, FORWARD_60S_MS);
+      const priceUp300s = computePriceUpAt(r.mint_address, r.snapshot_ts, r.last_price_sol, FORWARD_300S_MS);
+      const dd20p300s = computeDrawdownAlarm(r.mint_address, r.snapshot_ts, r.last_price_sol, FORWARD_300S_MS, 0.80);
+      const pnl60s = computePnlPctAt(r.mint_address, r.snapshot_ts, r.last_price_sol, FORWARD_60S_MS);
+      const pnl300s = computePnlPctAt(r.mint_address, r.snapshot_ts, r.last_price_sol, FORWARD_300S_MS);
+      const buyers60s = computeUniqueCountForward(s.uniqueBuyersWindow, r.mint_address, r.snapshot_ts, FORWARD_60S_MS);
+      const sellers60s = computeUniqueCountForward(s.uniqueSellersWindow, r.mint_address, r.snapshot_ts, FORWARD_60S_MS);
+      const localTop60s = computeLocalTop60s(r.mint_address, r.snapshot_ts, r.last_price_sol);
       s.update.run(
         migrated,
         peakPct >= 0.30 ? 1 : 0,
@@ -460,6 +543,9 @@ function resolveBatch(rows, label = 'resolve') {
         hold1h, hold4h, hold24h,
         peakPct24h, maxDd24h,
         peakIn5min, bsContinues, pumpDur5min,
+        priceUp60s, priceUp300s, dd20p300s,
+        pnl60s, pnl300s,
+        buyers60s, sellers60s, localTop60s,
         now,
         r.mint_address,
         r.snapshot_age_sec,

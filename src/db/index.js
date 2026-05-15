@@ -664,6 +664,18 @@ function runMigrations(d) {
   ensureCol(d, 'ml_mint_snapshots', 'buy_pressure_continues_60s', `INTEGER`);
   ensureCol(d, 'ml_mint_snapshots', 'pump_durability_5min', `REAL`);
 
+  // 2026-05-15: exit-timing label suite. The OCEAN incident audit identified
+  // exit logic as the #1 PnL leak (43% of stop-loss exits had post-exit peaks
+  // >30%). These 8 labels give the agent direct exit-decision signals.
+  ensureCol(d, 'ml_mint_snapshots', 'price_up_60s', `INTEGER`);             // 1 if price 60s later > now
+  ensureCol(d, 'ml_mint_snapshots', 'price_up_300s', `INTEGER`);            // 1 if price 5min later > now
+  ensureCol(d, 'ml_mint_snapshots', 'drawdown_20pct_300s', `INTEGER`);      // 1 if any price in next 5min ≤ 80% of now
+  ensureCol(d, 'ml_mint_snapshots', 'pnl_pct_60s', `REAL`);                 // signed pct return 60s ahead
+  ensureCol(d, 'ml_mint_snapshots', 'pnl_pct_300s', `REAL`);                // signed pct return 5min ahead
+  ensureCol(d, 'ml_mint_snapshots', 'unique_buyers_next_60s', `INTEGER`);   // count of distinct buyers in (now, now+60s]
+  ensureCol(d, 'ml_mint_snapshots', 'unique_sellers_next_60s', `INTEGER`);  // count of distinct sellers
+  ensureCol(d, 'ml_mint_snapshots', 'local_top_60s', `INTEGER`);            // 1 if current price within 5% of max in (now-60s, now+60s]
+
   // Tier 2 #1 — Price reversal count. Beyond raw volatility, count how many
   // times the price flipped direction in the snapshot window. Choppy mints
   // (8 reversals in 60s = trader chop) have a different outcome distribution

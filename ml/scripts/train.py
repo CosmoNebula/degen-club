@@ -54,7 +54,15 @@ LOG_TRANSFORM_TARGETS = set()
 # Added 2026-05-15: hold_*_pct trained as raw pct returned R²=-0.018/-0.191
 # (worse than mean). The signed-log transform compresses both tails so the
 # learner isn't dominated by rare outliers.
-SIGNED_LOG_TRANSFORM_TARGETS = {'hold_1h_pct', 'hold_4h_pct', 'hold_24h_pct'}
+SIGNED_LOG_TRANSFORM_TARGETS = {
+    'hold_1h_pct', 'hold_4h_pct', 'hold_24h_pct',
+    'pnl_pct_60s', 'pnl_pct_300s',  # 2026-05-15 short-horizon exit-PnL forecasts
+}
+# Poisson regression for count-valued targets (non-negative integers, often
+# zero-inflated). Uses sklearn HistGradientBoostingRegressor with loss='poisson'.
+# Added 2026-05-15 for unique_buyers/sellers_next_60s — predicting incoming
+# demand/dump pressure as a leading indicator before price moves.
+POISSON_TARGETS = {'unique_buyers_next_60s', 'unique_sellers_next_60s'}
 
 # Same feature list as extract — keep in sync
 FEATURE_COLS = [
@@ -181,6 +189,10 @@ def train_regression(X_train, y_train, X_val, y_val, target_name, args):
         y_train_t = y_train
         y_val_t = y_val
 
+    # Poisson loss for count-valued targets (non-negative integers, often
+    # zero-inflated like "unique buyers in next 60s"). For everything else
+    # use the default squared_error.
+    use_poisson = target_name in POISSON_TARGETS
     base = HistGradientBoostingRegressor(
         max_iter=args.iters,
         learning_rate=args.lr,
@@ -189,7 +201,14 @@ def train_regression(X_train, y_train, X_val, y_val, target_name, args):
         random_state=0,
         early_stopping=True,
         n_iter_no_change=20,
+        loss='poisson' if use_poisson else 'squared_error',
     )
+    if use_poisson:
+        # Poisson loss requires non-negative targets. Clip defensively (counts
+        # should already be ≥0 but a corrupt label shouldn't crash retrain).
+        y_train_t = np.clip(y_train_t, 0, None)
+        y_val_t = np.clip(y_val_t, 0, None)
+        print(f'[train] poisson loss · mean={y_train_t.mean():.3f} · median={np.median(y_train_t):.3f} · max={y_train_t.max():.3f}')
     t = time.time()
     base.fit(X_train, y_train_t)
     elapsed = time.time() - t

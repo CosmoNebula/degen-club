@@ -145,6 +145,10 @@ LABEL_COLS = [
     'peak_pct_within_24h', 'max_drawdown_within_24h_pct',
     # 2026-05-14 timing-aware labels.
     'peak_within_5min', 'buy_pressure_continues_60s', 'pump_durability_5min',
+    # 2026-05-15 exit-timing label suite.
+    'price_up_60s', 'price_up_300s', 'drawdown_20pct_300s',
+    'pnl_pct_60s', 'pnl_pct_300s',
+    'unique_buyers_next_60s', 'unique_sellers_next_60s', 'local_top_60s',
 ]
 
 

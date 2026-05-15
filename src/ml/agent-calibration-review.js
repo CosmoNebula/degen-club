@@ -29,6 +29,8 @@ const TARGETS = [
   // All live on ml_mint_snapshots so they fit the same calibration-query shape.
   'alive_at_1h', 'alive_at_24h',
   'hits_5x_within_24h', 'hits_10x_within_24h',
+  // 2026-05-15 exit-timing binaries.
+  'price_up_60s', 'price_up_300s', 'drawdown_20pct_300s', 'local_top_60s',
 ];
 
 let stmts = null;
