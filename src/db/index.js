@@ -335,6 +335,12 @@ function runMigrations(d) {
   // (~millions of rows) at ~3s. With this index, the WHERE NOT EXISTS
   // anti-join becomes a seek per row → sub-100ms.
   d.exec(`CREATE INDEX IF NOT EXISTS idx_wallet_holdings_wallet ON wallet_holdings(wallet)`);
+  // 2026-05-15: traders.js activeWallets does `SELECT DISTINCT wallet FROM
+  // wallet_holdings WHERE last_activity_at > ?` and was scanning the full
+  // idx_wallet_holdings_wallet (2.4M rows) at 9-19s. Composite index on
+  // (last_activity_at, wallet) makes it a range-scan over the recent slice
+  // and is covering for the SELECT — should drop to <100ms.
+  d.exec(`CREATE INDEX IF NOT EXISTS idx_wallet_holdings_active ON wallet_holdings(last_activity_at, wallet)`);
 
   d.exec(`CREATE TABLE IF NOT EXISTS gate_rejections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

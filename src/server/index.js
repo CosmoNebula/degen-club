@@ -1829,32 +1829,41 @@ export function startServer(getIngestionStatus) {
       // wallet buys per mint and we only have ~51 tracked wallets, so 70-85%
       // null is the natural rate. Train pipeline handles NaN correctly.
       const EXPECTED_SPARSE = new Set(['reaction_speed_ms']);
-      const features = [];
-      for (const col of featureCols) {
-        const stats = d.prepare(`SELECT
-          COUNT(*) - COUNT(${col}) AS null_count,
-          COUNT(DISTINCT ${col}) AS unique_count,
-          AVG(${col}) AS mean,
-          MIN(${col}) AS min, MAX(${col}) AS max
-          FROM ml_mint_snapshots`).get();
-        const nullPct = total > 0 ? (stats.null_count / total) * 100 : 0;
+      // 2026-05-15: replaced 29-query loop (~20s) with one combined scan
+      // (~5s). Dropped COUNT(DISTINCT) which was the per-column killer;
+      // "stuck" detection now uses min===max (cheap, in same scan).
+      const featExprs = featureCols.flatMap(col => [
+        `COUNT(*) - COUNT(${col}) AS ${col}__n`,
+        `AVG(${col}) AS ${col}__avg`,
+        `MIN(${col}) AS ${col}__min`,
+        `MAX(${col}) AS ${col}__max`,
+      ]).join(', ');
+      const featRow = d.prepare(`SELECT ${featExprs} FROM ml_mint_snapshots`).get();
+      const features = featureCols.map(col => {
+        const null_count = featRow[`${col}__n`];
+        const mean = featRow[`${col}__avg`];
+        const min = featRow[`${col}__min`];
+        const max = featRow[`${col}__max`];
+        const nullPct = total > 0 ? (null_count / total) * 100 : 0;
         const isSparse = EXPECTED_SPARSE.has(col);
+        // "Stuck" = column has data but min===max (single repeated value).
+        // Replaces the COUNT(DISTINCT) <= 1 check at ~1% of the cost.
+        const hasData = null_count < total;
+        const isStuck = hasData && min !== null && min === max;
         let health = 'good';
         if (!isSparse && nullPct > 50) health = 'bad';
         else if (!isSparse && nullPct > 20) health = 'warn';
-        else if (isSparse && nullPct > 90) health = 'warn';  // only alert if even sparser than expected
-        if (stats.unique_count <= 1) health = 'warn'; // stuck at single value
-        features.push({
+        else if (isSparse && nullPct > 90) health = 'warn';
+        if (isStuck) health = 'warn';
+        return {
           name: col,
-          null_count: stats.null_count,
+          null_count,
           null_pct: nullPct,
-          unique_count: stats.unique_count,
-          mean: stats.mean,
-          min: stats.min,
-          max: stats.max,
+          unique_count: isStuck ? 1 : (hasData ? null : 0),
+          mean, min, max,
           health,
-        });
-      }
+        };
+      });
 
       // Coverage
       const coverage = d.prepare(`

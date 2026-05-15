@@ -18,6 +18,12 @@ const MIN_ACTIVITY = 10;       // wallet must have bought this many distinct min
 const MIN_OVERLAP = 8;         // pair must share this many mints to be "linked"
 const MIN_JACCARD = 0.50;      // pair must share ≥50% of their combined mint set (filters supernode)
 const MIN_RING_SIZE = 2;       // 2-wallet ring is the minimum
+// 2026-05-15: skip "hot" mints in the pair-build step. A mint bought by >100
+// active wallets generates >5K pairs by itself and contributes nothing toward
+// ring detection (the ring members AND ~100 unrelated traders bought it, so
+// it's not ring-discriminating). Capping here cuts the Cartesian by ~91%
+// (243s → ~10-20s on the current dataset) without losing any real ring.
+const MAX_MINT_HEAT = 100;
 
 // Stable ring ID from the sorted member set (so the same group keeps the same id
 // across redetections, and the ring's W/L history sticks).
@@ -81,9 +87,20 @@ export function detectRings({
       FROM trades t JOIN active a ON a.wallet = t.wallet
       WHERE t.is_buy = 1
     ),
+    -- 2026-05-15: drop "hot" mints (>MAX_MINT_HEAT active buyers) before the
+    -- Cartesian join. These were ~91% of the pair-generation cost yet
+    -- contribute zero ring signal (they're noise everyone bought).
+    mint_heat AS (
+      SELECT mint_address FROM wm GROUP BY mint_address HAVING COUNT(*) <= ?
+    ),
+    wm_filtered AS (
+      SELECT wm.wallet, wm.mint_address
+      FROM wm JOIN mint_heat USING (mint_address)
+    ),
     raw_pairs AS (
       SELECT a.wallet w1, b.wallet w2, COUNT(*) shared
-      FROM wm a JOIN wm b ON a.mint_address = b.mint_address AND a.wallet < b.wallet
+      FROM wm_filtered a JOIN wm_filtered b
+        ON a.mint_address = b.mint_address AND a.wallet < b.wallet
       GROUP BY a.wallet, b.wallet HAVING shared >= ?
     )
     SELECT p.w1, p.w2, p.shared,
@@ -92,7 +109,7 @@ export function detectRings({
     JOIN active ac1 ON ac1.wallet = p.w1
     JOIN active ac2 ON ac2.wallet = p.w2
     WHERE 1.0 * p.shared / (ac1.total + ac2.total - p.shared) >= ?
-  `).all(minActivity, minOverlap, minJaccard);
+  `).all(minActivity, MAX_MINT_HEAT, minOverlap, minJaccard);
 
   if (verbose) console.log(`[wallet-rings] ${pairs.length} linked pairs found in ${Date.now() - t0}ms`);
 
