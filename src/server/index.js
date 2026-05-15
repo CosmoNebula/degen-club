@@ -1724,14 +1724,40 @@ export function startServer(getIngestionStatus) {
       const dayMs = 24 * 60 * 60 * 1000;
       const hourMs = 60 * 60 * 1000;
 
-      // Volume
-      const total = d.prepare(`SELECT COUNT(*) AS n FROM ml_mint_snapshots`).get().n;
-      const resolved = d.prepare(`SELECT COUNT(*) AS n FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL`).get().n;
-      const buckets = d.prepare(`SELECT snapshot_age_sec, COUNT(*) AS n FROM ml_mint_snapshots GROUP BY snapshot_age_sec`).all();
-      const bucketMap = { '60': 0, '300': 0, '900': 0, '3600': 0 };
-      for (const b of buckets) bucketMap[String(b.snapshot_age_sec)] = b.n;
-      const oldest = d.prepare(`SELECT MIN(snapshot_ts) AS t FROM ml_mint_snapshots`).get();
-      const oldestMs = oldest?.t || null;
+      // 2026-05-15: rolled 8 separate full scans of ml_mint_snapshots
+      // (total/resolved counts, age-bucket GROUP BY, MIN ts, resolution
+      // lag, overdue + last-hour + last-5min counts, label-AVG suite,
+      // initial-buy distribution) into one scan with conditional aggregates.
+      // Was ~5-7s combined; one scan is ~1s.
+      const cutoff12h = now - 12 * hourMs;
+      const cutoff1h = now - hourMs;
+      const cutoff5min = now - 5 * 60 * 1000;
+      const topRow = d.prepare(`SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN labels_resolved_at IS NOT NULL THEN 1 ELSE 0 END) AS resolved,
+        MIN(snapshot_ts) AS oldest_ts,
+        AVG(CASE WHEN labels_resolved_at IS NOT NULL THEN CAST((labels_resolved_at - snapshot_ts) AS REAL)/3600000.0 END) AS avg_lag_hr,
+        SUM(CASE WHEN labels_resolved_at IS NULL AND snapshot_ts < ? THEN 1 ELSE 0 END) AS overdue_unresolved,
+        SUM(CASE WHEN labels_resolved_at >= ? THEN 1 ELSE 0 END) AS resolutions_last_hour,
+        SUM(CASE WHEN snapshot_ts >= ? THEN 1 ELSE 0 END) AS snapshots_last_5min,
+        AVG(CASE WHEN labels_resolved_at IS NOT NULL THEN migrated END) AS mig_rate,
+        AVG(CASE WHEN labels_resolved_at IS NOT NULL THEN peaked_30 END) AS p30_rate,
+        AVG(CASE WHEN labels_resolved_at IS NOT NULL THEN peaked_100 END) AS p100_rate,
+        AVG(CASE WHEN labels_resolved_at IS NOT NULL THEN peaked_500 END) AS p500_rate,
+        SUM(CASE WHEN snapshot_age_sec = 60 THEN 1 ELSE 0 END) AS b60,
+        SUM(CASE WHEN snapshot_age_sec = 300 THEN 1 ELSE 0 END) AS b300,
+        SUM(CASE WHEN snapshot_age_sec = 900 THEN 1 ELSE 0 END) AS b900,
+        SUM(CASE WHEN snapshot_age_sec = 3600 THEN 1 ELSE 0 END) AS b3600,
+        SUM(CASE WHEN initial_buy_sol < 0.5 THEN 1 ELSE 0 END) AS ib1,
+        SUM(CASE WHEN initial_buy_sol >= 0.5 AND initial_buy_sol < 2 THEN 1 ELSE 0 END) AS ib2,
+        SUM(CASE WHEN initial_buy_sol >= 2 AND initial_buy_sol < 5 THEN 1 ELSE 0 END) AS ib3,
+        SUM(CASE WHEN initial_buy_sol >= 5 AND initial_buy_sol < 10 THEN 1 ELSE 0 END) AS ib4,
+        SUM(CASE WHEN initial_buy_sol >= 10 THEN 1 ELSE 0 END) AS ib5
+        FROM ml_mint_snapshots`).get(cutoff12h, cutoff1h, cutoff5min);
+      const total = topRow.total || 0;
+      const resolved = topRow.resolved || 0;
+      const bucketMap = { '60': topRow.b60 || 0, '300': topRow.b300 || 0, '900': topRow.b900 || 0, '3600': topRow.b3600 || 0 };
+      const oldestMs = topRow.oldest_ts || null;
       const collectionDays = oldestMs ? (now - oldestMs) / dayMs : 0;
 
       // Hourly volume — last 24 hours
@@ -1756,30 +1782,16 @@ export function startServer(getIngestionStatus) {
         if (r.day_offset >= 0 && r.day_offset < 7) daily[r.day_offset] = r.n;
       }
 
-      // Resolution health
-      const resolution = d.prepare(`
-        SELECT
-          COUNT(*) AS overdue,
-          AVG(CAST((labels_resolved_at - snapshot_ts) AS REAL) / 3600000.0) AS avg_lag_hr
-        FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL
-      `).get();
-      const overdueUnresolved = d.prepare(`
-        SELECT COUNT(*) AS n FROM ml_mint_snapshots
-        WHERE labels_resolved_at IS NULL AND snapshot_ts < ?
-      `).get(now - 12 * hourMs).n;
-      const resolutionsLastHour = d.prepare(`
-        SELECT COUNT(*) AS n FROM ml_mint_snapshots WHERE labels_resolved_at >= ?
-      `).get(now - hourMs).n;
-
-      // Labels
-      const labelStats = d.prepare(`
-        SELECT
-          AVG(migrated) AS mig_rate,
-          AVG(peaked_30) AS p30_rate,
-          AVG(peaked_100) AS p100_rate,
-          AVG(peaked_500) AS p500_rate
-        FROM ml_mint_snapshots WHERE labels_resolved_at IS NOT NULL
-      `).get();
+      // Resolution health + label stats — both pulled from the combined topRow scan above.
+      const resolution = { avg_lag_hr: topRow.avg_lag_hr };
+      const overdueUnresolved = topRow.overdue_unresolved || 0;
+      const resolutionsLastHour = topRow.resolutions_last_hour || 0;
+      const labelStats = {
+        mig_rate: topRow.mig_rate,
+        p30_rate: topRow.p30_rate,
+        p100_rate: topRow.p100_rate,
+        p500_rate: topRow.p500_rate,
+      };
       // peak_pct_max distribution is heavy-tailed — mean is dominated by a
       // handful of runners. Compute median + p95 in JS for robust headline stats.
       // 2026-05-15: pinned to snapshot_age_sec=60 so we sort ~180k rows
@@ -1883,15 +1895,7 @@ export function startServer(getIngestionStatus) {
       `).all();
       const dowArr = Array(7).fill(0);
       for (const r of dowByDay) if (r.dow != null && r.dow >= 0 && r.dow < 7) dowArr[r.dow] = r.n;
-      const initialBuyDist = d.prepare(`
-        SELECT
-          SUM(CASE WHEN initial_buy_sol < 0.5 THEN 1 ELSE 0 END) AS b1,
-          SUM(CASE WHEN initial_buy_sol >= 0.5 AND initial_buy_sol < 2 THEN 1 ELSE 0 END) AS b2,
-          SUM(CASE WHEN initial_buy_sol >= 2 AND initial_buy_sol < 5 THEN 1 ELSE 0 END) AS b3,
-          SUM(CASE WHEN initial_buy_sol >= 5 AND initial_buy_sol < 10 THEN 1 ELSE 0 END) AS b4,
-          SUM(CASE WHEN initial_buy_sol >= 10 THEN 1 ELSE 0 END) AS b5
-        FROM ml_mint_snapshots
-      `).get();
+      const initialBuyDist = { b1: topRow.ib1, b2: topRow.ib2, b3: topRow.ib3, b4: topRow.ib4, b5: topRow.ib5 };
 
       // Recent activity
       const recentSnapshots = d.prepare(`
@@ -1904,7 +1908,7 @@ export function startServer(getIngestionStatus) {
         ORDER BY labels_resolved_at DESC LIMIT 10
       `).all();
       const lastSnapshotTs = recentSnapshots[0]?.snapshot_ts || null;
-      const snapshotsLast5min = d.prepare(`SELECT COUNT(*) AS n FROM ml_mint_snapshots WHERE snapshot_ts >= ?`).get(now - 5 * 60 * 1000).n;
+      const snapshotsLast5min = topRow.snapshots_last_5min || 0;
 
       // Alerts
       const alerts = [];
