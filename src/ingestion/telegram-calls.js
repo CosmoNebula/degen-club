@@ -294,8 +294,13 @@ export async function postCall({ mint, strategy, entryPrice, entrySol, entryMcap
     }
     // Lazy-fetch predictions if caller didn't provide.
     const preds = predictions || fetchLatestPredictions(mint.mint_address);
-    // Quality gate
-    if (!isHighConviction(preds, features)) return;
+    // 2026-05-15 (PM): agent-managed strategies (prefix `agent_*`) own their
+    // own gating — their entry conditions are bespoke ML stacks that have
+    // already vetted the mint. Bypass the redundant peaked_100/migrated/
+    // tracked floor for them (these mints often don't even gate on those
+    // features). Legacy strategies still hit the conviction filter.
+    const isAgentStrat = typeof strategy === 'string' && strategy.startsWith('agent_');
+    if (!isAgentStrat && !isHighConviction(preds, features)) return;
     const text = formatCall({ mint, strategy, entryPrice, entrySol, entryMcap, predictions: preds, features });
     // Prefer userbot (Phanes & similar trackers filter bot messages).
     // Fall back to bot API if userbot isn't configured or connect fails.

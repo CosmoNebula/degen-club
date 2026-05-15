@@ -347,11 +347,34 @@ async function tick() {
   } finally { _running = false; }
 }
 
+// 2026-05-15 (PM): the `_*Seen` sets are in-memory only. Without a startup
+// backfill, every bot restart re-posts the last N rows from each lookback
+// window (saw 5+ duplicate MARKET REGIME: CAUTIOUS messages within 22 min
+// during a restart-heavy debug session). Pre-fill the seen-sets with the
+// IDs already in the lookback window so we only broadcast NEW additions.
+function prewarmSeenSets() {
+  try {
+    const d = db();
+    const regimeRows = d.prepare(`SELECT id FROM ml_agent_log
+       WHERE category='market-regime' AND level='thought'
+         AND timestamp > strftime('%s','now')*1000 - 6*60*60*1000`).all();
+    for (const r of regimeRows) _regimeSeen.add(r.id);
+    const lifecycleRows = d.prepare(`SELECT id FROM ml_agent_log
+       WHERE category='lifecycle' AND level='info'
+         AND timestamp > strftime('%s','now')*1000 - 24*60*60*1000`).all();
+    for (const r of lifecycleRows) _lifecycleSeen.add(r.id);
+    console.log(`[tg-broadcast] prewarmed seen-sets · regime=${regimeRows.length} · lifecycle=${lifecycleRows.length}`);
+  } catch (err) {
+    console.error('[tg-broadcast] prewarm err:', err.message);
+  }
+}
+
 export function startTelegramBroadcast() {
   if (!TG_TOKEN || !CHAT_ID) {
     console.log('[tg-broadcast] disabled — TELEGRAM_BOT_TOKEN or TG_CALLS_CHAT_ID not set');
     return;
   }
+  prewarmSeenSets();
   setTimeout(tick, FIRST_RUN_DELAY_MS);
   setInterval(tick, POLL_INTERVAL_MS);
   console.log(`[tg-broadcast] started · check every ${POLL_INTERVAL_MS/60000}min · channels: daily-wrap, big-movers (≥500%), lifecycle, hot-meta (≥${HOT_META_MIN_MINTS} mints/${HOT_META_WINDOW_MIN}m), market-regime`);
