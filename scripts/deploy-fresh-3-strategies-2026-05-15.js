@@ -44,7 +44,7 @@ const strategies = [
           // migrated avg=0.052, migrates_within_15min avg=0.006. The
           // combined stack intersected at <0.1% of mints, fired zero times
           // over 7 hours. Loosened to roughly the top-decile of each model.
-          { kind: 'ml_prediction', name: 'migrated',               op: '>=', value: 0.04 },
+          { kind: 'ml_prediction', name: 'migrated',               op: '>=', value: 0.02 },
           // migrates_within_15min dropped from the AND-stack — average is
           // 0.006 so any positive threshold kills the whole stack. Keep
           // migrated as primary; let runner-trailer cover non-timing cases.

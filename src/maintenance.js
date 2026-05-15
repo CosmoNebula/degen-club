@@ -62,8 +62,14 @@ function S() {
 // writer lock for ~50-100ms instead of 5-8s. Yields YIELD_MS between batches
 // so other writers (main-thread INSERTs, other workers) can take the lock.
 // Returns total rows deleted across all batches.
+// 2026-05-15 (PM): bumped yield 50ms → 500ms. At 50ms the worker was holding
+// the writer lock ~50% of the time during a sweep, contending hard with
+// main-thread trade INSERTs and paper-position UPDATEs (causing the WSS
+// disconnect cascade we fixed by moving onchain-price to its own thread).
+// 500ms = ~10% writer-lock duty cycle. Maintenance still completes in time;
+// trades just don't wait behind it.
 const CHUNK_BATCH = 2000;
-const CHUNK_YIELD_MS = 50;
+const CHUNK_YIELD_MS = 500;
 const CHUNK_MAX_BATCHES = 500; // safety cap — at 2k/batch = 1M rows per sweep call
 async function chunkedDelete(table, pickStmt, ...pickArgs) {
   const d = db();
