@@ -39,24 +39,22 @@ const strategies = [
       rationale: 'Targets pre-mig mints that will graduate to Raydium. Leans on the strongest model we have: `migrated` (AUC-ROC 0.982, Lift 9.08). Timing-confirmed by `migrates_within_15min`. Safety floor via `rug_within_5min` AND the new `drawdown_20pct_300s` predictor (1 if any price in next 5min drops to ≤80% of now — pre-warns the dump). Patient entry window (10min), laddered tier exits matched to the typical graduation pump shape. Pre-mig exits on dump-pressure forecast; post-mig re-evaluation hands off to `post_mig_hits_2x`.',
       entry: {
         conditions: [
-          // 2026-05-15 loosen: previous thresholds were calibrated to the
-          // _means_ I expected but live distributions are MUCH lower —
-          // migrated avg=0.052, migrates_within_15min avg=0.006. The
-          // combined stack intersected at <0.1% of mints, fired zero times
-          // over 7 hours. Loosened to roughly the top-decile of each model.
-          { kind: 'ml_prediction', name: 'migrated',               op: '>=', value: 0.01 },
-          // migrates_within_15min dropped from the AND-stack — average is
-          // 0.006 so any positive threshold kills the whole stack. Keep
-          // migrated as primary; let runner-trailer cover non-timing cases.
+          // 2026-05-15 (PM-2) DEEP DIVE: the `migrated` gate killed 15+
+          // rejected coins that went 5-50x post-rejection — including a
+          // 49.6x runner that DID graduate. Model is demonstrably broken
+          // in current regime (max prediction 0.004 vs threshold 0.01,
+          // every batch all day). Dropping it entirely. Safety + distribution
+          // + mcap geometry carry the gating now; ML is no longer trusted
+          // as a positive signal for graduation, only as a negative one
+          // (rug_within_5min, drawdown_20pct_300s).
           { kind: 'ml_prediction', name: 'rug_within_5min',        op: '<',  value: 0.10 },
           { kind: 'ml_prediction', name: 'drawdown_20pct_300s',    op: '<',  value: 0.50 },
           // Organic interest floor (avoid sniper-dominated rugs)
           { kind: 'snapshot_feature', name: 'unique_buyers',         op: '>=', value: 10 },
           { kind: 'snapshot_feature', name: 'pct_sniper_buys',       op: '<=', value: 0.35 },
           { kind: 'snapshot_feature', name: 'pct_first_block_buys',  op: '<=', value: 0.25 },
-          // 2026-05-15 (PM): live data showed 80% of high-conviction migrated
-          // picks (≥0.25) are at mcap ≥45 SOL. The 45 cap was killing the
-          // strategy. Pump.fun graduates at ~85 SOL — open up to that.
+          // Geometry: mcap in the pre-graduation runway zone. Sub-5 SOL
+          // is sniper-zone noise; >85 SOL is post-graduation territory.
           { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '>=', value: 5 },
           { kind: 'snapshot_feature', name: 'last_mcap_sol',         op: '<=', value: 85 },
         ],
@@ -77,10 +75,14 @@ const strategies = [
         // Peak-floor cascade — catches modest pumps that fade before T1 fires
         // and locks in profits on near-T2/T3 peaks that retrace. INVARIANT:
         // exit_pct < arm_pct (else fires immediately when armed).
+        // 2026-05-15 (PM-2): L1 loosened from arm=30/exit=5 → arm=80/exit=25.
+        // The previous L1 exited 3 coins that went +190% post-exit (1.9x lost
+        // upside). New L1 only arms after the coin clears +80% — by then it's
+        // a real pump, not noise — and exits if it retraces below +25%.
         peak_floor_tiers: [
-          { arm_pct: 30,  exit_pct: 5 },    // L1: modest-pump rescue
-          { arm_pct: 120, exit_pct: 60 },   // L2: lock 60% after 2.2x peak
-          { arm_pct: 400, exit_pct: 200 },  // L3: lock 3x after 5x peak
+          { arm_pct: 80,  exit_pct: 25 },   // L1: only on real pumps (≥+80% peak)
+          { arm_pct: 200, exit_pct: 100 },  // L2: lock 2x after 3x peak (was 120/60)
+          { arm_pct: 500, exit_pct: 250 },  // L3: lock 2.5x after 6x peak (was 400/200)
         ],
         max_hold_min: 30,
         // Smart exit: incoming dump pressure detector. (Recipe field — not yet
@@ -101,23 +103,20 @@ const strategies = [
       rationale: 'Catches mints that peak inside 5 minutes (peak_within_5min, AUC 0.952). The unlock is `local_top_60s` as prediction_exit: model predicts whether NOW is within 5% of the max price in (T-60s, T+60s] — when true, we sell rather than waiting for the post-peak drawdown to stop us out. Confirmed by `buy_pressure_continues_60s` (demand sticky) + `unique_buyers_next_60s` (real incoming buyers, Poisson count). Tight stops, no trail, 5-min max hold — matches the "fast pop" thesis.',
       entry: {
         conditions: [
-          // 2026-05-15 loosen: peak_within_5min avg=0.137, so 0.20 was top
-          // 25%. buy_pressure ≥0.45 was already top 50%. Combined too tight.
-          { kind: 'ml_prediction', name: 'peak_within_5min',         op: '>=', value: 0.05 },
+          // 2026-05-15 (PM-2) DEEP DIVE: dropped `peak_within_5min` (was the
+          // chronic blocker — max prediction 0.04-0.05 vs threshold 0.05,
+          // killing real 5-8x runners like Gtg6CZ31… +7.8x). Same calibration
+          // problem as the migrated gate on graduation-hunter. Keep
+          // buy_pressure_continues_60s (validates demand) + unique_buyers_60s
+          // (Poisson confirms incoming flow). Both remain as positive signals.
           { kind: 'ml_prediction', name: 'buy_pressure_continues_60s', op: '>=', value: 0.20 },
-          // Poisson count — mean=1.8/60s. Loosened to ≥1 in current
-          // bearish regime; revisit when fire rate picks up.
           { kind: 'ml_prediction', name: 'unique_buyers_next_60s',   op: '>=', value: 1 },
-          // Safety
+          // Safety (negative signals — ML still trusted here)
           { kind: 'ml_prediction', name: 'rug_within_5min',          op: '<',  value: 0.08 },
           { kind: 'ml_prediction', name: 'drawdown_20pct_300s',      op: '<',  value: 0.55 },
           // Distribution floors
           { kind: 'snapshot_feature', name: 'unique_buyers',           op: '>=', value: 6 },
           { kind: 'snapshot_feature', name: 'pct_sniper_buys',         op: '<=', value: 0.35 },
-          // 2026-05-15 (PM): live data shows 56% of high-conviction
-          // peak_within_5min picks (≥0.12) are at mcap ≥30 SOL. Widening
-          // to 65 captures the modal bucket (25-45) plus the post-organic
-          // zone (45-65) without entering near-graduation territory.
           { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '>=', value: 4 },
           { kind: 'snapshot_feature', name: 'last_mcap_sol',           op: '<=', value: 65 },
         ],
@@ -136,11 +135,14 @@ const strategies = [
         // No trailing stop — 5-min thesis. Tier sells + breakeven + local-top
         // detector do the work.
         // Peak-floor cascade — only 2 tiers because the 5-min thesis means
-        // we never sit through deep drawdowns. L1 rescues small pumps,
-        // L2 locks profit near T2.
+        // we never sit through deep drawdowns.
+        // 2026-05-15 (PM-2): L1 loosened arm=15/exit=3 → arm=40/exit=15.
+        // Previous L1 was too eager — exited at +15% peak's first dip below
+        // +3% even when the coin had more legs. New L1 needs +40% peak first
+        // (real scalp-zone pump) before triggering.
         peak_floor_tiers: [
-          { arm_pct: 15, exit_pct: 3 },   // L1: quick rescue at +15% peak
-          { arm_pct: 50, exit_pct: 20 },  // L2: lock 20% near T2
+          { arm_pct: 40, exit_pct: 15 },  // L1: real pump rescue (≥+40% peak)
+          { arm_pct: 80, exit_pct: 40 },  // L2: lock +40% near T2 zone
         ],
         max_hold_min: 5,
         // Smart exit (documentation — not yet wired in paper.js):
@@ -161,21 +163,21 @@ const strategies = [
       rationale: 'Catches 4x+ runners using `peaked_300` (Lift 7.46) gated by `hits_2x_within_1h` for timing AND `pump_durability_5min` regression (R²=0.601) for "is this pump going to stick." Largest position (0.20 SOL) because the EV per trade is the highest — the model picks confident 4x+ runners at 7.5× the base rate. Laddered tier exits target multi-X outcomes; loose 40% trail above 1000% arms only on real moonshots. `local_top_60s` as prediction_exit acts as the sell-the-top hedge once we are deep in profit — we cap the max-hold at 60min so a thesis-broken mint does not bleed our bag back to zero overnight.',
       entry: {
         conditions: [
-          // 2026-05-15 loosen: peaked_300 avg=0.045 so 0.15 was top 5%.
-          // hits_2x_within_1h avg=0.091 so 0.18 was top 25%. pump_durability
-          // avg=0.244 so 0.50 was top 20%. Combined too rare.
-          { kind: 'ml_prediction', name: 'peaked_300',          op: '>=', value: 0.03 },
+          // 2026-05-15 (PM-2) DEEP DIVE: dropped `peaked_300` (was the chronic
+          // blocker — max 0.024-0.029 vs threshold 0.03, killing real runners
+          // like Gtg6CZ31 +7.8x and GwAYB4NF +5.7x). Same broken-in-regime
+          // story as the migrated and peak_within_5min gates. Keep
+          // `hits_2x_within_1h` (timing) + `pump_durability_5min` (R²=0.60,
+          // best regression) as positive signals.
           { kind: 'ml_prediction', name: 'hits_2x_within_1h',   op: '>=', value: 0.10 },
           { kind: 'ml_prediction', name: 'pump_durability_5min', op: '>=', value: 0.25 },
-          // Safety
+          // Safety (negative ML signals still trusted)
           { kind: 'ml_prediction', name: 'rug_within_5min',     op: '<',  value: 0.10 },
           { kind: 'ml_prediction', name: 'drawdown_20pct_300s', op: '<',  value: 0.50 },
-          // Distribution — relaxed a bit
+          // Distribution
           { kind: 'snapshot_feature', name: 'unique_buyers',      op: '>=', value: 12 },
           { kind: 'snapshot_feature', name: 'pct_sniper_buys',    op: '<=', value: 0.35 },
           { kind: 'snapshot_feature', name: 'bundle_buyers',      op: '<=', value: 0 },
-          // 2026-05-15 (PM): peaked_300 signal lives mostly at 25-85 mcap.
-          // Need a floor too — sub-10 mcap is sniper-zone noise.
           { kind: 'snapshot_feature', name: 'last_mcap_sol',      op: '>=', value: 8 },
           { kind: 'snapshot_feature', name: 'last_mcap_sol',      op: '<=', value: 75 },
         ],
@@ -198,10 +200,15 @@ const strategies = [
         trailing_stop: { arm_pct: 1000, trail_pct: 40 },
         // Peak-floor cascade — rides modest pumps via L1 rescue, locks in
         // multi-X profits on retracements via L2/L3.
+        // 2026-05-15 (PM-2): L1 loosened arm=60/exit=25 → arm=120/exit=60.
+        // The previous L1 fired on early dips of healthy runners — for a
+        // moonshot strategy that wants 4x+ outcomes we need to let pumps
+        // RIDE. New L1 only arms after +120% peak (real runner zone), exits
+        // at +60% (still 1.6x net). L2/L3 unchanged — they were sensible.
         peak_floor_tiers: [
-          { arm_pct: 60,  exit_pct: 25 },   // L1: near-T1 pump rescue
-          { arm_pct: 200, exit_pct: 100 },  // L2: lock 2x after 3x peak
-          { arm_pct: 500, exit_pct: 300 },  // L3: lock 4x after 6x peak
+          { arm_pct: 120, exit_pct: 60 },   // L1: only after real 2.2x peak
+          { arm_pct: 300, exit_pct: 150 },  // L2: lock 2.5x after 4x peak
+          { arm_pct: 700, exit_pct: 400 },  // L3: lock 5x after 8x peak
         ],
         max_hold_min: 60,
         // Smart exit (documentation — not yet wired in paper.js):
