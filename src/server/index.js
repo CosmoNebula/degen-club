@@ -155,19 +155,22 @@ export function startServer(getIngestionStatus) {
     // these counters are display-only, no need for live precision.
     const totalTrades = getCachedCount(d, 'trades_total', `SELECT COUNT(*) AS n FROM trades`);
     const totalWallets = getCachedCount(d, 'wallets_total', `SELECT COUNT(*) AS n FROM wallets`);
-    const trackedWallets = d.prepare("SELECT COUNT(*) AS n FROM wallets WHERE tracked = 1").get().n;
-    const kolWallets = d.prepare("SELECT COUNT(*) AS n FROM wallets WHERE is_kol = 1").get().n;
+    // 2026-05-15 (PM): these were uncached, firing 1-2s each on /api/stats
+    // hits. Wallet filter scans aren't free with 100k+ wallets. Cache 60s
+    // — these are display-only counters that change slowly.
+    const trackedWallets = getCachedCount(d, 'wallets_tracked', `SELECT COUNT(*) AS n FROM wallets WHERE tracked = 1`);
+    const kolWallets = getCachedCount(d, 'wallets_kol', `SELECT COUNT(*) AS n FROM wallets WHERE is_kol = 1`);
     // Hunter wallets — qualifying for the migrator-hunter signal pool. Same
     // criteria as scoring/migrator-hunter.js's topHunters() (must match the
     // strategy gates: minScore + minSample + not auto_blocked).
-    const hunterWallets = d.prepare(`
+    const hunterWallets = getCachedCount(d, 'wallets_hunters', `
       SELECT COUNT(*) AS n FROM wallets
       WHERE migrator_score >= 0.55
         AND migrator_pre_mig_buys >= 5
         AND COALESCE(auto_blocked, 0) = 0
-    `).get().n;
-    const volumeSignals = d.prepare("SELECT COUNT(*) AS n FROM volume_signals").get().n;
-    const bundleClusters = d.prepare("SELECT COUNT(*) AS n FROM bundle_clusters").get().n;
+    `);
+    const volumeSignals = getCachedCount(d, 'volume_signals_total', `SELECT COUNT(*) AS n FROM volume_signals`);
+    const bundleClusters = getCachedCount(d, 'bundle_clusters_total', `SELECT COUNT(*) AS n FROM bundle_clusters`);
     const ingestion = getIngestionStatus ? getIngestionStatus() : null;
 
     const paperWallet = d.prepare('SELECT * FROM paper_wallet WHERE id = 1').get() || { starting_balance_sol: 1.0, started_at: Date.now(), reset_count: 0 };

@@ -96,7 +96,14 @@ function loadCandidatesWithExtraStats() {
   const sql = `
     WITH candidates AS (
       SELECT address FROM wallets
-      WHERE COALESCE(closed_30d, 0) >= 20
+      -- 2026-05-15 (PM): recency cutoff. Without it the candidate scan
+      -- evaluated every wallet that ever had ≥20 closed positions in 30d
+      -- — set was big enough to balloon the query to 59-72s during peak
+      -- contention. 7-day activity floor cuts dormant wallets without
+      -- losing real-time signal (any wallet that hasn't traded in 7d
+      -- isn't an active hunter).
+      WHERE COALESCE(last_activity_at, 0) > strftime('%s','now')*1000 - 7*86400000
+        AND COALESCE(closed_30d, 0) >= 20
         -- 2026-05-13 (D2): tightened from sniper_ratio<=0.8 to <=0.30.
         -- Humans rarely sniper >30% of their buys; >30% is bot territory.
         -- The point of trackers is to FOLLOW good hunters, not get front-run by them.

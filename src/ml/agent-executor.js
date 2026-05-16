@@ -17,6 +17,13 @@ const MIN_RESERVE_SOL = 0.05;  // never spend below this — keeps room for fric
 
 const TICK_INTERVAL_MS = 60 * 1000;       // evaluate strategies once a minute
 const ENTRY_COOLDOWN_MS = 10 * 60 * 1000; // don't re-enter same mint in same strategy within 10min
+// 2026-05-15 (PM): when a recent close on this (strategy, mint) was a
+// FAST_FAIL or FAKE_PUMP, blacklist for an extended window — these exit
+// reasons indicate the coin already failed our entry premise once.
+// Re-entering after 10min cooldown lost us double on 6pzvN5uq today
+// (-18% × 2). Re-entries on coins that hit normal tier exits / time exit
+// are still allowed (only the unconditional-failure reasons get extended).
+const FAILED_COOLDOWN_MS = 60 * 60 * 1000;
 const MAX_CANDIDATES = 30;                // mint candidates per tick
 
 let stmts = null;
@@ -38,6 +45,12 @@ function S() {
        ORDER BY amm_volume_h24_usd DESC LIMIT ?`),
     recentEntry: d.prepare(`SELECT id FROM paper_positions
        WHERE strategy = ? AND mint_address = ? AND entered_at > ?
+       LIMIT 1`),
+    // 2026-05-15: extended-cooldown lookup for coins that already failed
+    // our entry premise via FAST_FAIL / FAKE_PUMP.
+    recentFailedExit: d.prepare(`SELECT id FROM paper_positions
+       WHERE strategy = ? AND mint_address = ? AND exited_at > ?
+         AND exit_reason IN ('FAST_FAIL', 'FAKE_PUMP', 'SL_HIT')
        LIMIT 1`),
     // Hard dedup: never enter a mint on a strategy while we already hold an
     // open position on it. 2026-05-12 bug: 10-min cooldown allowed re-entry
@@ -539,6 +552,12 @@ async function evaluateOneMint(strategy, mintAddress) {
   const cutoff = Date.now() - ENTRY_COOLDOWN_MS;
   const recent = S().recentEntry.get(strategy.id, mintAddress, cutoff);
   if (recent) return false;
+  // Extended-cooldown for already-failed coins (FAST_FAIL/FAKE_PUMP/SL_HIT).
+  // These exit reasons indicate the entry premise failed; re-entering soon
+  // after typically just doubles the loss. 1h blacklist.
+  const failedCutoff = Date.now() - FAILED_COOLDOWN_MS;
+  const recentFail = S().recentFailedExit.get(strategy.id, mintAddress, failedCutoff);
+  if (recentFail) return false;
   const sol = computeEntrySol(recipe, preds);
   // Use last_price_sol from features as entry price
   const entryPrice = features.last_price_sol;
