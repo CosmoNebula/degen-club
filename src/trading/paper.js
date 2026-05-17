@@ -149,14 +149,18 @@ function S() {
     // more capital — the dip is real, not an opportunity. ml_predictions is
     // appended to every snapshot + every scoring sweep, so the freshest row
     // per target is current within ~60s.
+    // 2026-05-17: re-pointed at canonical will_rug (replaced rug_within_5min +
+    // will_die_fast in the May 17 label cleanup). Old targets stopped getting
+    // fresh predictions when we collapsed the ML stack to 8 canonical models,
+    // which silently broke the smart-SL and DCA-safety gates that depended on
+    // them. Keeping peaked_100 lookup for back-compat though it's also legacy.
     getDcaSafety: d.prepare(`SELECT
-        MAX(CASE WHEN target='rug_within_5min' THEN prob END) AS p_rug5,
-        MAX(CASE WHEN target='will_die_fast' THEN prob END) AS p_die_fast,
+        MAX(CASE WHEN target='will_rug' THEN prob END) AS p_will_rug,
         MAX(CASE WHEN target='peaked_100' THEN prob END) AS p_peaked_100
       FROM (
         SELECT target, prob FROM ml_predictions
         WHERE mint_address = ? AND prob IS NOT NULL
-          AND target IN ('rug_within_5min','will_die_fast','peaked_100')
+          AND target IN ('will_rug','peaked_100')
           AND timestamp > (strftime('%s','now')*1000 - 600000)
         ORDER BY timestamp DESC LIMIT 30
       )`),
@@ -972,22 +976,21 @@ function checkPosition(p) {
     peakPctRaw <= (strat.dca_trigger_pct || -0.25)
   ) {
     // Per-mint safety re-check — don't add capital if ML thinks this is
-    // rugging right now. Thresholds are intentionally conservative (high
-    // bar to abort) so legitimate dips still DCA. Tunable per-strategy
-    // via dca_rug_skip_threshold if we want, but keeping it global for now.
+    // rugging right now. 2026-05-17: re-pointed at canonical will_rug
+    // (calibrated 3.4% predicted = 3.4% actual). Threshold 0.10 = "3× the
+    // base rate" — flags coins with elevated rug risk while still letting
+    // legitimate dips DCA.
     const safety = s.getDcaSafety.get(p.mint_address);
-    const RUG5_SKIP = 0.40;
-    const DIE_FAST_SKIP = 0.60;
+    const WILL_RUG_VETO = 0.10;
     const safetyVeto = safety && (
-      (safety.p_rug5 != null && safety.p_rug5 >= RUG5_SKIP) ||
-      (safety.p_die_fast != null && safety.p_die_fast >= DIE_FAST_SKIP)
+      safety.p_will_rug != null && safety.p_will_rug >= WILL_RUG_VETO
     );
     if (safetyVeto) {
       // One-time log per position so we can see when DCA was vetoed — useful
-      // for the agent's future analysis of when DCA helped vs hurt.
+      // for future analysis of when DCA helped vs hurt.
       if (!p._dcaVetoedLogged) {
         p._dcaVetoedLogged = true;
-        console.log(`[dca] VETO ${p.mint_address.slice(0,8)}… on ${p.strategy} — ML flags rug (rug5=${(safety.p_rug5 ?? 0).toFixed(2)} die_fast=${(safety.p_die_fast ?? 0).toFixed(2)}) at ${(peakPctRaw*100).toFixed(0)}% drawdown`);
+        console.log(`[dca] VETO ${p.mint_address.slice(0,8)}… on ${p.strategy} — ML flags rug (will_rug=${(safety.p_will_rug ?? 0).toFixed(3)}) at ${(peakPctRaw*100).toFixed(0)}% drawdown`);
       }
     } else {
       const addSol = (p.entry_sol || 0) * (strat.dca_size_pct || 0.5);
@@ -1190,21 +1193,16 @@ function checkPosition(p) {
     } catch { return false; }
   })()) exitReason = 'PRED_EXIT';
   else if (!breakevenArmed && peakPctRaw <= strat.sl_pct) {
-    // Smart SL — require ML confirmation that the coin is actually dying
-    // before cutting. 2026-05-12 data: SL_HIT trades had +649% avg post-exit
-    // peak — we were cutting positions that recovered. Now SL fires only if:
-    //   - rug_within_5min ≥ 0.40 (model thinks it's rugging), OR
-    //   - will_die_fast ≥ 0.60 (model thinks it's flatlining), OR
-    //   - peakPctRaw ≤ -0.90 (catastrophic — exit regardless), OR
-    //   - mint.rugged flag set.
-    // Otherwise hold and let time_exit, dead_bag, or actual rug clean up.
-    const catastrophic = peakPctRaw <= -0.90;
-    const rugConf = s.getDcaSafety.get(p.mint_address);
-    const rugConfirmed = catastrophic || m.rugged || (rugConf && (
-      (rugConf.p_rug5 != null && rugConf.p_rug5 >= 0.40) ||
-      (rugConf.p_die_fast != null && rugConf.p_die_fast >= 0.60)
-    ));
-    if (rugConfirmed) exitReason = 'SL_HIT';
+    // Hard SL fires when peak drawdown breaches the recipe's stop_loss_pct.
+    // 2026-05-17: simplified. Original "smart SL" required ML confirmation
+    // (rug_within_5min or will_die_fast) before cutting — designed for tight
+    // SLs that needed help distinguishing wicks from real dies. V2 recipes
+    // use WIDE SLs (-50% to -60%) chosen specifically to survive wicks, so
+    // by the time we hit SL it's a sustained drop, not a wick. The ML gate
+    // was actively blocking legitimate exits (positions stuck -60 to -75%
+    // for 80+ minutes with will_rug=0.0025 saying "not rugging").
+    // Recipe owns SL placement; we just fire when it hits.
+    exitReason = 'SL_HIT';
   }
   else if (
     strat.stagnant_exit_min > 0 &&
