@@ -18,6 +18,14 @@ const LOOKBACK_MS = 8 * 24 * 3600 * 1000;
 const FIVE_X_THRESHOLD_SOL = 140;
 const ELITE_MIN_BUYS = 100;
 const ELITE_MIN_HIT_RATE = 0.25;
+// 2026-05-17 PM: super_elite tier. The base elite pool (≥100 buys, ≥25%
+// hit rate) has a long tail of barely-elite wallets close to random.
+// V4 paper trades showed deep losers were triggered by 25-29% hit rate
+// wallets while winners had 31-35%+ wallets buying within seconds.
+// Super tier requires precision (35%+ hit rate) AND volume (100+ 5x
+// catches across 8d) — separates real alpha from spray-and-pray.
+const SUPER_ELITE_MIN_5X = 100;
+const SUPER_ELITE_MIN_HIT_RATE = 0.35;
 
 // 2026-05-16 (PM): bumped 1h → 6h cadence after Node hit 7.2GB peak + OOM
 // during a concurrent retrain. The 80s aggregation query loads tons of trades
@@ -41,6 +49,10 @@ function ensureTable(d) {
     );
     CREATE INDEX IF NOT EXISTS idx_5x_elite ON wallet_5x_score(is_elite) WHERE is_elite = 1;
   `);
+  // is_super_elite column added 2026-05-17 PM. ensureCol-style — won't fail
+  // if already present.
+  try { d.exec(`ALTER TABLE wallet_5x_score ADD COLUMN is_super_elite INTEGER DEFAULT 0`); } catch {}
+  try { d.exec(`CREATE INDEX IF NOT EXISTS idx_5x_super_elite ON wallet_5x_score(is_super_elite) WHERE is_super_elite = 1`); } catch {}
 }
 
 function recomputeOnce(d) {
@@ -68,21 +80,24 @@ function recomputeOnce(d) {
   const tx = d.transaction(() => {
     d.prepare('DELETE FROM wallet_5x_score').run();
     const ins = d.prepare(`INSERT INTO wallet_5x_score
-      (address, coins_bought, coins_5x, hit_rate, is_elite, updated_at)
-      VALUES (?,?,?,?,?,?)`);
+      (address, coins_bought, coins_5x, hit_rate, is_elite, is_super_elite, updated_at)
+      VALUES (?,?,?,?,?,?,?)`);
     const now = Date.now();
     let nElite = 0;
+    let nSuperElite = 0;
     for (const r of rows) {
       const hitRate = r.coins_bought > 0 ? r.coins_5x / r.coins_bought : 0;
       const isElite = (r.coins_bought >= ELITE_MIN_BUYS && hitRate >= ELITE_MIN_HIT_RATE) ? 1 : 0;
+      const isSuperElite = (isElite && r.coins_5x >= SUPER_ELITE_MIN_5X && hitRate >= SUPER_ELITE_MIN_HIT_RATE) ? 1 : 0;
       if (isElite) nElite++;
-      ins.run(r.address, r.coins_bought, r.coins_5x, hitRate, isElite, now);
+      if (isSuperElite) nSuperElite++;
+      ins.run(r.address, r.coins_bought, r.coins_5x, hitRate, isElite, isSuperElite, now);
     }
-    return { total: rows.length, elite: nElite };
+    return { total: rows.length, elite: nElite, superElite: nSuperElite };
   });
   const r = tx();
   const totalMs = Date.now() - t0;
-  console.log(`[5x-scorer] scored ${r.total} wallets · ${r.elite} elite · query ${queryMs}ms total ${totalMs}ms`);
+  console.log(`[5x-scorer] scored ${r.total} wallets · ${r.elite} elite · ${r.superElite} super-elite · query ${queryMs}ms total ${totalMs}ms`);
 }
 
 // ---------- Worker side ----------

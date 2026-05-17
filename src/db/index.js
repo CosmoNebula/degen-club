@@ -504,6 +504,14 @@ function runMigrations(d) {
   // Rug-exception fires through normal SL path. Default 0 = feature disabled.
   ensureCol(d, 'strategy_state', 'moonbag_pct_reserve', `REAL DEFAULT 0`);
 
+  // 2026-05-17 PM: super_elite tier on wallet_5x_score. The 1,700+ wallet
+  // elite pool has a long tail of 25-30% hit rate wallets that are close to
+  // random. V4 trades triggered by those wallets averaged -50%+ losses,
+  // while the +75-83% winner was triggered by a 31% wallet AND another by
+  // a 35%+ wallet. Tier = hit_rate ≥ 35% AND coins_5x ≥ 100 ≈ 229 wallets.
+  // Worker re-computes this every 6h alongside is_elite.
+  ensureCol(d, 'wallet_5x_score', 'is_super_elite', `INTEGER DEFAULT 0`);
+
   // 2026-05-17: cliff-notes summary archive. One compact gzipped JSON per UTC
   // day capturing the day's activity (per-mint lifecycle outcomes + aggregates
   // + strategy performance). ~50-200 KB per day vs ~200 MB for raw Parquet,
