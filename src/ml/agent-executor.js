@@ -345,6 +345,16 @@ function evalCondition(c, ctx) {
         sql = `SELECT COUNT(DISTINCT t.wallet) AS n FROM trades t
                JOIN wallet_5x_score w ON w.address = t.wallet AND w.is_super_elite = 1
                WHERE t.mint_address = ? AND t.is_buy = 1 AND t.timestamp >= ?`;
+      } else if (c.pool === 'mega_elite_5x') {
+        // 50x specialists: ≥30 coins_50x AND ≥45% hit rate. ~50-100 wallets.
+        sql = `SELECT COUNT(DISTINCT t.wallet) AS n FROM trades t
+               JOIN wallet_5x_score w ON w.address = t.wallet AND w.is_mega_elite = 1
+               WHERE t.mint_address = ? AND t.is_buy = 1 AND t.timestamp >= ?`;
+      } else if (c.pool === 'ultra_elite_5x') {
+        // Unicorn hunters: ≥50 coins_50x AND ≥55% hit rate. Tiny pool (~20-40).
+        sql = `SELECT COUNT(DISTINCT t.wallet) AS n FROM trades t
+               JOIN wallet_5x_score w ON w.address = t.wallet AND w.is_ultra_elite = 1
+               WHERE t.mint_address = ? AND t.is_buy = 1 AND t.timestamp >= ?`;
       } else if (c.pool === 'tracked') {
         sql = `SELECT COUNT(DISTINCT t.wallet) AS n FROM trades t
                JOIN wallets w ON w.address = t.wallet AND w.tracked = 1
