@@ -34,6 +34,7 @@ import { startDevsWorker } from './scoring/devs-worker.js';
 import { startBundleWorker } from './scoring/bundle-worker.js';
 import { startMaintenanceWorker } from './maintenance-worker.js';
 import { startLabelResolverWorker } from './ml/label-resolver-worker.js';
+import { startWallet5xScorer } from './scoring/wallet-5x-scorer-worker.js';
 import { startRunnerScoreSweep } from './scoring/runner-score.js';
 import { startWhaleSpawnSweep } from './scoring/whale-spawn.js';
 import { startKolDipSweep } from './scoring/kol-dip.js';
@@ -115,8 +116,12 @@ onchainPumpTrades.start();
 startSweeper();
 startTraderSweep();
 startWalletGrader();
-startWalletLeaderboard();
-startWalletLeaderboardWorker();
+// 2026-05-17: leaderboard nuked. 50-row top-N ranking superseded by wallet_5x_score
+// (1,535-wallet pool, 6h cadence). The 13-16s recompute every 15min was pure waste
+// — only leaderboard_rank/avg_buyer_rank features depended on it, and those are
+// already NULL for 99.96% of wallets. Models handle the remaining NULLs natively.
+// startWalletLeaderboard();
+// startWalletLeaderboardWorker();
 startDevsWorker();
 startBundleWorker();
 startMaintenanceWorker();
@@ -128,6 +133,7 @@ startLiveConditionsMonitor();
 startMicrostructureSweep();
 startDiskMonitor();
 startSnapshotSweeperWorker();
+startWallet5xScorer();
 startKnownAddressDetector();
 startLabelResolver();
 startMlClient();
@@ -136,7 +142,7 @@ startAutoRetrain();
 startSentimentScorer();
 startMlConvictionWatcher();
 startTrackerConcentration();
-startAgent();
+startAgent();  // executor + reporting only; Claude/cycle subsystems disabled inside agent.js for V2 test
 startServeWatchdog();
 startEventLoopWatchdog();
 startTelegramBroadcast();

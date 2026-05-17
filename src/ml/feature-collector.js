@@ -12,6 +12,33 @@
 import { db } from '../db/index.js';
 import { getCreatorActivity } from './creator-activity.js';
 
+// 2026-05-17: TTL cache on the trades-fetch query. A runner sweep evaluates
+// the same candidate mint against every live strategy in sequence, and each
+// call lands in collectFeatures() → tradesUpToNow.all(). With 8 live strats
+// and 15 candidates/sweep that's ~120 calls/sec, all repeatedly fetching the
+// same trade history. At 9M-row scale the join takes 5-8s per call and pegs
+// the event loop. 2-sec TTL collapses the duplicates without meaningfully
+// staling features (new trades arriving inside a 2s window are noise relative
+// to the snapshot age the model was trained on).
+const _tradesCache = new Map();   // mintAddress → { ts, rows }
+const TRADES_CACHE_TTL_MS = 2000;
+const TRADES_CACHE_MAX = 500;
+
+function cachedTradesUpToNow(mintAddress) {
+  const cached = _tradesCache.get(mintAddress);
+  if (cached && (Date.now() - cached.ts) < TRADES_CACHE_TTL_MS) {
+    return cached.rows;
+  }
+  const rows = S().tradesUpToNow.all(mintAddress);
+  _tradesCache.set(mintAddress, { ts: Date.now(), rows });
+  if (_tradesCache.size > TRADES_CACHE_MAX) {
+    // Drop oldest insertion (Map preserves insertion order).
+    const firstKey = _tradesCache.keys().next().value;
+    _tradesCache.delete(firstKey);
+  }
+  return rows;
+}
+
 let stmts = null;
 function S() {
   if (stmts) return stmts;
@@ -29,6 +56,9 @@ function S() {
              t.is_sniper, t.is_first_block, t.buyer_rank, t.seconds_from_creation,
              COALESCE(w.tracked, 0) AS tracked, COALESCE(w.is_kol, 0) AS is_kol,
              COALESCE(w.bundle_cluster_id, '') AS bundle_id,
+             COALESCE(w.migrator_score, 0) AS migrator_score,
+             COALESCE(w.migrator_pre_mig_buys, 0) AS migrator_pre_mig_buys,
+             COALESCE(w.auto_blocked, 0) AS auto_blocked,
              wl.rank AS leaderboard_rank
       FROM trades t
       LEFT JOIN wallets w ON w.address = t.wallet
@@ -370,7 +400,7 @@ function aggregate(trades, ctx = {}) {
     return {
       lastPrice: 0, lastMcap: 0, peakMcap: 0,
       solIn: 0, solOut: 0, buyCount: 0, sellCount: 0,
-      buySellRatio: 0, uniqueBuyers: 0, trackedBuyers: 0,
+      buySellRatio: 0, uniqueBuyers: 0, trackedBuyers: 0, hunterBuyers: 0,
       kolBuyers: 0, bundleBuyers: 0,
       top10Buyers: 0, top50Buyers: 0, weightedBuyerQuality: 0,
       sniperBuyerCount: 0, pctSniperBuys: null,
@@ -397,6 +427,7 @@ function aggregate(trades, ctx = {}) {
   let trackedFirstSeenSec = null, kolFirstSeenSec = null;
   let secondsTo5Buyers = null, secondsTo10Buyers = null;
   const buyers = new Set(), trackedBuyers = new Set(), kolBuyers = new Set(), bundleBuyers = new Set();
+  const hunterBuyers = new Set();  // 2026-05-16: migrator-score-qualified hunters
   const top10Buyers = new Set(), top50Buyers = new Set();
   const sniperBuyers = new Set(), firstBlockBuyers = new Set();
   const botSniperBuyers = new Set();
@@ -438,6 +469,11 @@ function aggregate(trades, ctx = {}) {
             trackedFirstSeenSec = t.seconds_from_creation;
           }
         }
+        // 2026-05-16: hunter = wallet with migrator_score >= 0.55 + sample >= 5 +
+        // not auto-blocked. Same criteria as scoring/migrator-hunter.js topHunters().
+        if (t.migrator_score >= 0.55 && t.migrator_pre_mig_buys >= 5 && t.auto_blocked !== 1) {
+          hunterBuyers.add(t.wallet);
+        }
         if (t.is_kol === 1) {
           kolBuyers.add(t.wallet);
           if (kolFirstSeenSec === null && typeof t.seconds_from_creation === 'number') {
@@ -469,6 +505,7 @@ function aggregate(trades, ctx = {}) {
     buySellRatio: sellCount > 0 ? (buyCount / sellCount) : (buyCount > 0 ? 99 : 0),
     uniqueBuyers: buyers.size,
     trackedBuyers: trackedBuyers.size,
+    hunterBuyers: hunterBuyers.size,
     kolBuyers: kolBuyers.size,
     bundleBuyers: bundleBuyers.size,
     top10Buyers: top10Buyers.size,
@@ -533,7 +570,7 @@ export function collectFeatures(mintAddress, snapshotAgeSec = null) {
   const actualAgeSec = Math.max(1, Math.round((now - mint.created_at) / 1000));
   const ageSec = snapshotAgeSec || snapToTrainingAge(actualAgeSec);
 
-  const trades = s.tradesUpToNow.all(mintAddress);
+  const trades = cachedTradesUpToNow(mintAddress);
   // velocity needs the "snapshot midpoint" — for live inference we use NOW
   // as the snapshot_ts and the snapped age as the window, so the midpoint
   // is now - snappedAge/2. This mirrors what snapshot-sweeper passes.
@@ -613,6 +650,7 @@ export function collectFeatures(mintAddress, snapshotAgeSec = null) {
     buy_sell_ratio: agg.buySellRatio,
     unique_buyers: agg.uniqueBuyers,
     tracked_buyers: agg.trackedBuyers,
+    hunter_buyers: agg.hunterBuyers,
     kol_buyers: agg.kolBuyers,
     bundle_buyers: agg.bundleBuyers,
     top10_buyers: agg.top10Buyers,

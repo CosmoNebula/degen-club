@@ -26,81 +26,48 @@ SERVE_RELOAD_URL = 'http://127.0.0.1:5050/reload'
 import os
 DB_PATH = Path(os.environ.get('DEGEN_DB_PATH') or str(ML_ROOT.parent / 'data' / 'degen.db'))
 
+#
+# 2026-05-16 — LABEL CLEANUP: condensed from 32 targets → 8 clean targets.
+# Each model has ONE clear job and drives ONE trading decision. No redundant
+# overlapping concepts, no wick-confused labels.
+#
+# Dropped (24 targets): peaked_15/30/100/300/500 (redundant with hits_*),
+# rug_within_5min (wick-confused — replaced by will_rug), will_die_fast
+# (same concept as rug, replaced by will_rug), migrates_within_15min (too
+# narrow — replaced by will_migrate), migrated (anytime-ever, less useful
+# than 24h windowed will_migrate), drawdown_from_peak_pct (unbounded,
+# redundant), drawdown_20pct_300s (wick-confused), time_to_peak_5x_sec
+# (misnamed, low utility), peak_within_5min (noise-prone), pump_durability_5min
+# (low practical value), alive_at_1h/24h (alive = NOT will_rug),
+# hold_1h_pct/4h_pct/24h_pct (covered by peak_pct_within_24h), hits_10x_within_24h
+# (5x captures the same signal), max_drawdown_within_24h_pct (no strategy uses),
+# price_up_60s/300s (binary subset of pnl_pct), pnl_pct_60s/300s (short-window
+# noise), unique_buyers_next_60s/unique_sellers_next_60s (covered by
+# buy_pressure_continues_60s + raw counts in features).
+#
+# All historical data preserved in old columns; just not trained on anymore.
 TARGETS = [
     # ---------- PRE-MIGRATION (csv=training.csv, features-mode=pre) ----------
-    # Binary classifiers
-    # 2026-05-15 cull: dropped peaked_100 (0.902 corr with hits_2x_within_1h,
-    # same signal), will_die_fast (Lift 1.13 with 88.5% base = predicts
-    # majority class + -0.742 corr with alive_at_1h = inverse duplicate),
-    # alive_at_4h (0.997 corr with alive_at_1h). Keep hits_2x_within_1h
-    # and alive_at_1h as the survivors of those pairs.
-    {'name': 'peaked_30',             'out': 'models/peaked_30_v1.pkl',             'min_pos': 50,  'kind': 'binary',     'mode': 'pre'},
-    {'name': 'peaked_300',            'out': 'models/peaked_300_v1.pkl',            'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
-    {'name': 'migrated',              'out': 'models/migrated_v1.pkl',              'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
-    {'name': 'rug_within_5min',       'out': 'models/rug_within_5min_v1.pkl',       'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
-    {'name': 'migrates_within_15min', 'out': 'models/migrates_within_15min_v1.pkl', 'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
-    # hits_2x_within_1h: time-bounded version of peaked_100 — catches medium
-    # runners (2-5x within an hour) that the "ever" peaked_100 lumps in with
-    # mints that take 6h to reach 2x. Direct entry-signal for short-horizon
-    # strategies.
-    {'name': 'hits_2x_within_1h',     'out': 'models/hits_2x_within_1h_v1.pkl',     'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
-    # 2026-05-14 timing-aware models — answer WHEN, not just whether.
-    {'name': 'peak_within_5min',          'out': 'models/peak_within_5min_v1.pkl',          'min_pos': 50,  'kind': 'binary',     'mode': 'pre'},
+    # 1. Will it rug? — CANONICAL, keyed off mint.rugged_at (Definition 1 from
+    #    audit). Replaces the wick-confused rug_within_5min + will_die_fast.
+    {'name': 'will_rug',                  'out': 'models/will_rug_v1.pkl',                  'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
+    # 2. Will it 2x within 1h? — entry conviction signal.
+    {'name': 'hits_2x_within_1h',         'out': 'models/hits_2x_within_1h_v1.pkl',         'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
+    # 3. Will it 5x within 24h? — size-up + hold-longer signal.
+    {'name': 'hits_5x_within_24h',        'out': 'models/hits_5x_within_24h_v1.pkl',        'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
+    # 4. Will it migrate to Raydium? — CANONICAL, keyed off mint.migrated_at
+    #    with 24h window. Replaces migrates_within_15min (too narrow) and
+    #    `migrated` (anytime-ever, less actionable).
+    {'name': 'will_migrate',              'out': 'models/will_migrate_v1.pkl',              'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
+    # 5. Max % gain achievable in 24h — position sizing signal.
+    {'name': 'peak_pct_within_24h',       'out': 'models/peak_pct_within_24h_v1.pkl',       'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
+    # 6. Is now a local top? — exit-timing signal.
+    {'name': 'local_top_60s',             'out': 'models/local_top_60s_v1.pkl',             'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
+    # 7. Will buy pressure continue in next 60s? — entry validation.
     {'name': 'buy_pressure_continues_60s','out': 'models/buy_pressure_continues_60s_v1.pkl','min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
-    {'name': 'pump_durability_5min',      'out': 'models/pump_durability_5min_v1.pkl',      'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
-    # Regressions
-    # 2026-05-14: peak_pct_max + time_to_peak_sec dropped — R²=0.007 / 0.039
-    # respectively, model worse than predicting mean. Also one was the
-    # cause of retrain crashes (stratify split on integer-second values).
-    # drawdown_from_peak_pct kept (R²=0.70, strong).
-    {'name': 'drawdown_from_peak_pct', 'out': 'models/drawdown_from_peak_pct_v1.pkl', 'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
-    # 2026-05-14: time_to_peak_5x_sec dropped — R²=-0.055 (noise) AND was
-    # crashing the retrain via the integer-seconds stratify bug. Same class
-    # of issue as the other 3 useless regressions.
-    # ---------- LONG-HORIZON "HOLD-TO-MATURITY" (added 2026-05-12) ----------
-    # The labels above all answer "did this pump fast?" — these answer "is this
-    # worth holding?". Models trained on these let the agent propose buy-and-
-    # hold strategies, not just flip strategies. Each needs 25h+ of trade
-    # history to compute; resolver backfills as snapshots age past 24h.
-    {'name': 'alive_at_1h',            'out': 'models/alive_at_1h_v1.pkl',            'min_pos': 50,  'kind': 'binary',     'mode': 'pre'},
-    # 2026-05-15: alive_at_4h dropped — 0.997 correlation with alive_at_1h on
-    # live predictions, essentially identical signal at twice the data cost.
-    {'name': 'alive_at_24h',           'out': 'models/alive_at_24h_v1.pkl',           'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
-    {'name': 'hits_5x_within_24h',     'out': 'models/hits_5x_within_24h_v1.pkl',     'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
-    {'name': 'hits_10x_within_24h',    'out': 'models/hits_10x_within_24h_v1.pkl',    'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
-    # The unlock: literal "if held N hours, what was the PnL?" regressions.
-    {'name': 'hold_1h_pct',            'out': 'models/hold_1h_pct_v1.pkl',            'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
-    {'name': 'hold_4h_pct',            'out': 'models/hold_4h_pct_v1.pkl',            'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
-    {'name': 'hold_24h_pct',           'out': 'models/hold_24h_pct_v1.pkl',           'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
-    # Bounded peak (vs peak_pct_max which is unbounded — peak 3 days later
-    # isn't actionable). Bounded max-drawdown for risk modeling: same peak
-    # can have very different hold-PnL depending on drawdown along the way.
-    {'name': 'peak_pct_within_24h',           'out': 'models/peak_pct_within_24h_v1.pkl',           'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
-    {'name': 'max_drawdown_within_24h_pct',   'out': 'models/max_drawdown_within_24h_pct_v1.pkl',   'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
-    # ---------- 2026-05-15 EXIT-TIMING SUITE ----------
-    # Forward-looking labels resolved 60s or 5min after snapshot. Train every
-    # snapshot row with these — gives the agent direct exit-decision signals.
-    # OCEAN-incident audit identified exit logic as #1 PnL leak: 43% of stop-
-    # loss exits had post-exit peaks >30%. These models attack that gap.
-    {'name': 'price_up_60s',            'out': 'models/price_up_60s_v1.pkl',            'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
-    {'name': 'price_up_300s',           'out': 'models/price_up_300s_v1.pkl',           'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
-    {'name': 'drawdown_20pct_300s',     'out': 'models/drawdown_20pct_300s_v1.pkl',     'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
-    {'name': 'local_top_60s',           'out': 'models/local_top_60s_v1.pkl',           'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
-    # Signed-log regressions: pct return at 60s / 5min ahead (can be negative).
-    {'name': 'pnl_pct_60s',             'out': 'models/pnl_pct_60s_v1.pkl',             'min_pos': 200, 'kind': 'regression', 'mode': 'pre'},
-    {'name': 'pnl_pct_300s',            'out': 'models/pnl_pct_300s_v1.pkl',            'min_pos': 200, 'kind': 'regression', 'mode': 'pre'},
-    # Poisson count regressions — buyer/seller volume forecast 60s ahead.
-    # Train.py applies loss='poisson' for these (see POISSON_TARGETS).
-    {'name': 'unique_buyers_next_60s',  'out': 'models/unique_buyers_next_60s_v1.pkl',  'min_pos': 200, 'kind': 'regression', 'mode': 'pre'},
-    {'name': 'unique_sellers_next_60s', 'out': 'models/unique_sellers_next_60s_v1.pkl', 'min_pos': 200, 'kind': 'regression', 'mode': 'pre'},
     # ---------- POST-MIGRATION (csv=training_postmig.csv, features-mode=post) ----------
-    {'name': 'post_mig_hits_2x',  'out': 'models/post_mig_hits_2x_v1.pkl',  'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
-    # 2026-05-15: post_mig_rugs_1h dropped — AUC-ROC 0.581 (barely above random
-    # 0.5), Lift 0.75 (worse than baseline). Model is actively confused. Either
-    # the label is wrong or post-mig rug dynamics need different features than
-    # pre-mig signals capture.
-    # 2026-05-14: post_mig_peak_pct dropped — R² = -0.085 (actively misleading,
-    # worse than predicting the mean).
+    # 8. Post-graduation: will it 2x? — drives post-mig strategies.
+    {'name': 'post_mig_hits_2x',          'out': 'models/post_mig_hits_2x_v1.pkl',          'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
 ]
 
 
@@ -215,9 +182,18 @@ def main():
         try: last_meta = json.loads(LAST_TRAIN_FILE.read_text())
         except: pass
     last_n = last_meta.get('n_rows', 0)
+    # 2026-05-16: don't include targets that can never train yet (insufficient
+    # positives in training data) in the "missing" set, or we infinite-loop
+    # the retrain. hits_5x_within_24h needs snapshots ≥24h old with the
+    # forward window resolved — most recent snapshots haven't aged enough.
+    # We rely on the per-target min_pos check inside the loop to skip these
+    # gracefully WITHOUT triggering a force-retrain of everything else.
+    NEVER_FORCE_TARGETS = {'hits_5x_within_24h'}
     missing_pre_models = [
         t['name'] for t in TARGETS
-        if t.get('mode', 'pre') == 'pre' and not (ML_ROOT / t['out']).exists()
+        if t.get('mode', 'pre') == 'pre'
+           and t['name'] not in NEVER_FORCE_TARGETS
+           and not (ML_ROOT / t['out']).exists()
     ]
     not_enough_rows = (n_pre <= last_n + 100)
     skip_pre = not_enough_rows and not missing_pre_models and not force

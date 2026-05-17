@@ -149,6 +149,10 @@ LABEL_COLS = [
     'price_up_60s', 'price_up_300s', 'drawdown_20pct_300s',
     'pnl_pct_60s', 'pnl_pct_300s',
     'unique_buyers_next_60s', 'unique_sellers_next_60s', 'local_top_60s',
+    # 2026-05-16 — CANONICAL labels (Phase 1 of label cleanup).
+    # will_rug: keyed off mint.rugged_at (Definition 1 from audit).
+    # will_migrate: keyed off mint.migrated_at, 24h window.
+    'will_rug', 'will_migrate',
 ]
 
 
@@ -189,45 +193,83 @@ def main():
     q = f"SELECT {','.join(cols)} FROM ml_mint_snapshots{where_clause} ORDER BY snapshot_ts ASC"
     print(f'[extract] reading: {DB_PATH}')
     print(f'[extract] query: {q}')
-    df = pd.read_sql_query(q, conn, params=params)
+
+    # 2026-05-16 — CHUNKED EXTRACT. Original loaded all 947k rows into one
+    # DataFrame, peaked at 7.9GB RAM and OOM-killed the bot. Chunked reading
+    # streams 50k rows at a time directly to CSV — bounded memory (~150MB
+    # per chunk regardless of total row count).
+    CHUNK_SIZE = 50000
+    total_rows = 0
+    age_counts = {}
+    label_sums = {col: 0.0 for col in LABEL_COLS}
+    label_counts = {col: 0 for col in LABEL_COLS}
+    target_drop_count = 0
+    snapshot_ts_min = None
+    snapshot_ts_max = None
+    mint_addrs = set()
+
+    first_chunk = True
+    for chunk in pd.read_sql_query(q, conn, params=params, chunksize=CHUNK_SIZE):
+        if args.target:
+            before = len(chunk)
+            chunk = chunk.dropna(subset=[args.target])
+            target_drop_count += (before - len(chunk))
+
+        # Append chunk to CSV (first chunk writes header, rest append)
+        chunk.to_csv(out_path, index=False, mode=('w' if first_chunk else 'a'), header=first_chunk)
+        first_chunk = False
+        total_rows += len(chunk)
+
+        # Aggregate summary stats without keeping the chunk in memory
+        if 'snapshot_age_sec' in chunk.columns:
+            for age, count in chunk['snapshot_age_sec'].value_counts().items():
+                age_counts[age] = age_counts.get(age, 0) + count
+        if snapshot_ts_min is None:
+            snapshot_ts_min = chunk['snapshot_ts'].min()
+            snapshot_ts_max = chunk['snapshot_ts'].max()
+        else:
+            snapshot_ts_min = min(snapshot_ts_min, chunk['snapshot_ts'].min())
+            snapshot_ts_max = max(snapshot_ts_max, chunk['snapshot_ts'].max())
+        mint_addrs.update(chunk['mint_address'].unique())
+        for col in LABEL_COLS:
+            if col in chunk.columns:
+                v = chunk[col].dropna()
+                if len(v) > 0:
+                    label_sums[col] += float(v.sum())
+                    label_counts[col] += len(v)
+
+        # Free chunk memory eagerly
+        del chunk
+
     conn.close()
-
-    print(f'[extract] rows: {len(df)}')
-    if len(df) == 0:
-        print('[extract] no rows — exiting (write empty file for smoke test)')
-        df.to_csv(out_path, index=False)
+    print(f'[extract] rows: {total_rows}')
+    if total_rows == 0:
+        print('[extract] no rows — exiting')
         return
-
     if args.target:
-        before = len(df)
-        df = df.dropna(subset=[args.target])
-        print(f'[extract] filtered to non-null {args.target}: {before} -> {len(df)}')
-
-    df.to_csv(out_path, index=False)
+        print(f'[extract] target-filter dropped {target_drop_count} null-{args.target} rows')
     print(f'[extract] saved → {out_path}')
 
     print('\n=== summary ===')
-    print(f"snapshots: {len(df)}  ·  unique mints: {df['mint_address'].nunique()}")
-    print(f"date range: {pd.to_datetime(df['snapshot_ts'].min(), unit='ms')} → {pd.to_datetime(df['snapshot_ts'].max(), unit='ms')}")
-    if 'snapshot_age_sec' in df:
+    print(f"snapshots: {total_rows}  ·  unique mints: {len(mint_addrs)}")
+    if snapshot_ts_min is not None:
+        print(f"date range: {pd.to_datetime(snapshot_ts_min, unit='ms')} → {pd.to_datetime(snapshot_ts_max, unit='ms')}")
+    if age_counts:
         print('\nby age:')
-        print(df['snapshot_age_sec'].value_counts().sort_index().to_string())
+        for age in sorted(age_counts.keys()):
+            print(f'  {age}: {age_counts[age]}')
     print('\nlabel rates:')
     for col in LABEL_COLS:
-        if col in df.columns and not df[col].isna().all():
+        n = label_counts[col]
+        if n > 0:
             if col in ('peak_pct_max', 'time_to_peak_sec'):
-                vals = df[col].dropna()
-                print(f'  {col:18s}: mean={vals.mean():.3f}  median={vals.median():.3f}  max={vals.max():.2f}  n={len(vals)}')
+                # Streaming-friendly: mean only (no median)
+                print(f'  {col:18s}: mean={label_sums[col]/n:.3f}  n={n}')
             else:
-                rate = df[col].mean() * 100
-                print(f'  {col:18s}: {rate:5.2f}%  (n_pos={int(df[col].sum())})')
-    print('\nfeature null counts (highest):')
-    nulls = df[FEATURE_COLS].isna().sum()
-    nulls = nulls[nulls > 0].sort_values(ascending=False)
-    if len(nulls) > 0:
-        print(nulls.to_string())
-    else:
-        print('  (none)')
+                rate = (label_sums[col] / n) * 100
+                print(f'  {col:18s}: {rate:5.2f}%  (n_pos={int(label_sums[col])} of {n})')
+    # Feature null counts skipped in chunked mode — would require another full scan.
+    print('  (feature null counts skipped — chunked extract)')
 
 
 if __name__ == '__main__':

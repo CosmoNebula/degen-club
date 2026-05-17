@@ -120,7 +120,7 @@ function S() {
               OR unique_buyers_next_60s IS NULL OR unique_sellers_next_60s IS NULL
               OR local_top_60s IS NULL)
        ORDER BY snapshot_ts DESC LIMIT ?`),
-    mintInfo: d.prepare(`SELECT migrated, migrated_at FROM mints WHERE mint_address = ?`),
+    mintInfo: d.prepare(`SELECT migrated, migrated_at, rugged, rugged_at FROM mints WHERE mint_address = ?`),
     // Returns peak price + the timestamp at which peak occurred (regression targets)
     peakRow: d.prepare(`SELECT price_sol AS max_price, timestamp AS peak_ts
        FROM trades WHERE mint_address = ? AND timestamp > ? AND price_sol > 0 AND is_junk = 0
@@ -207,6 +207,8 @@ function S() {
        unique_buyers_next_60s = COALESCE(?, unique_buyers_next_60s),
        unique_sellers_next_60s = COALESCE(?, unique_sellers_next_60s),
        local_top_60s = COALESCE(?, local_top_60s),
+       will_rug = ?,
+       will_migrate = ?,
        labels_resolved_at = ?
        WHERE mint_address = ? AND snapshot_age_sec = ?`),
     updateDieFastOnly: d.prepare(`UPDATE ml_mint_snapshots SET will_die_fast = ?
@@ -230,6 +232,9 @@ function computeDieFast(mintAddress, snapshotTs, snapshotPrice) {
 
 // rug_within_5min: 1 if min price within 5 min after snapshot dropped to ≤30%
 // of snapshot_price (i.e., -70%+ from entry). NULL if snapshot price is junk.
+// LEGACY (2026-05-16) — kept for backward compat with existing models / queries
+// during transition. Audit found this is wick-confused: rejects winners that
+// briefly dipped -70% then ran. The canonical replacement is `will_rug` below.
 function computeRugWithin5min(mintAddress, snapshotTs, snapshotPrice) {
   if (!snapshotPrice || snapshotPrice <= MIN_SNAPSHOT_PRICE) return null;
   const row = S().minPriceWithin.get(
@@ -238,6 +243,34 @@ function computeRugWithin5min(mintAddress, snapshotTs, snapshotPrice) {
   const minPrice = row?.min_price;
   if (minPrice == null || minPrice <= 0) return 0;
   return (minPrice / snapshotPrice) <= RUG_PRICE_RATIO ? 1 : 0;
+}
+
+// 2026-05-16: CANONICAL rug label. Uses mint.rugged_at as the single source of
+// truth (set in src/scoring/flags.js when peak-drop ≥85% AND no trades for
+// ≥10min — see Definition 1 in audit). Coin is "rugged within 30 min" iff
+// the official rug flag fires within 30 min after the snapshot.
+//
+// Replaces rug_within_5min + will_die_fast + drawdown_20pct_300s, which all
+// over-fire on wicks. By keying off the canonical flag (which already
+// includes a "stayed dead" requirement), this label captures REAL rugs only.
+const WILL_RUG_WINDOW_MS = 30 * 60 * 1000;
+function computeWillRug(ruggedAt, snapshotTs) {
+  if (!ruggedAt) return 0;
+  const delta = ruggedAt - snapshotTs;
+  if (delta < 0) return 0;  // rugged BEFORE the snapshot — degenerate
+  return delta <= WILL_RUG_WINDOW_MS ? 1 : 0;
+}
+
+// 2026-05-16: CANONICAL migration label — "will this coin graduate to Raydium
+// within 24h of the snapshot?". 24h captures all realistic graduation
+// candidates (most graduate within 1-4h, none after 24h). Replaces the
+// 15-min `migrates_within_15min` (too narrow — misses slow graduates).
+const WILL_MIGRATE_WINDOW_MS = 24 * 60 * 60 * 1000;
+function computeWillMigrate(migratedAt, snapshotTs) {
+  if (!migratedAt) return 0;
+  const delta = migratedAt - snapshotTs;
+  if (delta < 0) return 0;  // already migrated before snapshot — degenerate
+  return delta <= WILL_MIGRATE_WINDOW_MS ? 1 : 0;
 }
 
 // migrates_within_15min: 1 if mint.migrated_at exists and falls within 15 min
@@ -524,6 +557,10 @@ function resolveBatch(rows, label = 'resolve') {
       const buyers60s = computeUniqueCountForward(s.uniqueBuyersWindow, r.mint_address, r.snapshot_ts, FORWARD_60S_MS);
       const sellers60s = computeUniqueCountForward(s.uniqueSellersWindow, r.mint_address, r.snapshot_ts, FORWARD_60S_MS);
       const localTop60s = computeLocalTop60s(r.mint_address, r.snapshot_ts, r.last_price_sol);
+      // 2026-05-16 — CANONICAL labels (Phase 1 of label cleanup).
+      // Keyed off mint.rugged_at and mint.migrated_at (single source of truth).
+      const willRug = computeWillRug(mint?.rugged_at, r.snapshot_ts);
+      const willMigrate = computeWillMigrate(mint?.migrated_at, r.snapshot_ts);
       s.update.run(
         migrated,
         peakPct >= 0.30 ? 1 : 0,
@@ -546,6 +583,7 @@ function resolveBatch(rows, label = 'resolve') {
         priceUp60s, priceUp300s, dd20p300s,
         pnl60s, pnl300s,
         buyers60s, sellers60s, localTop60s,
+        willRug, willMigrate,
         now,
         r.mint_address,
         r.snapshot_age_sec,

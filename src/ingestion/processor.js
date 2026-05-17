@@ -17,6 +17,37 @@ import { triggerWebhookResync } from './helius-webhooks.js';
 import { isMintHeld } from '../trading/held-mints.js';
 import { isAmmSubscribed } from './onchain-amm-price.js';
 
+// 2026-05-16: cached wallet category lookup for KOL + hunter + 5x-elite triggers.
+// Trades flow at ~50-200/sec; querying wallets table on every trade would
+// hammer the DB. TTL 60s — categories change slowly.
+const _walletCatCache = new Map();
+const WALLET_CAT_TTL_MS = 60_000;
+function getWalletCategory(wallet) {
+  if (!wallet) return { is_kol: false, is_hunter: false, is_5x_elite: false };
+  const cached = _walletCatCache.get(wallet);
+  const now = Date.now();
+  if (cached && cached.expires > now) return cached;
+  const d = db();
+  const row = d.prepare(
+    `SELECT is_kol, migrator_score, migrator_pre_mig_buys, COALESCE(auto_blocked, 0) AS auto_blocked
+       FROM wallets WHERE address = ?`
+  ).get(wallet);
+  const eliteRow = d.prepare(
+    `SELECT is_elite FROM wallet_5x_score WHERE address = ?`
+  ).get(wallet);
+  const v = {
+    is_kol: row?.is_kol === 1,
+    is_hunter: (row?.migrator_score || 0) >= 0.55
+              && (row?.migrator_pre_mig_buys || 0) >= 5
+              && row?.auto_blocked !== 1,
+    is_5x_elite: eliteRow?.is_elite === 1,
+    expires: now + WALLET_CAT_TTL_MS,
+  };
+  _walletCatCache.set(wallet, v);
+  if (_walletCatCache.size > 5000) _walletCatCache.delete(_walletCatCache.keys().next().value);
+  return v;
+}
+
 const cashbackInflight = new Set();
 export function ensureCashback(mintAddress, bondingCurveKey, currentValue) {
   if (currentValue !== null && currentValue !== undefined) return;
@@ -462,9 +493,13 @@ function onTrade(e) {
       // walletAlreadyBought check above already runs the cheap index lookup.
       const updated = uniqueBuyersSoFar + (isNewBuyer ? 1 : 0);
       if (isNewBuyer) s.bumpUniqueBuyers.run(updated, e.mint);
-      if (updated === 5 && mint.cashback_enabled === null) {
-        ensureCashback(e.mint, mint.bonding_curve_key, mint.cashback_enabled);
-      }
+      // 2026-05-17: cashback detection disabled. Hits public Solana RPC
+      // (api.mainnet-beta.solana.com — free but rate-limited, shared with trade
+      // subscriptions). Strategies don't gate on cashback, just an incidental
+      // tier-trigger boost in paper.js. Net: wasted CPU + public-RPC budget.
+      // if (updated === 5 && mint.cashback_enabled === null) {
+      //   ensureCashback(e.mint, mint.bonding_curve_key, mint.cashback_enabled);
+      // }
     } else {
       s.holdingSell.run(wallet, e.mint, tokenAmount, solAmount, now);
     }
@@ -530,6 +565,24 @@ function onTrade(e) {
       evaluateMintNow(e.mint, `whale-buy-${solAmount.toFixed(2)}sol`).catch(() => {});
     }
 
+    // EVENT: KOL / hunter / 5x-elite wallet buy — 2026-05-16. Direct triggers
+    // for each wallet pool we track. 5x-elite is the highest-conviction pool:
+    // wallets in last 8d that bought ≥100 coins AND have ≥25% hit rate for
+    // 5x runners (peak ≥140 SOL mcap). ~1,484 wallets, only 8% overlap with
+    // tracker/KOL/hunter — most are untagged elite.
+    if (isBuy) {
+      const cat = getWalletCategory(wallet);
+      if (cat.is_5x_elite) {
+        evaluateMintNow(e.mint, `elite-5x-buy-${wallet.slice(0, 6)}`).catch(() => {});
+      }
+      if (cat.is_kol) {
+        evaluateMintNow(e.mint, `kol-buy-${wallet.slice(0, 6)}`).catch(() => {});
+      }
+      if (cat.is_hunter) {
+        evaluateMintNow(e.mint, `hunter-buy-${wallet.slice(0, 6)}`).catch(() => {});
+      }
+    }
+
     // A2 (Phase D, 2026-05-13): ML-conviction trade reactivity.
     // If this mint has a recent high-confidence ML prediction (refreshed every
     // 30s by ml-conviction-watcher), every trade event re-fires evaluation —
@@ -546,6 +599,20 @@ function onTrade(e) {
     const mcap = e.marketCapSol || 0;
     if (isBuy && mcap >= 40 && mcap <= 70 && (mint.peak_market_cap_sol || 0) < mcap) {
       evaluateMintNow(e.mint, `pre-migration-${mcap.toFixed(0)}sol`).catch(() => {});
+    }
+
+    // EVENT: fresh-survivor — 2026-05-16. First organic buy after the sniper
+    // war winds down. Thesis: t=0-20s is pure bot bundle territory (everyone
+    // routing through the same pump.fun listener). t=20-120s is when human
+    // buyers find the coin via the UI. A non-sniper buy in that window on a
+    // <15 SOL mcap coin means "humans are discovering it before the run."
+    // This is the entry the bot has been missing — competitors aren't here
+    // yet, sniper exit isn't done, but the survival signal is appearing.
+    // Per-strategy gates handle further filtering (rug risk, buyer count).
+    const ageSecForTriggers = (now - mint.created_at) / 1000;
+    if (isBuy && !isSniper && ageSecForTriggers >= 20 && ageSecForTriggers <= 120
+        && mcap >= 2 && mcap < 15) {
+      evaluateMintNow(e.mint, `fresh-survivor-${ageSecForTriggers.toFixed(0)}s`).catch(() => {});
     }
 
     try { notifyTradeForMint(e.mint); } catch (err) { console.error('[paper] trade-trigger', err.message); }

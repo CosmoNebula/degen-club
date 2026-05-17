@@ -491,6 +491,12 @@ function runMigrations(d) {
   ensureCol(d, 'strategy_state', 'pred_exit_op',     `TEXT DEFAULT '>'`);
   ensureCol(d, 'strategy_state', 'pred_exit_value',  `REAL`);
 
+  // 2026-05-17: per-strategy moonbag reserve. When tokens_remaining/token_amount
+  // drops at or below this fraction (e.g., 0.05 = 5%), the bot stops evaluating
+  // any exit on the position — Kara closes manually for unicorn moonshots.
+  // Rug-exception fires through normal SL path. Default 0 = feature disabled.
+  ensureCol(d, 'strategy_state', 'moonbag_pct_reserve', `REAL DEFAULT 0`);
+
   d.exec(`UPDATE paper_positions SET tokens_remaining = token_amount WHERE tokens_remaining IS NULL OR tokens_remaining = 0`);
   // Removed: hardcoded-whitelist DELETE that wiped any strategy not in a stale list.
   // It nuked migratorHunter/kingFollow/preKing/quickFlip15 every time init() ran
@@ -708,6 +714,13 @@ function runMigrations(d) {
   ensureCol(d, 'ml_mint_snapshots', 'unique_buyers_next_60s', `INTEGER`);   // count of distinct buyers in (now, now+60s]
   ensureCol(d, 'ml_mint_snapshots', 'unique_sellers_next_60s', `INTEGER`);  // count of distinct sellers
   ensureCol(d, 'ml_mint_snapshots', 'local_top_60s', `INTEGER`);            // 1 if current price within 5% of max in (now-60s, now+60s]
+
+  // 2026-05-16 — CANONICAL labels (Phase 2 of label cleanup). Single source
+  // of truth for "rug" and "migrate" outcomes. Replaces wick-confused
+  // rug_within_5min + will_die_fast + drawdown_20pct_300s and the too-narrow
+  // migrates_within_15min. See src/ml/label-resolver.js for definitions.
+  ensureCol(d, 'ml_mint_snapshots', 'will_rug', `INTEGER`);                 // 1 if mint.rugged_at fires within 30min of snapshot
+  ensureCol(d, 'ml_mint_snapshots', 'will_migrate', `INTEGER`);             // 1 if mint.migrated_at within 24h of snapshot
 
   // Tier 2 #1 — Price reversal count. Beyond raw volatility, count how many
   // times the price flipped direction in the snapshot window. Choppy mints

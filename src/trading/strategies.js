@@ -343,21 +343,18 @@ export function updateStrategySettings(name, fields) {
   return getStrategy(name);
 }
 
-// Sniper-dominance threshold for the anti-snipe gate. If 60%+ of distinct
-// buyers were tagged is_sniper, the cohort is dominated by sniper bots that
-// historically dump on retail entry. Tunable — start strict, relax if we see
-// the gate rejecting too many real opportunities.
-const ANTI_SNIPE_RATIO = 0.6;
-// Don't apply the anti-snipe gate until at least N distinct buyers exist —
-// before that the ratio is noisy (1/1 = 100% sniper triggers on a single buy).
-const ANTI_SNIPE_MIN_BUYERS = 5;
+// 2026-05-15 (PM-5): anti-snipe constants moved to config.strategies.global.
+// Was hardcoded ratio=0.6 / min_buyers=5; now configurable. Per-call override
+// via opts.antiSnipeRatio / opts.antiSnipeMinBuyers (used by classical
+// strategies; agent strategies don't pass through this path).
+// MIGRATED gate removed 2026-05-15 (PM-3) — migrated coins still tradable on
+// the AMM side, and we have post-mig strategies that need to see them.
 
 function evaluateGuards(mint, opts = {}) {
   const g = config.strategies.global;
   const ageSec = (Date.now() - mint.created_at) / 1000;
   if (ageSec < g.minMintAgeSec) return { pass: false, reason: 'TOO_FRESH', detail: `${ageSec.toFixed(0)}s<${g.minMintAgeSec}s` };
   if (ageSec > g.maxMintAgeMinutes * 60) return { pass: false, reason: 'TOO_OLD', detail: `${(ageSec/60).toFixed(1)}m>${g.maxMintAgeMinutes}m` };
-  if (mint.migrated) return { pass: false, reason: 'MIGRATED' };
   if (mint.rugged) return { pass: false, reason: 'RUGGED' };
   let flags = [];
   try { flags = JSON.parse(mint.flags || '[]'); } catch {}
@@ -369,15 +366,16 @@ function evaluateGuards(mint, opts = {}) {
     if (!holder.pass) return { pass: false, reason: 'HOLDER_GATE', detail: holder.reason };
   }
   // Anti-snipe filter: reject if sniper-tagged wallets dominate the buyer
-  // cohort. Per-entry query (cheap, entries are <10/min vs position
-  // monitor's 800/sec ticks). Skip if cohort is too small to be meaningful.
+  // cohort. Thresholds read from config (opts override per-call).
   if (!opts.skipAntiSnipe) {
+    const ratioThresh = opts.antiSnipeRatio != null ? opts.antiSnipeRatio : (g.antiSnipeRatio ?? 0.6);
+    const minBuyers   = opts.antiSnipeMinBuyers != null ? opts.antiSnipeMinBuyers : (g.antiSnipeMinBuyers ?? 5);
     const row = S().sniperRatio.get(mint.mint_address);
     const uniq = row?.unique_buyers || 0;
     const snipers = row?.sniper_buyers || 0;
-    if (uniq >= ANTI_SNIPE_MIN_BUYERS) {
+    if (uniq >= minBuyers) {
       const ratio = snipers / uniq;
-      if (ratio >= ANTI_SNIPE_RATIO) {
+      if (ratio >= ratioThresh) {
         return { pass: false, reason: 'ANTI_SNIPE', detail: `${snipers}/${uniq}=${(ratio*100).toFixed(0)}%` };
       }
     }

@@ -2042,14 +2042,16 @@ export function startAgent() {
   startPostMortem();         // analyzes each closed agent paper position
   startDailyReport();        // daily recap, runs ~once/day
   startCalibrationReview();  // daily deep-review of model honesty (when data lands)
-  startMintIntel();          // hourly batch: heuristic + Claude scam/winner classifier
   startConcentrationCheck(); // every 6h: flag dominant exit_reason + diagnose
-  startMarketRegime();       // noon + midnight: aggressive/normal/cautious posture
-  // First introspection 5 min after boot
-  setTimeout(() => cycle().catch(err => console.error('[agent] cycle err:', err)), FIRST_CYCLE_DELAY_MS);
-  setInterval(() => cycle().catch(err => console.error('[agent] cycle err:', err)), CYCLE_INTERVAL_MS);
-  console.log(`[agent] started · cycle=30min · first_run=+${FIRST_CYCLE_DELAY_MS/60000}min · max_consults_per_day=${MAX_CONSULTS_PER_DAY}`);
-  logThought('info', 'introspect', null, 'agent started · in observing mode until calibration validates', null);
+  // 2026-05-17: Claude-consuming subsystems PAUSED for V2 manual-strategy test.
+  // Kara handles strategy creation/retirement directly. Re-enable by uncommenting
+  // when V2 has accumulated enough data and we want autonomous evolution back.
+  //   startMintIntel();      // hourly batch: heuristic + Claude scam/winner classifier
+  //   startMarketRegime();   // noon + midnight: aggressive/normal/cautious posture
+  //   setTimeout(() => cycle()..., FIRST_CYCLE_DELAY_MS);
+  //   setInterval(() => cycle()..., CYCLE_INTERVAL_MS);
+  console.log(`[agent] started · executor + reporting only (Claude/cycle PAUSED for V2 test)`);
+  logThought('info', 'introspect', null, 'agent started · executor-only mode (Claude paused)', null);
 }
 
 // Public for dashboard endpoints

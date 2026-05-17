@@ -43,11 +43,15 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 function fmtUsd(usd) {
-  if (!usd || usd <= 0) return '$0';
-  if (usd >= 1_000_000) return `$${(usd / 1_000_000).toFixed(2)}M`;
-  if (usd >= 1_000) return `$${(usd / 1_000).toFixed(1)}K`;
-  if (usd >= 1) return `$${usd.toFixed(2)}`;
-  return `$${usd.toFixed(4)}`;
+  if (!isFinite(usd) || usd === 0) return '$0';
+  // 2026-05-15 (PM-9): handle negatives properly (PnL display).
+  const abs = Math.abs(usd);
+  const sign = usd < 0 ? '-' : '';
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 10_000)    return `${sign}$${(abs / 1_000).toFixed(0)}k`;
+  if (abs >= 1_000)     return `${sign}$${(abs / 1_000).toFixed(1)}k`;
+  if (abs >= 1)         return `${sign}$${abs.toFixed(2)}`;
+  return `${sign}$${abs.toFixed(4)}`;
 }
 function fmtSol(sol) { return `${sol >= 0 ? '+' : ''}${sol.toFixed(3)} SOL`; }
 function fmtPct(pct) { return `${pct >= 0 ? '+' : ''}${(pct * 100).toFixed(1)}%`; }
@@ -333,6 +337,207 @@ async function checkMarketRegime() {
 // ============================================================================
 // MAIN LOOP
 // ============================================================================
+// 2026-05-15 (PM-9): hourly market report. Fires once per UTC hour after the
+// 10-minute mark (gives data time to settle). Single-flight via _lastHourlyAt.
+let _lastHourlyAt = 0;
+async function maybeHourlyReport() {
+  const now = new Date();
+  const sinceLast = Date.now() - _lastHourlyAt;
+  // Fire if (a) it's past :10 of the hour, (b) we haven't fired this hour,
+  // (c) at least 50 min has passed since the last fire (defense in depth).
+  if (now.getUTCMinutes() < 10) return;
+  if (sinceLast < 50 * 60 * 1000) return;
+  await sendHourlyMarketReport();
+  _lastHourlyAt = Date.now();
+}
+
+export async function sendHourlyMarketReport() {
+  const d = db();
+  const now = Date.now();
+  const ONE_HOUR = 3600 * 1000;
+  const cutoff = now - ONE_HOUR;
+  // 2026-05-15 (PM-9): show all $ amounts. Fallback to 1.0 (display SOL as-is)
+  // if price feed missing, but log the gap so we notice.
+  let solUsd = 0;
+  try { solUsd = (await import('../price.js')).getSolUsd() || 0; } catch {}
+  if (!solUsd) console.log('[tg-broadcast] hourly: solUsd unavailable, falling back to SOL units');
+  const usd = (sol) => solUsd > 0 ? sol * solUsd : sol;
+
+  // -------- Pump.fun macro: mints / migrations / rugs / peak distribution --------
+  const macro = d.prepare(`SELECT
+      COUNT(*) AS mints_created,
+      SUM(CASE WHEN migrated=1 AND migrated_at >= ? THEN 1 ELSE 0 END) AS migrations,
+      SUM(CASE WHEN rugged=1 AND rugged_at >= ? THEN 1 ELSE 0 END) AS rugs,
+      SUM(CASE WHEN peak_market_cap_sol >= 30  THEN 1 ELSE 0 END) AS peak_gte_30,
+      SUM(CASE WHEN peak_market_cap_sol >= 50  THEN 1 ELSE 0 END) AS peak_gte_50,
+      SUM(CASE WHEN peak_market_cap_sol >= 85  THEN 1 ELSE 0 END) AS peak_gte_85,
+      SUM(CASE WHEN peak_market_cap_sol >= 200 THEN 1 ELSE 0 END) AS peak_gte_200
+    FROM mints WHERE created_at >= ?`).get(cutoff, cutoff, cutoff);
+
+  // -------- Prior-hour macro for delta --------
+  const prevCutoff = cutoff - ONE_HOUR;
+  const prior = d.prepare(`SELECT
+      COUNT(*) AS mints_created,
+      SUM(CASE WHEN migrated=1 THEN 1 ELSE 0 END) AS migrations
+    FROM mints WHERE created_at BETWEEN ? AND ?`).get(prevCutoff, cutoff);
+
+  // -------- Top movers (peak mcap) in the window --------
+  const movers = d.prepare(`SELECT mint_address, symbol, name,
+      ROUND(peak_market_cap_sol, 1) AS peak_mcap,
+      ROUND(current_market_cap_sol, 1) AS now_mcap,
+      migrated, rugged
+    FROM mints WHERE created_at >= ?
+      AND peak_market_cap_sol >= 50
+    ORDER BY peak_market_cap_sol DESC LIMIT 5`).all(cutoff);
+
+  // -------- Bot's hour: trades, win rate, PnL --------
+  const bot = d.prepare(`SELECT
+      COUNT(*) AS trades,
+      SUM(CASE WHEN realized_pnl_sol > 0 THEN 1 ELSE 0 END) AS wins,
+      SUM(CASE WHEN realized_pnl_sol < 0 THEN 1 ELSE 0 END) AS losses,
+      ROUND(COALESCE(SUM(realized_pnl_sol),0), 4) AS pnl_sol,
+      ROUND(MAX(highest_pct), 1) AS best_peak,
+      ROUND(MIN(realized_pnl_pct), 1) AS worst_pct
+    FROM paper_positions
+    WHERE status='closed' AND exited_at >= ?`).get(cutoff);
+
+  // -------- Per-strategy rejection breakdown --------
+  const rejections = d.prepare(`SELECT strategy_id, gate_name, COUNT(*) AS n
+    FROM strategy_entry_rejections
+    WHERE rejected_at >= ?
+    GROUP BY strategy_id, gate_name
+    ORDER BY n DESC LIMIT 8`).all(cutoff);
+
+  // -------- Open positions snapshot --------
+  const openPos = d.prepare(`SELECT COUNT(*) AS n,
+      ROUND(COALESCE(SUM(entry_sol),0), 3) AS exposure_sol,
+      ROUND(MAX(highest_pct), 1) AS best_peak
+    FROM paper_positions WHERE status='open'`).get();
+
+  // -------- Compute derived rates --------
+  const minted    = macro.mints_created || 0;
+  const migCount  = macro.migrations || 0;
+  const rugCount  = macro.rugs || 0;
+  const migRate   = minted > 0 ? (migCount / minted * 100) : 0;
+  const rugRate   = minted > 0 ? (rugCount / minted * 100) : 0;
+  const peakReach = minted > 0 ? (macro.peak_gte_85 / minted * 100) : 0;
+  const priorMinted = prior?.mints_created || 0;
+  const priorMig    = prior?.migrations || 0;
+  const priorMigRate = priorMinted > 0 ? (priorMig / priorMinted * 100) : 0;
+
+  // -------- Regime classifier --------
+  let regime, regimeEmoji, regimeBlurb;
+  if (migCount === 0 && minted < 100) {
+    regime = 'DEAD ZONE';   regimeEmoji = '🟤';
+    regimeBlurb = `Almost no activity (${minted} mints/hr). Wait for the next wave.`;
+  } else if (rugRate > 8 && migRate < 0.4) {
+    regime = 'RUG CITY';    regimeEmoji = '🔴';
+    regimeBlurb = `Rug rate ${rugRate.toFixed(1)}% with only ${migRate.toFixed(2)}% migration — bots farming launches, organic demand absent. High risk for everything.`;
+  } else if (migRate >= 1.5 && macro.peak_gte_200 >= 3) {
+    regime = 'EASY MONEY';  regimeEmoji = '🟢';
+    regimeBlurb = `Migration rate ${migRate.toFixed(2)}% with ${macro.peak_gte_200} coins reaching 200+ SOL mcap — money flowing freely, organic buyers active.`;
+  } else if (migRate >= 0.8) {
+    regime = 'NORMAL';      regimeEmoji = '🔵';
+    regimeBlurb = `Healthy baseline activity. Migration rate ${migRate.toFixed(2)}% in line with weekly norm.`;
+  } else if (migRate >= 0.4) {
+    regime = 'QUIET';       regimeEmoji = '🟡';
+    regimeBlurb = `Below-average activity. Migration rate ${migRate.toFixed(2)}% — fewer runners to catch, gates correctly filtering tighter.`;
+  } else {
+    regime = 'GRINDY';      regimeEmoji = '🟠';
+    regimeBlurb = `Mints flowing (${minted}/hr) but few graduating (${migCount}). Lots of motion, little upside.`;
+  }
+
+  // -------- Hour-over-hour deltas --------
+  const mintDelta = priorMinted > 0 ? ((minted - priorMinted) / priorMinted * 100) : 0;
+  const migRateDelta = priorMigRate > 0 ? (migRate - priorMigRate) : migRate;
+  const trendArrow = mintDelta > 10 ? '↑' : mintDelta < -10 ? '↓' : '→';
+
+  // -------- Format movers (USD-denominated) --------
+  let moversBlock = '';
+  if (movers.length > 0) {
+    moversBlock = movers.map(m => {
+      const tag = m.migrated ? '🎓' : m.rugged ? '💀' : '🔥';
+      const sym = m.symbol ? `$${escapeHtml(m.symbol.slice(0,12))}` : `<code>${m.mint_address.slice(0,4)}…</code>`;
+      const retrace = m.peak_mcap > 0 && m.now_mcap > 0
+        ? `peak ${fmtUsd(usd(m.peak_mcap))} → now ${fmtUsd(usd(m.now_mcap))} (${((m.now_mcap/m.peak_mcap-1)*100).toFixed(0)}%)`
+        : `peak ${fmtUsd(usd(m.peak_mcap))}`;
+      return `  ${tag} ${sym} — ${retrace}`;
+    }).join('\n');
+  }
+
+  // -------- Format bot block (USD-denominated PnL + exposure) --------
+  const botTrades = bot?.trades || 0;
+  const botPnl    = bot?.pnl_sol || 0;
+  const botPnlUsd = usd(botPnl);
+  const botPnlEmoji = botPnl > 0 ? '🟢' : botPnl < 0 ? '🔴' : '⚪';
+  const winRate = botTrades > 0 ? ((bot.wins || 0) / botTrades * 100).toFixed(0) : '—';
+  const botBlock = botTrades > 0
+    ? `<b>${botTrades}</b> closed · <b>${bot.wins}W/${bot.losses}L</b> (${winRate}%) · ${botPnlEmoji} <b>${botPnlUsd >= 0 ? '+' : ''}${fmtUsd(botPnlUsd)}</b>${bot.best_peak ? ` · best peak ${bot.best_peak.toFixed(0)}%` : ''}`
+    : `No closed trades this hour.`;
+
+  // -------- Format rejection block (chronic blockers only) --------
+  const rejBlock = rejections.length > 0
+    ? rejections.slice(0, 5).map(r => {
+        const strat = r.strategy_id.replace(/^agent_\d{4}-\d{2}-\d{2}_/, '').replace(/-v\d+$/, '');
+        return `  • <code>${escapeHtml(strat)}</code> :: ${escapeHtml(r.gate_name)} (${r.n})`;
+      }).join('\n')
+    : '  (none)';
+
+  // -------- Compose message --------
+  const stamp = new Date(now).toISOString().slice(11, 16);
+  const priceTag = solUsd > 0 ? `  ·  SOL <b>$${solUsd.toFixed(2)}</b>` : '';
+  const lines = [
+    `${regimeEmoji} <b>MARKET REPORT · ${stamp} UTC · ${regime}</b>${priceTag}`,
+    '',
+    `<i>${escapeHtml(regimeBlurb)}</i>`,
+    '',
+    `<b>📊 Pump.fun (last 1h)</b>`,
+    `  Mints created: <b>${minted}</b> ${trendArrow} (${mintDelta >= 0 ? '+' : ''}${mintDelta.toFixed(0)}% vs prior hr)`,
+    `  Migrated: <b>${migCount}</b> · rate <b>${migRate.toFixed(2)}%</b> (${migRateDelta >= 0 ? '+' : ''}${migRateDelta.toFixed(2)}pp)`,
+    `  Rugged: <b>${rugCount}</b> · rate <b>${rugRate.toFixed(2)}%</b>`,
+    `  Peak distribution: ≥${fmtUsd(usd(30))}: ${macro.peak_gte_30} · ≥${fmtUsd(usd(50))}: ${macro.peak_gte_50} · ≥${fmtUsd(usd(85))}: ${macro.peak_gte_85} · ≥${fmtUsd(usd(200))}: ${macro.peak_gte_200}`,
+    `  Reach rate (≥${fmtUsd(usd(85))} graduation zone): <b>${peakReach.toFixed(1)}%</b>`,
+  ];
+
+  if (moversBlock) {
+    lines.push('', `<b>🚀 Top movers (peak ≥${fmtUsd(usd(50))})</b>`, moversBlock);
+  }
+
+  lines.push('',
+    `<b>🤖 Bot performance (last 1h)</b>`,
+    `  ${botBlock}`,
+    `  Open: ${openPos.n} positions · exposure <b>${fmtUsd(usd(openPos.exposure_sol))}</b>${openPos.best_peak ? ` · best unrealized peak ${openPos.best_peak.toFixed(0)}%` : ''}`,
+  );
+
+  if (rejections.length > 0) {
+    lines.push('', `<b>🚧 Top gate rejections (last 1h)</b>`, rejBlock);
+  }
+
+  // Closing diagnosis — one professional sentence tying it together
+  let diagnosis;
+  if (regime === 'EASY MONEY' && botPnl > 0) {
+    diagnosis = 'Conditions favorable, bot capturing flow. Maintain sizing.';
+  } else if (regime === 'EASY MONEY' && botTrades === 0) {
+    diagnosis = 'Favorable regime but gates not firing — review whether thresholds are missing the active candidates.';
+  } else if (regime === 'RUG CITY') {
+    diagnosis = 'Safety gates earning their keep. Avoid loosening entry criteria during this window.';
+  } else if (regime === 'DEAD ZONE') {
+    diagnosis = 'Quiet by definition. Inactivity is correct behavior here.';
+  } else if (botTrades > 0 && botPnlUsd < -50) {
+    diagnosis = 'PnL bleeding — review recent entry reasons before next firing.';
+  } else if (botTrades > 0 && botPnlUsd > 50) {
+    diagnosis = 'Strong hour. Strategies are reading the regime correctly.';
+  } else {
+    diagnosis = 'Mid-regime activity; strategies operating as designed.';
+  }
+  lines.push('', `<i>${escapeHtml(diagnosis)}</i>`);
+
+  const body = lines.join('\n');
+  const res = await sendTg(body);
+  if (res.ok) console.log(`[tg-broadcast] hourly market report: ${regime} · ${minted} mints · ${migRate.toFixed(2)}% mig · bot ${botTrades} trades / ${fmtUsd(botPnlUsd)} (SOL $${solUsd.toFixed(2)})`);
+  else console.error('[tg-broadcast] hourly send failed:', res.error || 'unknown');
+}
+
 async function tick() {
   if (_running) return;
   _running = true;
@@ -342,6 +547,7 @@ async function tick() {
     await checkLifecycleEvents();
     // checkHotMeta() — DISABLED 2026-05-12, too spammy with low-signal keyword matches
     await checkMarketRegime();
+    await maybeHourlyReport();
   } catch (err) {
     console.error('[tg-broadcast] tick err:', err.message);
   } finally { _running = false; }
@@ -363,7 +569,12 @@ function prewarmSeenSets() {
        WHERE category='lifecycle' AND level='info'
          AND timestamp > strftime('%s','now')*1000 - 24*60*60*1000`).all();
     for (const r of lifecycleRows) _lifecycleSeen.add(r.id);
-    console.log(`[tg-broadcast] prewarmed seen-sets · regime=${regimeRows.length} · lifecycle=${lifecycleRows.length}`);
+    // 2026-05-15 (PM-9): seed _lastHourlyAt to 30min ago — prevents a
+    // restart at e.g. :15 from immediately re-firing if the previous instance
+    // already sent this hour's report. Next fire will land at the next :10+
+    // mark with ≥50min since this seed.
+    _lastHourlyAt = Date.now() - 30 * 60 * 1000;
+    console.log(`[tg-broadcast] prewarmed seen-sets · regime=${regimeRows.length} · lifecycle=${lifecycleRows.length} · hourly seeded`);
   } catch (err) {
     console.error('[tg-broadcast] prewarm err:', err.message);
   }

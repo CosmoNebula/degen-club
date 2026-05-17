@@ -16,14 +16,14 @@ import { openPaperPosition } from '../trading/paper.js';
 const MIN_RESERVE_SOL = 0.05;  // never spend below this — keeps room for friction
 
 const TICK_INTERVAL_MS = 60 * 1000;       // evaluate strategies once a minute
-const ENTRY_COOLDOWN_MS = 10 * 60 * 1000; // don't re-enter same mint in same strategy within 10min
-// 2026-05-15 (PM): when a recent close on this (strategy, mint) was a
-// FAST_FAIL or FAKE_PUMP, blacklist for an extended window — these exit
-// reasons indicate the coin already failed our entry premise once.
-// Re-entering after 10min cooldown lost us double on 6pzvN5uq today
-// (-18% × 2). Re-entries on coins that hit normal tier exits / time exit
-// are still allowed (only the unconditional-failure reasons get extended).
-const FAILED_COOLDOWN_MS = 60 * 60 * 1000;
+// 2026-05-15 (PM-5): cooldowns moved from hardcoded constants → per-recipe.
+// A recipe may declare:
+//   cooldowns: { after_exit_ms: <ms>, after_fast_fail_ms: <ms> }
+//   skip_smell_test: <bool>   // bypass the universal counter-evidence veto
+// If a recipe omits these, the defaults below apply (preserves prior behavior).
+// Set after_exit_ms / after_fast_fail_ms to 0 to disable that cooldown entirely.
+const DEFAULT_ENTRY_COOLDOWN_MS  = 10 * 60 * 1000;
+const DEFAULT_FAILED_COOLDOWN_MS = 60 * 60 * 1000;
 const MAX_CANDIDATES = 30;                // mint candidates per tick
 
 let stmts = null;
@@ -94,8 +94,12 @@ function S() {
         pred_exit_target, pred_exit_op, pred_exit_value,
         dca_enabled, dca_trigger_pct, dca_size_pct,
         dca_min_age_sec, dca_max_age_min, dca_max_dca,
+        fast_fail_sec, fast_fail_min_peak_pct, fast_fail_sl_pct,
+        fakepump_sec, fakepump_min_peak_pct, fakepump_sl_pct,
+        stagnant_exit_min, stagnant_loss_pct,
+        moonbag_pct_reserve,
         updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
   };
   return stmts;
 }
@@ -306,12 +310,95 @@ function evalCondition(c, ctx) {
       // since composite by definition aggregates whatever signal is present.
       lhs = computeComposite(ctx.features, ctx.preds, ctx.sentiment, ctx.narrative, ctx.compositeWeights);
       break;
+    case 'mint_state': {
+      // 2026-05-17: gate on a column from the mints table for this mintAddress.
+      // Examples: { kind: 'mint_state', name: 'migrated', op: '=', value: 1 }
+      //           { kind: 'mint_state', name: 'rugged', op: '=', value: 0 }
+      // Cached on ctx so multiple mint_state conditions share one query.
+      if (!ctx.mintAddress) return false;
+      if (!ctx._mintState) {
+        ctx._mintState = db().prepare(
+          `SELECT migrated, rugged, migrated_at, rugged_at, peak_market_cap_sol
+           FROM mints WHERE mint_address = ?`
+        ).get(ctx.mintAddress) || {};
+      }
+      lhs = ctx._mintState[c.name];
+      if (lhs == null) return false;
+      break;
+    }
+    case 'wallet_pool': {
+      // 2026-05-17: count distinct wallets from a named pool who bought this
+      // mint within window_sec. Pools resolve dynamically via SQL — recipe
+      // stays small and stays fresh as pool membership changes.
+      if (!ctx.mintAddress) return false;
+      const windowSec = c.window_sec || 600;
+      const since = Date.now() - windowSec * 1000;
+      let sql;
+      if (c.pool === 'elite_5x') {
+        sql = `SELECT COUNT(DISTINCT t.wallet) AS n FROM trades t
+               JOIN wallet_5x_score w ON w.address = t.wallet AND w.is_elite = 1
+               WHERE t.mint_address = ? AND t.is_buy = 1 AND t.timestamp >= ?`;
+      } else if (c.pool === 'tracked') {
+        sql = `SELECT COUNT(DISTINCT t.wallet) AS n FROM trades t
+               JOIN wallets w ON w.address = t.wallet AND w.tracked = 1
+               WHERE t.mint_address = ? AND t.is_buy = 1 AND t.timestamp >= ?`;
+      } else if (c.pool === 'kol') {
+        sql = `SELECT COUNT(DISTINCT t.wallet) AS n FROM trades t
+               JOIN wallets w ON w.address = t.wallet AND w.is_kol = 1
+               WHERE t.mint_address = ? AND t.is_buy = 1 AND t.timestamp >= ?`;
+      } else {
+        return false;  // unknown pool name
+      }
+      const row = db().prepare(sql).get(ctx.mintAddress, since);
+      lhs = row?.n || 0;
+      break;
+    }
     default:
       return false;  // unknown kind — fail closed
   }
   const op = _CMP_OPS[c.op];
   if (!op) return false;
   return op(lhs, c.value);
+}
+
+// Live sniper-ratio compute for recipes that override the global 3s window.
+// Used when recipe.entry.sniper_seconds_window is set (e.g. 5 = "sniper means
+// any buy within 5s"). Overrides ctx.features.pct_sniper_buys before
+// conditions evaluate. Cheap query (per-entry, indexed by mint).
+function computeLivePctSniper(mintAddress, secondsWindow) {
+  try {
+    const row = db().prepare(
+      `SELECT COUNT(*) AS n_buys,
+              SUM(CASE WHEN seconds_from_creation <= ? THEN 1 ELSE 0 END) AS n_snipers
+       FROM trades WHERE mint_address = ? AND is_buy = 1`
+    ).get(secondsWindow, mintAddress);
+    if (!row || !row.n_buys) return null;
+    return (row.n_snipers || 0) / row.n_buys;
+  } catch { return null; }
+}
+
+function logEntryRejection(recipe, mintAddress, c, ctx, features) {
+  try {
+    const recipeName = (recipe && recipe.name) || 'unknown';
+    const actualVal = c.kind === 'ml_prediction' ? (ctx.preds?.[c.name])
+                    : c.kind === 'snapshot_feature' ? (ctx.features?.[c.name])
+                    : null;
+    const actualNum = (typeof actualVal === 'number') ? actualVal : null;
+    const mcapAtRej = features?.last_mcap_sol ?? null;
+    const ageSecAtRej = features?.snapshot_age_sec ?? null;
+    db().prepare(`INSERT INTO strategy_entry_rejections
+      (strategy_id, mint_address, gate_kind, gate_name, gate_op, threshold, actual,
+       rejected_at, reject_count, mcap_at_reject, age_sec_at_reject)
+      VALUES (?,?,?,?,?,?,?,?,1,?,?)
+      ON CONFLICT(strategy_id, mint_address, gate_name) DO UPDATE SET
+        reject_count = reject_count + 1,
+        actual = excluded.actual,
+        mcap_at_reject = excluded.mcap_at_reject,
+        age_sec_at_reject = excluded.age_sec_at_reject`).run(
+      recipeName, mintAddress, c.kind, c.name, c.op || null,
+      (typeof c.value === 'number') ? c.value : null,
+      actualNum, Date.now(), mcapAtRej, ageSecAtRej);
+  } catch {}
 }
 
 function evalEntry(recipe, mintAddress, features, preds) {
@@ -331,66 +418,92 @@ function evalEntry(recipe, mintAddress, features, preds) {
     ).get(mintAddress, ...entry.copy_trade_wallets, since);
     if (!hit) return false;
   }
-  const conds = entry.conditions || [];
-  if (conds.length === 0) return false;  // require at least one condition
 
-  // Section B: lazy-fetch context only for kinds the recipe references.
-  // Section E: composite_score implicitly needs sentiment + narrative too,
-  // so its presence triggers those fetches even without explicit gates.
-  const usesComposite = conds.some(c => c.kind === 'composite_score');
-  const ctx = { features, preds };
-  if (usesComposite || conds.some(c => c.kind === 'sentiment')) {
+  // 2026-05-15 (PM-6): per-recipe sniper window. Default snapshot value uses
+  // global 3s sniper definition. If recipe specifies a different window,
+  // recompute pct_sniper_buys live and override the feature value before
+  // conditions evaluate.
+  let effFeatures = features;
+  if (entry.sniper_seconds_window && entry.sniper_seconds_window !== 3) {
+    const livePct = computeLivePctSniper(mintAddress, entry.sniper_seconds_window);
+    if (livePct != null) effFeatures = { ...features, pct_sniper_buys: livePct };
+  }
+
+  const conds = entry.conditions || [];
+  const groups = Array.isArray(entry.condition_groups) ? entry.condition_groups : [];
+  // 2026-05-15 (PM-6): support OR-of-AND-groups via condition_groups.
+  // Backwards compat: a recipe with flat `conditions` still works (pure AND).
+  // A recipe can use ONLY condition_groups (no flat conds) — at least one
+  // group must have all its sub-conditions pass.
+  if (conds.length === 0 && groups.length === 0) return false;
+
+  // Build ctx — fetch sentiment/narrative/creator if ANY condition (flat or
+  // grouped) references them, so OR-group conditions see the same context.
+  const allConds = [...conds, ...groups.flat().filter(Boolean)];
+  const usesComposite = allConds.some(c => c?.kind === 'composite_score');
+  const ctx = { features: effFeatures, preds, mintAddress };
+  if (usesComposite || allConds.some(c => c?.kind === 'sentiment')) {
     ctx.sentiment = fetchSentimentCtx(mintAddress);
   }
-  if (usesComposite || conds.some(c => c.kind === 'narrative_match')) {
+  if (usesComposite || allConds.some(c => c?.kind === 'narrative_match')) {
     ctx.narrative = fetchNarrativeCtx(mintAddress);
   }
-  if (conds.some(c => c.kind === 'creator_stat')) ctx.creator = fetchCreatorCtx(mintAddress);
-  // Per-strategy composite weight overrides — recipe.entry.composite_weights
-  // merges over DEFAULT_COMPOSITE_WEIGHTS inside computeComposite. Skipped here
-  // if not present; composite gate gets the defaults.
+  if (allConds.some(c => c?.kind === 'creator_stat')) ctx.creator = fetchCreatorCtx(mintAddress);
   if (entry.composite_weights && typeof entry.composite_weights === 'object') {
     ctx.compositeWeights = entry.composite_weights;
   }
 
+  // Step 1: flat conditions (AND). Every flat condition must pass.
   let evaluated = 0;
   let passed = 0;
   for (const c of conds) {
     const r = evalCondition(c, ctx);
     if (r === false) {
-      // 2026-05-15: log EVERY entry rejection (first per strategy×mint×gate
-      // — dedup'd via PRIMARY KEY in strategy_entry_rejections). The mint
-      // is rejected by the FIRST failing gate, so we log one row per attempt.
-      // Subsequent ticks for the same (strategy, mint, gate) bump reject_count.
-      try {
-        const recipeName = (recipe && recipe.name) || 'unknown';
-        const actualVal = c.kind === 'ml_prediction' ? (ctx.preds?.[c.name])
-                        : c.kind === 'snapshot_feature' ? (ctx.features?.[c.name])
-                        : null;
-        const actualNum = (typeof actualVal === 'number') ? actualVal : null;
-        const mcapAtRej = features?.last_mcap_sol ?? null;
-        const ageSecAtRej = features?.snapshot_age_sec ?? null;
-        db().prepare(`INSERT INTO strategy_entry_rejections
-          (strategy_id, mint_address, gate_kind, gate_name, gate_op, threshold, actual,
-           rejected_at, reject_count, mcap_at_reject, age_sec_at_reject)
-          VALUES (?,?,?,?,?,?,?,?,1,?,?)
-          ON CONFLICT(strategy_id, mint_address, gate_name) DO UPDATE SET
-            reject_count = reject_count + 1,
-            actual = excluded.actual,
-            mcap_at_reject = excluded.mcap_at_reject,
-            age_sec_at_reject = excluded.age_sec_at_reject`).run(
-          recipeName, mintAddress, c.kind, c.name, c.op || null,
-          (typeof c.value === 'number') ? c.value : null,
-          actualNum, Date.now(), mcapAtRej, ageSecAtRej);
-      } catch {}
+      logEntryRejection(recipe, mintAddress, c, ctx, features);
       return false;
     }
     if (r === 'skip') { evaluated++; continue; }
     if (r === true) { evaluated++; passed++; }
   }
-  // Safety: if EVERY gate skipped (no real signal applied), don't enter.
-  // Strategies must have at least one core gate (ml_prediction / feature) that
-  // actually evaluates so we're never entering on pure absence-of-bad-news.
+
+  // Step 2: OR-groups. At least one group must have all sub-conditions pass.
+  if (groups.length > 0) {
+    let anyGroupPassed = false;
+    let firstFailedConditionInBestGroup = null;
+    let bestGroupReached = 0; // how many sub-conditions a group cleared before failing
+    for (const group of groups) {
+      if (!Array.isArray(group) || group.length === 0) continue;
+      let groupPassed = true;
+      let cleared = 0;
+      let failedAt = null;
+      for (const c of group) {
+        const r = evalCondition(c, ctx);
+        if (r === false) { groupPassed = false; failedAt = c; break; }
+        if (r === true || r === 'skip') cleared++;
+      }
+      if (groupPassed) {
+        anyGroupPassed = true;
+        // Count this group's passing conditions toward the safety check below
+        passed += cleared;
+        evaluated += group.length;
+        break;
+      }
+      if (cleared > bestGroupReached) {
+        bestGroupReached = cleared;
+        firstFailedConditionInBestGroup = failedAt;
+      }
+    }
+    if (!anyGroupPassed) {
+      // Log the deepest-reaching group's failing condition as the rejection
+      // (best signal of what's blocking entry).
+      if (firstFailedConditionInBestGroup) {
+        logEntryRejection(recipe, mintAddress, firstFailedConditionInBestGroup, ctx, features);
+      }
+      return false;
+    }
+  }
+
+  // Safety: at least one core gate must have actually evaluated (not all skipped).
   if (passed === 0) return false;
   return true;
 }
@@ -425,14 +538,37 @@ function computeEntrySol(recipe, preds) {
   const sizing = recipe.sizing || {};
   let sol = sizing.sol || 0.13;
   if (sizing.type === 'scaled_by_peak_pct' && preds.peak_pct_max != null) {
-    // peak_pct_max is a fraction (1.0 = 100% peak). The agent decides if/how
-    // to scale — only honor the recipe's own max_sol if it set one.
+    // Legacy path — kept for backwards compat. peak_pct_max is a fraction
+    // (1.0 = 100% peak); scale base SOL by (1 + pred), floor 0.5x.
     const mult = Math.max(0.5, 1 + preds.peak_pct_max);
     sol = sol * mult;
     if (sizing.max_sol) sol = Math.min(sol, sizing.max_sol);
   }
-  // Floor only. No ceiling — let the agent size as crazy as it wants.
-  // The cash-availability check downstream is the only real constraint.
+  // 2026-05-15 (PM-6): generic confidence-weighted sizing.
+  //   sizing: {
+  //     type: 'confidence_weighted',
+  //     sol: 0.18,                        // base
+  //     confidence_scale_by: 'hits_2x_within_1h',  // any ML target name
+  //     scale_direction: 'positive' | 'inverse',   // default 'positive'
+  //     min_mult: 0.5,
+  //     max_mult: 2.0,
+  //   }
+  // 'positive': higher prediction → larger size (e.g. hits_2x: 0.5 prob → 1x, 1.0 → 1.5x)
+  // 'inverse':  higher prediction → smaller size (e.g. rug_within_5min: 0 → 1.5x, 1 → 0.5x)
+  if (sizing.type === 'confidence_weighted' && sizing.confidence_scale_by) {
+    const predVal = preds[sizing.confidence_scale_by];
+    if (typeof predVal === 'number') {
+      const inverse = sizing.scale_direction === 'inverse';
+      let mult = inverse ? (1.5 - predVal) : (0.5 + predVal);
+      const minM = sizing.min_mult ?? 0.5;
+      const maxM = sizing.max_mult ?? 2.0;
+      mult = Math.max(minM, Math.min(maxM, mult));
+      sol = sol * mult;
+      if (sizing.max_sol) sol = Math.min(sol, sizing.max_sol);
+    }
+  }
+  // Floor only. No ceiling beyond per-recipe max_sol — cash-availability
+  // check downstream is the only real constraint.
   return Math.max(0.01, sol);
 }
 
@@ -517,6 +653,17 @@ function syncStrategyStateRow(strategyId, recipe) {
     dca.min_age_sec || 60,
     dca.max_age_min || 30,
     dca.max_dca || 1,
+    // 2026-05-17: explicit zeros for legacy auto-exit modes (fast_fail / fakepump
+    // / stagnant). Schema column defaults are non-zero (60s / 120s / 3min) and
+    // were silently riding along on V2 recipes that don't specify them. Recipe
+    // is the sole source of truth for exit logic — recipe's stop_loss_pct,
+    // tiers, trailing_stop, and max_hold_min own the position.
+    0, 0, 0,    // fast_fail_sec, fast_fail_min_peak_pct, fast_fail_sl_pct
+    0, 0, 0,    // fakepump_sec, fakepump_min_peak_pct, fakepump_sl_pct
+    0, 0,       // stagnant_exit_min, stagnant_loss_pct
+    // 2026-05-17: per-strategy moonbag reserve (0..1 fraction of original bag
+    // that the bot stops touching once remaining hits this floor).
+    Math.max(0, Math.min(0.5, exit.moonbag_pct_reserve || 0)),
     Date.now(),
   );
 }
@@ -535,28 +682,42 @@ async function evaluateOneMint(strategy, mintAddress) {
   // a universal counter-evidence veto. Catches adverse signals (shill, bundle,
   // whale capture, dev dumping) that strategies might miss because they don't
   // explicitly gate on them.
-  const sentForVeto = fetchSentimentCtx(mintAddress);
-  const vetoReason = smellTestVeto(features, sentForVeto);
-  if (vetoReason) {
-    db().prepare(`INSERT INTO ml_agent_log (timestamp, level, category, strategy_id, message, data_json)
-       VALUES (?, 'thought', 'execute', ?, ?, ?)`).run(
-      Date.now(), strategy.id,
-      `smell-test veto · ${vetoReason}`,
-      JSON.stringify({ mint: mintAddress, veto: vetoReason }));
-    return false;
+  // 2026-05-15 (PM-5): recipes can opt out via `skip_smell_test: true` — e.g.
+  // a momentum strategy that explicitly accepts higher whale concentration
+  // because the agent has learned that's not predictive in its regime.
+  if (!recipe.skip_smell_test) {
+    const sentForVeto = fetchSentimentCtx(mintAddress);
+    const vetoReason = smellTestVeto(features, sentForVeto);
+    if (vetoReason) {
+      db().prepare(`INSERT INTO ml_agent_log (timestamp, level, category, strategy_id, message, data_json)
+         VALUES (?, 'thought', 'execute', ?, ?, ?)`).run(
+        Date.now(), strategy.id,
+        `smell-test veto · ${vetoReason}`,
+        JSON.stringify({ mint: mintAddress, veto: vetoReason }));
+      return false;
+    }
   }
   // Hard dedup: never double up on a mint we already hold on this strategy.
   const alreadyHeld = S().openOnMint.get(strategy.id, mintAddress);
   if (alreadyHeld) return false;
+  // 2026-05-15 (PM-5): cooldowns now per-recipe. recipe.cooldowns.after_exit_ms
+  // and after_fast_fail_ms override the defaults. Set to 0 to disable.
+  const cd = recipe.cooldowns || {};
+  const entryCooldownMs = cd.after_exit_ms != null ? cd.after_exit_ms : DEFAULT_ENTRY_COOLDOWN_MS;
+  const failedCooldownMs = cd.after_fast_fail_ms != null ? cd.after_fast_fail_ms : DEFAULT_FAILED_COOLDOWN_MS;
   // Post-exit cooldown — don't re-enter immediately after we just closed it.
-  const cutoff = Date.now() - ENTRY_COOLDOWN_MS;
-  const recent = S().recentEntry.get(strategy.id, mintAddress, cutoff);
-  if (recent) return false;
+  if (entryCooldownMs > 0) {
+    const cutoff = Date.now() - entryCooldownMs;
+    const recent = S().recentEntry.get(strategy.id, mintAddress, cutoff);
+    if (recent) return false;
+  }
   // Extended-cooldown for already-failed coins (FAST_FAIL/FAKE_PUMP/SL_HIT).
   // These exit reasons indicate the entry premise failed; re-entering soon
-  // after typically just doubles the loss. 1h blacklist.
-  const failedCutoff = Date.now() - FAILED_COOLDOWN_MS;
-  const recentFail = S().recentFailedExit.get(strategy.id, mintAddress, failedCutoff);
+  // after typically just doubles the loss.
+  const failedCutoff = Date.now() - failedCooldownMs;
+  const recentFail = failedCooldownMs > 0
+    ? S().recentFailedExit.get(strategy.id, mintAddress, failedCutoff)
+    : null;
   if (recentFail) return false;
   const sol = computeEntrySol(recipe, preds);
   // Use last_price_sol from features as entry price
@@ -580,6 +741,11 @@ async function evaluateOneMint(strategy, mintAddress) {
     entryPrice,
     entrySol: sol,
     entryMcap: features.last_mcap_sol || 0,
+    // 2026-05-15 (PM-8): max_entry_slippage_pct per-recipe — paper.js reads
+    // this to override config.safety.maxEntrySlippagePct (default 0.17 = 17%).
+    // Recipe declares e.g. `entry.max_entry_slippage_pct: 0.35` to accept
+    // larger drift between trigger and fill (fast-moving pump.fun coins).
+    maxEntrySlippagePct: recipe.entry?.max_entry_slippage_pct,
     signalDetails: { agent_strategy: strategy.id, agent_recipe_name: recipe.name, predictions: preds },
   });
   if (positionId) {

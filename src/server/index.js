@@ -88,19 +88,20 @@ export function startServer(getIngestionStatus) {
   app.get('/api/ticker', (req, res) => {
     const d = db();
     try {
+      const paperWallet = d.prepare('SELECT * FROM paper_wallet WHERE id = 1').get() || {};
+      const sessionStart = paperWallet.started_at || 0;
       const open = d.prepare(`SELECT id, mint_address, strategy, position_mode, entry_sol, entry_price, entered_at,
           (SELECT last_price_sol FROM mints WHERE mint_address = pp.mint_address) AS cur_price
         FROM paper_positions pp
-        WHERE status = 'open' ORDER BY entered_at DESC LIMIT 30`).all();
+        WHERE status = 'open' AND entered_at >= ? ORDER BY entered_at DESC LIMIT 30`).all(sessionStart);
       const closed = d.prepare(`SELECT id, mint_address, strategy, position_mode, entry_sol, realized_pnl_sol, realized_pnl_pct, exit_reason, exited_at
-        FROM paper_positions WHERE status = 'closed' ORDER BY exited_at DESC LIMIT 30`).all();
-      const paperWallet = d.prepare('SELECT * FROM paper_wallet WHERE id = 1').get() || {};
+        FROM paper_positions WHERE status = 'closed' AND entered_at >= ? ORDER BY exited_at DESC LIMIT 30`).all(sessionStart);
       const totals = d.prepare(`SELECT
           COALESCE(SUM(CASE WHEN position_mode='paper' THEN realized_pnl_sol ELSE 0 END),0) AS paperPnl,
           COALESCE(SUM(CASE WHEN position_mode='live'  THEN realized_pnl_sol ELSE 0 END),0) AS livePnl,
           SUM(CASE WHEN position_mode='paper' THEN 1 ELSE 0 END) AS paperN,
           SUM(CASE WHEN position_mode='live'  THEN 1 ELSE 0 END) AS liveN
-        FROM paper_positions WHERE status='closed' AND entered_at >= ?`).get(paperWallet.started_at || 0);
+        FROM paper_positions WHERE status='closed' AND entered_at >= ?`).get(sessionStart);
       res.json({ open, closed, totals, t: Date.now() });
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
@@ -691,21 +692,22 @@ export function startServer(getIngestionStatus) {
 
   app.get('/api/positions', (req, res) => {
     const d = db();
+    const sessionStart = d.prepare('SELECT started_at FROM paper_wallet WHERE id = 1').get()?.started_at || 0;
     const open = d.prepare(`
       SELECT pp.*, m.symbol, m.name, m.image_uri, m.current_market_cap_sol, m.last_price_sol,
              m.migrated, m.rugged, m.last_price_source, m.last_price_source_at
       FROM paper_positions pp
       LEFT JOIN mints m ON m.mint_address = pp.mint_address
-      WHERE pp.status = 'open'
+      WHERE pp.status = 'open' AND pp.entered_at >= ?
       ORDER BY pp.entered_at DESC
-    `).all();
+    `).all(sessionStart);
     const recent = d.prepare(`
       SELECT pp.*, m.symbol, m.name
       FROM paper_positions pp
       LEFT JOIN mints m ON m.mint_address = pp.mint_address
-      WHERE pp.status = 'closed'
+      WHERE pp.status = 'closed' AND pp.entered_at >= ?
       ORDER BY pp.exited_at DESC LIMIT 100
-    `).all();
+    `).all(sessionStart);
     res.json({ open, recent });
   });
 

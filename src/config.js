@@ -231,7 +231,10 @@ volumeSurge: {
     maxPerTradeSol: 0.25,
     dailyMaxLossSol: 0.5,
     minWalletSolFloor: 0.05,
-    maxEntrySlippagePct: 0.17,
+    // 2026-05-16: slippage gate effectively disabled per user. 17% was killing
+    // legitimate fast-moving entries on tracker/hunter triggers. Recipes can
+    // still set `entry.max_entry_slippage_pct` to a tighter value if they want.
+    maxEntrySlippagePct: 1.0,
   },
 
   paper: {
@@ -269,6 +272,11 @@ volumeSurge: {
       winCooldownMinutes: 8,
       smartTradeMinMcapSol: 42,
       smartTradeMcapFloorBypassBoost: true,
+      // 2026-05-15 (PM-5): anti-snipe thresholds promoted from hardcoded
+      // constants in src/trading/strategies.js → config. Classical strategies
+      // use these as defaults; agent strategies don't pass through evaluateGuards.
+      antiSnipeRatio: 0.6,
+      antiSnipeMinBuyers: 5,
     },
     holderGate: {
       enabled: true,

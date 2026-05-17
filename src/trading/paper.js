@@ -306,7 +306,7 @@ function applySellFriction(tokens, price, ctx = null) {
   return sol;
 }
 
-export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol, entryMcap, signalDetails, entryScore, positionMode = 'paper' }) {
+export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol, entryMcap, signalDetails, entryScore, positionMode = 'paper', maxEntrySlippagePct }) {
   if (!entryPrice || entryPrice <= 0) return null;
   // Agent strategies (`agent_*`) bypass the dashboard "Max / Trade" cap — the
   // agent gets full creative latitude on sizing. Available paper cash is the
@@ -411,7 +411,9 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
         const m = s.getMint.get(mintAddress);
         const fillPrice = (m && m.last_price_sol > 0) ? m.last_price_sol : entryPrice;
         const drift = (fillPrice - entryPrice) / entryPrice;
-        const maxDrift = config.safety?.maxEntrySlippagePct ?? 0.17;
+        // 2026-05-16: slippage check is strategy-OWNED now. Only fires if the
+        // recipe explicitly sets entry.max_entry_slippage_pct. No global default.
+        const maxDrift = (typeof maxEntrySlippagePct === 'number') ? maxEntrySlippagePct : Infinity;
         if (drift > maxDrift) {
           const updNow = Date.now();
           db().prepare(`UPDATE paper_positions SET status = 'closed', exit_reason = ?, exited_at = ?, updated_at = ?, realized_pnl_sol = 0, realized_pnl_pct = 0, pending_fill = 0 WHERE id = ?`)
@@ -458,7 +460,8 @@ export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol,
   const mintNow = s.getMint.get(mintAddress);
   const fillPrice = (mintNow && mintNow.last_price_sol > 0) ? mintNow.last_price_sol : entryPrice;
   const drift = entryPrice > 0 ? (fillPrice - entryPrice) / entryPrice : 0;
-  const maxDrift = config.safety?.maxEntrySlippagePct ?? 0.17;
+  // 2026-05-16: strategy-owned slippage. No global default.
+  const maxDrift = (typeof maxEntrySlippagePct === 'number') ? maxEntrySlippagePct : Infinity;
   if (drift > maxDrift) {
     const stamp = Date.now();
     const abortResult = s.insertPosition.run(
@@ -863,17 +866,31 @@ function checkPosition(p) {
     }
   }
 
+  // 2026-05-17: GLOBAL moonbag disabled. Kara wants each strategy to own its
+  // moonbag logic via recipe.exit.moonbag_pct_reserve. Old auto-conversion
+  // at migration triggered confusing exits that fought the strategy's intent.
+  // Preserved is_moonbag branch for any LEGACY positions still flagged (none
+  // in current paper state — wiped at V2 reset — but defensive).
   if (p.is_moonbag) {
     return checkMoonbag(p, m);
   }
-
-  if (m.migrated && config.moonbag.enabled && (p.tokens_remaining || 0) > 0) {
-    convertToMoonbag(p, m);
-    return;
-  }
+  // (auto-convert at migration intentionally removed — was:
+  //   if (m.migrated && config.moonbag.enabled && tokens_remaining > 0) convertToMoonbag)
 
   const strat = s.getStrategy.get(p.strategy);
   if (!strat) return;
+
+  // 2026-05-17: per-strategy moonbag mode. Once remaining bag drops at or
+  // below moonbag_pct_reserve fraction of original tokens, bot stops touching
+  // the position — manual close only. Rug-exception: if mint rugged, fall
+  // through so SL/price catches the worthless tokens cleanly.
+  const moonbagReserve = strat.moonbag_pct_reserve || 0;
+  if (moonbagReserve > 0 && (p.token_amount || 0) > 0 && !m.rugged) {
+    const remainingFraction = (p.tokens_remaining || 0) / p.token_amount;
+    if (remainingFraction <= moonbagReserve) {
+      return;  // hands-off — Kara owns this bag
+    }
+  }
 
   const currentPrice = m.last_price_sol || p.entry_price;
   // Sanity guard: pump.fun mints legitimately peak around +500-1000% on
