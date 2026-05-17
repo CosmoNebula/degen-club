@@ -28,8 +28,10 @@ const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const MEGA_BIN_DIR = process.env.MEGA_BIN_DIR
   || (process.platform === 'darwin' ? '/Applications/MEGAcmd.app/Contents/MacOS' : '/usr/bin');
 const MEGA_REMOTE_DIR = '/degen-club-archives';
+const MEGA_SUMMARY_DIR = '/degen-club-archives/summaries';
 const VENV_PYTHON = path.join(PROJECT_ROOT, 'ml', '.venv', 'bin', 'python');
 const DUMP_SCRIPT = path.join(PROJECT_ROOT, 'ml', 'scripts', 'dump_trades_parquet.py');
+const SUMMARY_SCRIPT = path.join(PROJECT_ROOT, 'ml', 'scripts', 'dump_day_summary.py');
 const DB_PATH = path.join(PROJECT_ROOT, 'data', 'degen.db');
 const STAGING_DIR = path.join(PROJECT_ROOT, 'data', 'archive', 'staging');
 
@@ -134,7 +136,56 @@ async function archiveDay(day) {
   // 5. delete local staging file (it's safe in MEGA now)
   try { fs.unlinkSync(stagingPath); } catch {}
 
+  // 6. cliff-notes summary (2026-05-17). Compact gzipped JSON capturing the
+  //    day's activity at a level that lets us answer "what happened on
+  //    YYYY-MM-DD" without downloading the 200MB Parquet. Best-effort —
+  //    if this step fails we don't fail the whole archive (raw Parquet is
+  //    the source of truth; summary is convenience).
+  try {
+    await generateAndUploadSummary(day);
+  } catch (err) {
+    console.error(`[archive] summary for ${day} failed (non-fatal): ${err.message}`);
+  }
+
   return { day, rows: info.rows, size_bytes: info.size_bytes };
+}
+
+// Generate the cliff-notes JSON, upload to MEGA, record in manifest. Idempotent —
+// will replace an existing summary for the day if called again.
+async function generateAndUploadSummary(day) {
+  const summaryPath = path.join(STAGING_DIR, `summary-${day}.json.gz`);
+  const remotePath = `${MEGA_SUMMARY_DIR}/summary-${day}.json.gz`;
+
+  const dump = await exec(VENV_PYTHON, [SUMMARY_SCRIPT, '--db', DB_PATH, '--day', day, '--out', summaryPath]);
+  let info;
+  try { info = JSON.parse(dump.stdout.trim().split('\n').pop()); }
+  catch (e) { throw new Error(`summary dump JSON parse: ${dump.stdout}`); }
+
+  // mega-put -c creates intermediate dirs. Need to create the summaries dir once
+  // — subsequent uploads land in it directly. If mkdir errors because it already
+  // exists, ignore.
+  try { await exec(`${MEGA_BIN_DIR}/mega-mkdir`, ['-p', MEGA_SUMMARY_DIR]); }
+  catch { /* dir already exists */ }
+
+  await exec(`${MEGA_BIN_DIR}/mega-put`, ['-c', summaryPath, remotePath]);
+
+  db().prepare(`INSERT OR REPLACE INTO cliff_notes_manifest
+    (date_key, rows_mints, size_bytes, summary_path, mega_path, generated_at)
+    VALUES (?, ?, ?, ?, ?, ?)`).run(
+    day, info.rows_mints, info.size_bytes, summaryPath, remotePath, Date.now()
+  );
+
+  // Delete local staging (file is in MEGA now)
+  try { fs.unlinkSync(summaryPath); } catch {}
+
+  console.log(`[archive] ✓ summary ${day} · ${info.rows_mints} mints · ${(info.size_bytes/1024).toFixed(1)} KB → ${remotePath}`);
+  return { day, rows_mints: info.rows_mints, size_bytes: info.size_bytes };
+}
+
+// Public: regenerate the summary for a specific day on demand. Used by the
+// backfill script and any one-off "rebuild summary for day X" need.
+export async function regenerateSummary(day) {
+  return generateAndUploadSummary(day);
 }
 
 // Public: archive all unarchived days. Called by intelligence-condensate

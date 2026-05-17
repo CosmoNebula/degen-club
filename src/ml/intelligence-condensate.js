@@ -31,7 +31,7 @@ const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const FIRST_RUN_DELAY_MS = 90 * 1000;
 
 // Retention windows
-const TRADES_RETENTION_HOURS = 48;          // 2026-05-12 (VM): 12h→48h. VM has 160GB disk + better CPU; wider window lets migrator-hunter/KOL/wallet-activity queries see 2-day behavior. Older raw trades are archived to MEGA Parquet by cold-archive.js before pruning, so we never lose source data.
+const TRADES_RETENTION_HOURS = 14 * 24;     // 2026-05-17: 48h → 14d. Caught a silent bug — wallet_5x_score worker queries trades over 8 days (`LOOKBACK_MS = 8 * 24 * 3600 * 1000`) to compute elite wallets' hit rate on 5x runners. 48h retention starved this consumer; the elite pool would have silently degraded as 6-day-old context disappeared. 14d (336h) covers 5x scorer + 2-day safety margin. Older trades are archived to MEGA Parquet by cold-archive.js before pruning, so we never lose source data.
 const PREDICTIONS_RETENTION_DAYS = 7;        // 2026-05-12 (VM): 2d→7d. Calibration uses LIMIT 50k per target so longer retention is cheap; drift monitor benefits from wider outcome-history window.
 const LIVE_CONDITIONS_RETENTION_DAYS = 3;
 const FRICTION_LOG_RETENTION_DAYS = 7;

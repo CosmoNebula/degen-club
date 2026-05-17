@@ -19,7 +19,14 @@ export function init() {
   _db = new Database(config.dbPath, { timeout: 30000 }); // 30s busy_timeout — workers contend on writes
   _db.pragma('journal_mode = WAL');
   _db.pragma('synchronous = NORMAL');
-  _db.pragma('wal_autocheckpoint = 1000'); // keep WAL bounded
+  _db.pragma('wal_autocheckpoint = 1000'); // try checkpoint every 1000 pages
+  // 2026-05-17: HARD CAP on WAL file size. journal_size_limit truncates the
+  // WAL back to this size after checkpointing. Without it, WAL grew to 14 GB
+  // (with the 13 GB main DB → 27 GB total on disk) because long-running
+  // reader connections kept pinning pages and autocheckpoint couldn't
+  // reclaim file space. 1 GB cap keeps disk bounded; if writers exceed the
+  // limit transiently they back-pressure naturally.
+  _db.pragma('journal_size_limit = 1073741824'); // 1 GB
   _db.pragma('mmap_size = 268435456');     // 256MB mmap for large reads
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   _db.exec(schema);
@@ -496,6 +503,22 @@ function runMigrations(d) {
   // any exit on the position — Kara closes manually for unicorn moonshots.
   // Rug-exception fires through normal SL path. Default 0 = feature disabled.
   ensureCol(d, 'strategy_state', 'moonbag_pct_reserve', `REAL DEFAULT 0`);
+
+  // 2026-05-17: cliff-notes summary archive. One compact gzipped JSON per UTC
+  // day capturing the day's activity (per-mint lifecycle outcomes + aggregates
+  // + strategy performance). ~50-200 KB per day vs ~200 MB for raw Parquet,
+  // so we can pull historical context without re-downloading huge files.
+  // Lives alongside raw archives in Mega at /degen-club-archives/summaries/.
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS cliff_notes_manifest (
+      date_key TEXT PRIMARY KEY,
+      rows_mints INTEGER NOT NULL,
+      size_bytes INTEGER,
+      summary_path TEXT,
+      mega_path TEXT,
+      generated_at INTEGER NOT NULL
+    );
+  `);
 
   d.exec(`UPDATE paper_positions SET tokens_remaining = token_amount WHERE tokens_remaining IS NULL OR tokens_remaining = 0`);
   // Removed: hardcoded-whitelist DELETE that wiped any strategy not in a stale list.
