@@ -4,7 +4,16 @@ import { config } from '../config.js';
 
 const HELIUS_RPC = () => `https://mainnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
 const PUBLIC_RPC = () => process.env.PUBLIC_RPC_URL || 'https://api.mainnet-beta.solana.com';
-const PUBLIC_WS = () => process.env.PUBLIC_WS_URL || 'wss://api.mainnet-beta.solana.com';
+// 2026-05-17: prefer Helius WSS when API key is configured. The public Solana
+// RPC (api.mainnet-beta.solana.com) kicks WSS clients on a regular ~60s
+// cadence — every drop loses subscription state until reconnect (~3s).
+// Helius Developer tier keeps connections alive. Falls back to PUBLIC_WS_URL
+// if the Helius key isn't set. Same pattern as onchain-amm-price.js.
+const PUBLIC_WS = () => {
+  const key = config.heliusApiKey || process.env.HELIUS_API_KEY;
+  if (key) return `wss://mainnet.helius-rpc.com/?api-key=${key}`;
+  return process.env.PUBLIC_WS_URL || 'wss://api.mainnet-beta.solana.com';
+};
 
 export async function checkCashbackFlag(bondingCurveKey) {
   if (!bondingCurveKey) return null;
