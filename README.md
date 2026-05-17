@@ -1,249 +1,204 @@
 # Degen Club :: Monkeys Funhouse 🐒
 
-An **autonomous, self-evolving ML trading agent** for Solana pump.fun memecoins. The bot collects forward-only training data, retrains 15 probability models as new labels resolve, and runs an LLM-in-the-loop agent that **proposes, deploys, modifies, and retires its own trading strategies** based on what it has learned.
-
-No human-coded strategies. The agent owns the entry filters, sizing, stop-losses, take-profit ladders, trailing stops, DCA, and exit logic. The only hard human switch is flipping paper → live trading.
+A Solana Pump.fun trading bot that runs on real-time on-chain data, eight calibrated ML probability models, and a small set of hand-picked trading strategies. Built for paper-first testing with live-execution-grade simulation, designed to flip to live trading without surprises.
 
 ```
-[ Helius WS / PumpPortal / on-chain decoder ] ──► mints + trades
-                  │
-                  ▼
-[ Snapshot sweeper @ 60s/300s/900s/3600s ] ──► ml_mint_snapshots
-                  │
-                  ▼
-[ Label resolver (6h forward window) ] ──► 15 labels per snapshot
-                  │
-                  ▼
-[ Adaptive retrain (hourly backstop + new-labels + drawdown triggers) ]
-                  │
-                  ▼
-[ Python FastAPI inference @ :5050 + on-disk hot-swap models ]
-                  │
-                  ▼
-[ Continuous scoring sweep @ 60s ] ──► ml_predictions
-                  │
-                  ▼
-[ Autonomous Agent (Claude-powered reasoning) ]
-   ├── 30-min cycle: orphan-retire, evolutionary-retire, modify, propose
-   ├── 3h batch post-mortems (cross-trade pattern recognition)
-   ├── 6h exit-reason concentration check (catches systemic failure modes)
-   ├── hourly mint-metadata intel (heuristic + Claude on borderline)
-   ├── daily report card + calibration honesty audit + intelligence condensate
-   ├── noon + midnight market regime check (aggressive/normal/cautious)
-   └── all reasoning + decisions logged to ml_agent_log
-                  │
-                  ▼
-[ TG broadcaster (userbot via gramjs MTProto) ]
-   └── high-conviction entries posted to Telegram for call-tracker indexing (Phanes-compatible)
+[ Helius WS · PumpPortal · on-chain decoder ]
+                │ mints + trades firehose
+                ▼
+[ Snapshot sweeper · 9 age windows {15s, 30s, 60s, 2m, 5m, 10m, 15m, 30m, 1h} ]
+                │
+                ▼
+[ ml_mint_snapshots · ~135 features per snapshot ]
+                │
+                ▼
+[ Label resolver · backfills 8 canonical outcomes once trajectory plays out ]
+                │
+                ▼
+[ Hourly retrain · Python sklearn HistGradientBoosting · chunked extract ]
+                │
+                ▼
+[ FastAPI inference @ :5050 · hot-swap models · 2s feature cache ]
+                │
+                ▼
+[ Strategy executor · 4 hand-picked recipes · event-driven + 60s sweep ]
+                │
+                ▼
+[ Paper monitor · 250ms tick · sim'd 500ms fill latency · slippage + sandwich + fees ]
 ```
-
-Dashboards at:
-- `http://localhost:4200/` — live trading view, paper PnL, strategy state, network health
-- `http://localhost:4200/ml` — ML lab: data quality, drift alerts, calibration, consult budget, agent thoughts feed
 
 ---
 
-## Architecture
+## The V2 rebuild (May 2026)
 
-### Data pipeline
-- **Ingestion** — PumpPortal websocket for new-mint events; Helius webhooks for tracked-wallet trades; on-chain Pump.fun program log decoder for the full trade firehose.
-- **Snapshots** — Every active mint gets feature snapshots captured at 60s, 300s, 900s, and 3600s of age. Forward-only — no retroactive feature extraction, no survivor bias.
-- **Labels** — After a 6-hour resolution window, each snapshot gets labeled with what actually happened. Resolves 15 targets per snapshot.
-- **Price defense** — Four writers can touch `mints.last_price_sol` (processor, on-chain WS, dexscreener, migrated-tracker). All four enforce a sub-floor price guard. The on-chain WS short-circuits the moment `curve.complete=true` to avoid pushing stale bond-curve final-state ticks after migration.
-- **Friction model** — Realistic exit costs computed live: bonding-curve slippage, sandwich risk, RPC latency p50 (paper fills) and p90 (network-health alerts), priority-fee p99 scoped to the Pump.fun program.
+The bot was originally designed as an autonomous Claude-driven agent that proposed, modified, and retired its own strategies. Over a few weeks of paper testing the autonomous loop produced 39 generations of overlapping recipes with deteriorating calibration. The May 16/17 rebuild paused the autonomous loop, rebuilt the ML stack on canonical outcome definitions, and replaced the strategy population with 4 hand-picked recipes designed for non-overlap and runner-friendly exits.
 
-### ML system
+### What changed
 
-15 training targets, mode-aware (pre-migration vs post-migration):
+**ML stack — 32 overlapping labels collapsed into 8 canonical targets.**
 
-| Target | Type | What it predicts |
+The earlier label set had wick-confused rug detection (predicted 30% rug rate, actual 0.7%), overlapping migration definitions, and label name conflicts that broke retraining. The canonical set ties each label to a single authoritative source in the `mints` table:
+
+| Target | Definition | Used for |
 |---|---|---|
-| `peaked_30` | binary | Will it peak +30% post-snapshot |
-| `peaked_100` | binary | Will it peak +100% |
-| `peaked_300` | binary | Will it peak +300% |
-| `migrated` | binary | Will it graduate to Raydium / PumpSwap AMM |
-| `migrates_within_15min` | binary | Same but on a 15-min clock |
-| `will_die_fast` | binary | Will it peak <+15% within 30 min and go quiet |
-| `rug_within_5min` | binary | Sudden price-collapse risk |
-| `hits_2x_within_1h` | binary | 2x within an hour |
-| `peak_pct_max` | regression (log1p) | Max % gain post-snapshot |
-| `time_to_peak_sec` | regression (log1p) | Seconds from snapshot to peak |
-| `time_to_peak_5x_sec` | regression | Seconds to 5x specifically |
-| `drawdown_from_peak_pct` | regression | How far below peak we are at snapshot time (the agent's main "don't buy bags" signal) |
-| `post_mig_hits_2x` | binary | Post-migration 2x prediction |
-| `post_mig_peak_pct` | regression | Post-migration max gain |
-| `post_mig_rugs_1h` | binary | Post-migration rug risk |
+| `will_rug` | `mint.rugged_at` set within window (85% drop from peak + 10min quiet) | Rug filter on every strategy |
+| `will_migrate` | `mint.migrated_at` set within 24h | Pre-migration graduation prediction |
+| `hits_2x_within_1h` | Mint reaches +100% within 1 hour | Short-term momentum signal |
+| `hits_5x_within_24h` | Mint reaches +400% within 24 hours | Moonshot detection (rare, sparse) |
+| `peak_pct_within_24h` | Poisson-regressed expected peak | Size scaling for confidence-weighted entries |
+| `local_top_60s` | Price is the local top within next 60s | Exit-timing signal |
+| `buy_pressure_continues_60s` | Net-buy ratio sustains in next minute | Entry confirmation |
+| `post_mig_hits_2x` | Post-migration 2x within window | AMM-runner detection (post-migration only) |
 
-- **HistGradientBoosting** (sklearn) — handles NaN natively, calibrated probabilities via isotonic CalibratedClassifierCV.
-- **Time-based train/val split** (80/20, no shuffle) — prevents look-ahead bias.
-- **Adaptive retrain** with three triggers:
-  - Hourly backstop (always fires)
-  - ≥50 new labels AND ≥30 min since last train
-  - 24h closed PnL ≤ -2 SOL OR ≤ -15% of starting balance
-- **Drift monitor** snapshots metrics on every retrain. Surfaces alerts when AUC-ROC, AUC-PR, or R² regress vs the rolling baseline.
-- **Training thread cap** — Python subprocess runs with `OMP_NUM_THREADS=2` + `renice +10` to prevent CPU saturation on the host machine.
+All eight models retrained on a backfilled 1.42M-row snapshot table. `will_rug` calibration is now tight: predicts 3.4%, actual 3.4% (vs the prior model's 30% / 0.7% gap that was killing real entries).
 
-### Inference bridge
-- Node ↔ Python via FastAPI on `localhost:5050`.
-- All 15 models served via `/predict-all` (one HTTP roundtrip per scoring sweep).
-- Watchdog auto-restarts `serve.py` if unhealthy.
-- Every prediction logged to `ml_predictions` for audit + calibration backtest.
+**Strategy system — 4 hand-picked, anti-overlap.**
 
-### Autonomous agent
+| Recipe | Niche | Distinguishing gate |
+|---|---|---|
+| `elite-stack-v2` | Elite-wallet alpha + ML safety net | `wallet_pool: elite_5x >= 1` |
+| `pre-mig-conviction-v1` | 4-ML-signal graduation stack | `will_migrate >= 0.08` (high) |
+| `ml-momentum-v1` | Pure 2x pumpers that don't graduate | `will_migrate < 0.05` (anti-overlap) |
+| `post-mig-runner-v1` | Already-migrated AMM runners | `mint_state: migrated = 1` |
 
-Powered by the Claude CLI as a subprocess (subscription auth via OAuth, not an API key). Built from these modules:
+Each strategy lives in its own slice of trigger / time-horizon space, designed so they don't fire on the same coins.
 
-| File | Role |
-|---|---|
-| `src/ml/agent.js` | Main introspection loop — 30-min cycle: orphan-retire, evolutionary-retire, modify, propose |
-| `src/ml/agent-llm.js` | Claude CLI wrapper with JSON-schema-validated output |
-| `src/ml/agent-executor.js` | Evaluates active recipes against live mints, fires paper trades |
-| `src/ml/agent-post-mortem.js` | 3-hour batch analyses of closed trades — cross-trade pattern recognition |
-| `src/ml/agent-daily-report.js` | Daily recap; output feeds back into next day's context |
-| `src/ml/agent-calibration-review.js` | Daily per-decile honesty audit of every classification model |
-| `src/ml/agent-mint-intel.js` | Hourly batch — heuristic + Claude classifier for ruggy/winner mint metadata |
-| `src/ml/agent-concentration-check.js` | 6-hourly — flag exit_reason ≥25% of last 24h trades + Claude diagnosis |
-| `src/ml/agent-market-regime.js` | Noon + midnight ET — aggressive/normal/cautious posture for the day |
-| `src/ml/agent-rate-limit.js` | Per-subsystem daily caps prevent runaway Claude usage |
-| `src/ml/intelligence-condensate.js` | Daily nightly compression — keeps lessons, drops raw trade noise |
-| `src/ml/auto-retrain.js` | Adaptive retrain scheduler (Python subprocess orchestration) |
-| `src/ml/drift-monitor.js` | Detects model drift between retrains, surfaces alerts to the dashboard |
+**Two new condition kinds added to the recipe DSL:**
 
-### Strategy lifecycle
+- `wallet_pool` — gate on whether N wallets from a named pool (`elite_5x`, `tracked`, `kol`) have bought this mint within a window. Replaces inlining large wallet lists (the elite pool is ~1,535 wallets — would have made recipes 65 KB each).
+- `mint_state` — gate on a column from the `mints` table (`migrated`, `rugged`). Lets the post-migration strategy explicitly require an already-migrated mint without trying to encode that via features.
 
-A live strategy goes through this evolutionary loop:
+**Runner-friendly exit philosophy.**
 
-1. **Propose** — Claude generates a JSON recipe (entry conditions, sizing, exit ladder, DCA, trail). Recipes get translated to a `strategy_state` row so the battle-tested position monitor handles exits.
-2. **Soak** — first 4 hours, the agent leaves it alone to accumulate data.
-3. **Evaluate** — every 2-12 hours (2h for bleeders, 12h for healthy), the agent re-evaluates via Claude. Decision: keep, modify (in-place parameter tweaks), or retire.
-4. **Orphan retire** — if a strategy gets 0 entries in 1 hour, its filters were too strict. Auto-retired and its filter stack is reported to the next propose-strategy prompt so Claude knows what didn't work.
-5. **Evolutionary retire** — when at strategy cap (8) AND a bleeder exists, the worst-PnL strategy (≥10 closed trades) gets retired to make room for a variant.
-6. **Freshness floor** — if live roster drops below 4, the agent proposes new strategies in parallel regardless of bleeders, to maintain diversity.
+Months of paper testing surfaced a pattern: tight protective exits after the first take-profit tier were causing the bot to bail on coins that went on to 10x. The classic "scared money never wins" problem. Tonight's rebuild encodes a different philosophy:
 
-Strategy recipe schema example:
-```json
-{
-  "name": "elite-alive-runner-v1",
-  "rationale": "Bleeding strategy proved peaked_30 is look-ahead biased (drawdown_from_peak ≥0.80 on every loser). Pivot to forward-looking: ELITE+ALIVE stack (migrated≥0.30 AND will_die_fast<0.30) shows 65% mig rate, 69x baseline lift...",
-  "entry": {
-    "conditions": [
-      { "kind": "ml_prediction", "name": "migrated", "op": ">=", "value": 0.30 },
-      { "kind": "ml_prediction", "name": "will_die_fast", "op": "<", "value": 0.30 },
-      { "kind": "ml_prediction", "name": "drawdown_from_peak_pct", "op": "<", "value": 0.35 },
-      { "kind": "feature", "name": "tracked_buyers", "op": ">=", "value": 1 }
-    ],
-    "max_mint_age_sec": 1800,
-    "min_mint_age_sec": 30
-  },
-  "sizing": { "type": "fixed", "sol": 0.15 },
-  "dca": { "enabled": true, "trigger_pct": -30, "size_pct": 0.5, "max_dca": 1 },
-  "exit": {
-    "stop_loss_pct": 60,
-    "take_profit_tiers": [
-      { "trigger_pct": 25, "sell_pct": 25 },
-      { "trigger_pct": 80, "sell_pct": 35 },
-      { "trigger_pct": 200, "sell_pct": 25 }
-    ],
-    "trailing_stop": { "arm_pct": 40, "trail_pct": 25 },
-    "max_hold_min": 30,
-    "prediction_exit": { "target": "rug_within_5min", "op": ">", "value": 0.50 }
-  }
-}
-```
+- **Wide hard stop losses** (-50% to -60%). Pump.fun coins routinely wick 60% in a single tick while still establishing direction. Tight SLs panic-sell coins that go on to run.
+- **No breakeven-after-T1.** This was the silent runner-killer. Auto-ratcheting the stop to entry after the first tier sold was kicking the bot out of countless coins that pulled back briefly before exploding.
+- **Take initials early but moderately.** T1 sells ~30% at a modest gain (+40%) to lock in profit and de-risk the position math (covers loss down to -17% from peak).
+- **Tier sells progressively further out.** T2 at +200%, T3 at +500% — locking chunky profit at meaningful runs without selling the moonbag prematurely.
+- **Small manual moonbag** (5%). Once `tokens_remaining / token_amount ≤ moonbag_pct_reserve`, the bot stops evaluating exits entirely. Closed manually from the dashboard. Rug-exception fires through normal SL path if the mint actually goes to zero.
+- **DCA modestly on healthy dips.** When a position has peaked at +1%+ and retraced to -30% from entry, add a small reload (0.05 SOL on a 0.18 SOL entry). One DCA per position, max 30 minutes old.
 
-### Claude consult rate limits
-
-Hard per-subsystem daily caps. Total ceiling ~101/day, well under typical Claude usage.
-
-| Subsystem | Daily cap |
-|---|---|
-| Agent (proposals + retirements + modifies) | 55 |
-| Post-mortem batches | 8 |
-| Mint intel | 24 |
-| News synthesis | 6 |
-| Concentration check | 4 |
-| Market regime | 2 |
-| Daily report | 1 |
-| Calibration review | 1 |
-
-Live budget visible on the ML dashboard under "Claude Consult Budget" — per-subsystem progress bars + total.
-
-### Telegram broadcaster
-
-High-conviction paper entries are posted to a Telegram group via a **gramjs MTProto userbot** (not the Bot API). Reason: call-tracker bots like Phanes filter `is_bot=true` messages — posting from a real user account is the only way to get indexed. Bot API kept as fallback.
-
-Format includes USD mcap (`$26.1K` style), per-token entry price (DexScreener subscript-zero notation for sub-$0.0001), predicted peak target, signal table (peaked_100/migrated/tracked-buyers), pump.fun link, and the raw CA on its own line for tracker parsers.
+The 5th strategy, `elite-quick-35-v1`, is an A/B test against `elite-stack-v2` — same entry gates, but it sells 100% at +35%. Designed to measure: of elite-wallet picks that reach +35%, how many would have gone much further? The PnL gap between the two over the same coins will quantify the value of holding past T1.
 
 ---
 
-## Project layout
+## Bugs we fixed (the cascade of May 16/17)
+
+Several issues had been compounding silently. Listed in the order they were discovered tonight, not the order they happened.
+
+### 1. The retrain OOM cascade
+
+The bot OOM-killed itself five separate times in a four-hour window (16:19, 17:06, 18:11, 19:39, 20:21 UTC). Each cycle: bot starts, runs for 30-50 min, peaks at 7.2 GB memory, gets killed by systemd, restarts.
+
+**Root cause:** the ML extract script loaded all ~947k snapshot rows into a single pandas DataFrame, peaked at 7.9 GB just for the extract phase, and `df.to_csv()` doubled that during write. When the snapshot table grew past a threshold, the retrain process started killing the bot.
+
+**Fix:** rewrote `ml/scripts/extract_from_snapshots.py` to stream rows in 50,000-row chunks directly to CSV. Memory now bounded at ~150 MB regardless of total row count. Aggregated summary stats (label rates, age distributions) computed chunk-by-chunk without holding rows in memory.
+
+### 2. The infinite hourly retrain loop
+
+After the OOM fixes the bot started retraining every hour, even when no new labels had landed.
+
+**Root cause:** `retrain_all.py` checked whether each target's model file existed and forced a full retrain on any missing model. `hits_5x_within_24h` consistently failed to train (not enough 24h-old snapshots with positive labels yet), so it was always considered "missing," which always triggered a full retrain.
+
+**Fix:** added a `NEVER_FORCE_TARGETS` set that excludes targets known to be data-sparse from the missing-model check. Those targets train when data is available but don't force a retrain cascade when absent.
+
+### 3. The CPU starvation (load avg 12 on 4 cores)
+
+After the OOM cascade ended and the bot stabilized, load average climbed to 12+. Dashboard requests started timing out (5+ seconds for `/api/health`). Cloudflare tunnel appeared dead from outside because the upstream — the dashboard worker — was starved.
+
+**Root cause:** the strategy executor runs `collectFeatures(mintAddress)` once per strategy per candidate mint per evaluation cycle. With 8 strategies and ~15 candidates per sweep, that's ~120 calls per evaluation. Each call ran a 9-million-row join (`trades` × `wallets` × `wallet_leaderboard`) that took 5–8 seconds at scale. The same data fetched 120 times redundantly per cycle.
+
+**Fix:** added a 2-second TTL cache in `feature-collector.js` on the trades-fetch result, keyed by mint address. Multiple strategies evaluating the same mint within 2s reuse the cached result. Load average dropped from 12.79 to 4.02 within seconds of the deploy.
+
+### 4. The wick-confused rug label
+
+The `rug_within_5min` label fired when a mint's minimum price within 5 minutes fell to 30% or less of the snapshot price. This caught **wicks** (brief downward spikes that recovered), not rugs (permanent capital destruction). The model trained on this label predicted 30% rug rate while actual rug rate was 0.7%, making it useless as a filter — and worse, it was actively blocking entries on coins that went on to run.
+
+**Fix:** introduced `will_rug` as the canonical replacement, keyed off `mint.rugged_at` which is set by the bot's independent rug-detection logic (85% drop from peak + 10min of trading quiet). Backfilled 1.42M historical snapshots with the new label and retrained. Post-retrain calibration: 3.4% predicted, 3.4% actual.
+
+### 5. The silent strategy auto-exits
+
+Recipes specified explicit stop-loss / tier-sell / trailing-stop logic, but the `strategy_state` schema had non-zero column defaults for legacy "auto-exit" modes (`fast_fail_sec=60`, `fakepump_sec=120`, `stagnant_exit_min=3`). The recipe deployer didn't write these fields, so they fell through to the schema defaults — silently activating early-bail logic that contradicted the recipe.
+
+**Fix:** updated the recipe-to-state upsert to write explicit zeros for all auto-exit modes. Recipe is now the sole source of truth for exit logic.
+
+### 6. The global moonbag override
+
+After a position survived to migration the bot would auto-convert it to "moonbag mode" using global config values, overriding the strategy's recipe-defined exits. Strategies designed for specific post-migration behavior were getting their exit logic replaced by generic moonbag rules.
+
+**Fix:** disabled the auto-conversion at migration. Each strategy now owns its moonbag policy via the new `moonbag_pct_reserve` recipe field. When `tokens_remaining / token_amount ≤ reserve`, the bot stops evaluating exits and waits for a manual close.
+
+### 7. The legacy strategy_state ghost rows
+
+The dashboard's `/api/strategies` endpoint read from a separate `strategy_state` table, not from `ml_agent_strategies`. After wiping 39 old strategies from `ml_agent_strategies` and inserting 4 new ones, the dashboard still showed the old 39 because the corresponding rows in `strategy_state` were never deleted (no foreign-key cascade between the two tables).
+
+**Fix:** truncated `strategy_state` and re-registered the 4 V2 strategies via the proper `deployStrategy()` path that writes both tables.
+
+### 8. Cashback detection ($0/day but RPC waste)
+
+Every time a mint hit 5 unique buyers, the bot called the public Solana RPC to check a single byte in the bonding-curve account for a cashback flag. The flag was used downstream as a tier-trigger boost, but no V2 strategy gates on it.
+
+**Fix:** disabled the detection. Saves CPU + log noise + public-RPC rate budget. The downstream boost defaults to 1.0 (no-op) when no flag is present.
+
+### 9. The wallet_leaderboard recompute
+
+A worker thread recomputed a 50-row top-N wallet leaderboard every 15 minutes via a 13-16 second join across ~3,400 wallets. The output fed two snapshot features (`avg_buyer_rank`, `median_buyer_rank`) that were already NULL for 99.96% of wallets.
+
+**Fix:** disabled the worker. Truncated the three leaderboard tables. The new `wallet_5x_score` table (1,535 elite wallets, recomputed every 6 hours) replaces it for the strategy-relevant case. The two affected snapshot features now stay NULL — the trained models handle NULL features natively.
+
+### 10. Paused Claude integrations
+
+Three subsystems consumed the Claude API: the strategy-proposal agent (every 30 min), `mint-intel` (hourly mint classification, ~$5/day), and `market-regime` (twice daily). None of these outputs feed the V2 strategies' entry conditions or the ML training features. Paused all three to eliminate the API spend during the V2 test period. The strategy executor and the reporting subsystems (post-mortem, daily-report, calibration-review) keep running — they don't call Claude.
+
+---
+
+## Simulation realism
+
+Paper trading uses real on-chain prices but applies friction modeled on actual Helius Sender execution:
+
+| Friction | Setting |
+|---|---|
+| Fill latency | 500ms (configurable, override of measured RPC ping) |
+| Max entry slippage before abort | 35% |
+| Curve slippage | Computed per fill from AMM pool depth |
+| Volatility drift during execution | `vol_drift_pct` |
+| Sandwich attack haircut | `sandwich_pct` |
+| Priority fees | Deducted from each trade based on network congestion |
+
+A coin that pumps too fast during the 500ms latency window is **rejected** as `STALE_QUOTE_PAPER`, which mirrors the reality that you can't always get in at the price you saw. Realized PnL on every paper trade has slippage + fees baked in.
+
+---
+
+## Layout
 
 ```
 src/
-├── index.js              # bot entrypoint — spawns dashboard child process
-├── dashboard.js          # dashboard process — Express server
-├── config.js             # central config
-├── db/                   # SQLite (WAL) + schema
-├── ingestion/            # Helius, PumpPortal, on-chain trade decoders, TG broadcaster
-├── trading/              # paper trading, position monitor, friction
-├── scoring/              # mint microstructure, wallet leaderboard, KOL/whale, network conditions
-├── ml/                   # ML pipeline, inference bridge, autonomous agent + learning loops
-└── server/               # Express API (used by both dashboards)
+  ingestion/          — Helius WS, PumpPortal, trade processor
+  scoring/            — wallet enrichment workers (5x scorer, bundle, devs)
+  ml/                 — model client, feature collector, label resolver,
+                        snapshot sweeper, agent executor, retrain orchestrator
+  trading/            — paper position monitor, exit logic, strategies
+  server/             — dashboard API + WebSocket feed
+  db/                 — schema bootstrap + migrations
+  dashboard.js        — dashboard worker (own process)
+  index.js            — entry point, spawns all workers
 
 ml/
-├── scripts/
-│   ├── extract_from_snapshots.py        # pre-mig snapshots → training CSV
-│   ├── extract_from_migration_snapshots.py  # post-mig snapshots
-│   ├── train.py                         # mode-aware classifier/regressor
-│   ├── serve.py                         # FastAPI multi-target inference
-│   └── retrain_all.py                   # extract → train all 15 targets → reload service
-└── requirements.txt
+  scripts/            — Python training pipeline (extract, train, retrain_all)
+  models/             — trained .pkl + .json metadata (hot-swap)
 
-public/                   # cyberpunk-themed dashboards
-├── index.html / app.js   # main trading dashboard
-└── ml.html / ml.js       # ML Lab — drift, calibration, consult budget, agent
+scripts/              — one-off deploy + tune scripts (history of every
+                        strategy change ever shipped, dated)
 
-scripts/
-└── tg-userbot-auth.mjs   # one-time interactive auth for the TG userbot
+data/
+  degen.db            — SQLite (WAL mode, multi-process safe)
 ```
-
----
-
-## Run it locally
-
-```bash
-# 1. Node side
-npm install
-cp .env.example .env  # set HELIUS_API_KEY, TELEGRAM_BOT_TOKEN, etc.
-
-# 2. Python ML stack
-cd ml
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-
-# 3. (Optional) TG userbot auth — for call broadcasting
-cd ..
-node scripts/tg-userbot-auth.mjs    # one-time: prompts for phone, SMS code, 2FA
-# Writes TG_USER_SESSION to .env automatically
-
-# 4. Start the bot (managed by launchd in production)
-node src/index.js
-```
-
-The Python inference service auto-starts via the watchdog. Dashboards at `http://localhost:4200/` and `http://localhost:4200/ml`.
 
 ---
 
 ## Status
 
-- ✅ Data pipeline: 380K+ snapshots, 350K+ labeled, ~5K snapshots/hr live ingest
-- ✅ Models: 15 trained, will_die_fast AUC 0.99, migrated 0.74, drawdown_from_peak R² 0.74, post_mig_hits_2x 0.78
-- ✅ Drift detection: live alerts on degraded models, surfaced on the ML dashboard
-- ✅ Autonomous agent: multiple strategies live, self-iterating on bleeders and orphans
-- ✅ Six learning loops running daily (post-mortem, daily report, calibration review, mint intel, concentration check, market regime, intelligence condensate)
-- ✅ TG broadcaster via userbot, Phanes-compatible
-- 🟡 Live trading: code exists, currently paper-only by human switch
+Running on a 4-core 8 GB VM, ~400 MB resident at idle, ~1.5 GB peak during retrain. Paper-only currently with a 10 SOL wallet; live execution path is implemented and gated behind a runtime flag (no autonomous flip — explicit human switch). The 4-strategy portfolio has been live since the V2 deploy and is logging entries on elite-wallet triggers.
 
----
-
-🤖 Built collaboratively with [Claude Code](https://claude.com/claude-code).
+The autonomous Claude-driven evolution loop is paused but intact. When V2 has accumulated enough resolved-label data to validate or invalidate the hand-picked strategies, it can be re-enabled to evolve from a calibrated baseline rather than a confused one.
