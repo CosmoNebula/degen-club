@@ -279,3 +279,25 @@ V7.12 adds `ml_prediction hits_2x_within_1h >= 0.15` to V7.11.
 Simulated V7.11 with this gate: -0.091 SOL across 4 trades = -0.023/trade. 70% bleed reduction vs V7.11's -0.034.
 
 Expected entry rate halved again (~2-3 closes/hour). Need 10-15 V7.12 closes to confirm.
+
+## V8 — POST-MIGRATION RUNNER pivot (2026-05-18 ~12:45 UTC)
+**Major pivot from V7's pre-migration strategy.** Analysis of top 20 mega+ultra elite wallets revealed:
+- Highest hit-rate wallets (89-95%) buy at avg mcap **1,000-29,000 SOL** (POST-MIGRATION), not 28-100.
+- Average hold time 22 min to 7 hours.
+- "bags never sold" counts in the hundreds — they sit on losers, take the unicorn winners.
+- Some hit 5x-12x avg mc_multiple on sold positions.
+
+V7's premise was wrong: we were fishing pre-migration when the proven winners trade post-migration. The 30-min max_hold + tight SLs were the OPPOSITE of how the winners operate.
+
+V8 recipe:
+```
+targets_migrated: true (post-migration candidate pool)
+mc_range: 200-3000 SOL
+wallet_pool: mega_elite_5x ≥ 1 (last 120s)
+entry size: 0.10 SOL (smaller, to absorb dead bags)
+SL: -70% (very wide — ride dips like the winners)
+max_hold: 360 min (6 hours)
+tiers: +50%/30%, +200%/30%, +500%/40% (capture unicorn upside)
+```
+
+V7 retired. Paper state wiped, wallet reset to 10 SOL (reset #19).
