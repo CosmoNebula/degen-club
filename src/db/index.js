@@ -413,6 +413,12 @@ function runMigrations(d) {
   ensureCol(d, 'strategy_state', 'tier3_trigger_pct', `REAL DEFAULT 2.0`);
   ensureCol(d, 'strategy_state', 'tier3_sell_pct', `REAL DEFAULT 0.2`);
   ensureCol(d, 'strategy_state', 'tier3_trail_pct', `REAL DEFAULT 0.2`);
+  // 2026-05-18: adaptive trail — JSON array of [peak_threshold, retrace_pct]
+  // ordered ascending by peak. Active retrace = retrace_pct for the HIGHEST
+  // threshold the peak has crossed. Backtest winner (adaptive_tight_v3) ran
+  // [[0.10,0.08],[0.25,0.12],[0.80,0.18],[3.00,0.25]] — tight retrace locks
+  // small movers vs. friction, loose retrace lets runners stretch.
+  ensureCol(d, 'strategy_state', 'adaptive_trail_json', `TEXT`);
   ensureCol(d, 'strategy_state', 'breakeven_after_tier1', `INTEGER DEFAULT 1`);
   ensureCol(d, 'strategy_state', 'peak_floor_arm_pct', `REAL DEFAULT 0`);
   ensureCol(d, 'strategy_state', 'peak_floor_exit_pct', `REAL DEFAULT 0`);

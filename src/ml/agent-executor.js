@@ -98,8 +98,9 @@ function S() {
         fakepump_sec, fakepump_min_peak_pct, fakepump_sl_pct,
         stagnant_exit_min, stagnant_loss_pct,
         moonbag_pct_reserve,
+        adaptive_trail_json,
         updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
   };
   return stmts;
 }
@@ -712,6 +713,18 @@ function syncStrategyStateRow(strategyId, recipe) {
     // 2026-05-17: per-strategy moonbag reserve (0..1 fraction of original bag
     // that the bot stops touching once remaining hits this floor).
     Math.max(0, Math.min(0.5, exit.moonbag_pct_reserve || 0)),
+    // 2026-05-18: adaptive trail (optional). Recipe shape:
+    //   exit.adaptive_trail = [[peak_threshold, retrace_pct], ...] ascending
+    // Stored as JSON; paper.js looks it up per-tick and uses the retrace_pct
+    // for the highest threshold the peak has crossed. Falls back to
+    // tier3_trail_pct (static trail) when null/empty.
+    (Array.isArray(exit.adaptive_trail) && exit.adaptive_trail.length)
+      ? JSON.stringify(
+          exit.adaptive_trail
+            .filter(p => Array.isArray(p) && p.length === 2 && p[0] >= 0 && p[1] > 0)
+            .sort((a, b) => a[0] - b[0])
+        )
+      : null,
     Date.now(),
   );
 }

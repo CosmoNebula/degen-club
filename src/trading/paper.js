@@ -960,7 +960,28 @@ function checkPosition(p) {
     ? strat.cashback_trigger_boost : 1.0;
   const t1Trig = strat.tier1_trigger_pct * cashbackBoost;
   const t2Trig = strat.tier2_trigger_pct * cashbackBoost;
-  const t3Trig = strat.tier3_trigger_pct * cashbackBoost;
+  let t3Trig = strat.tier3_trigger_pct * cashbackBoost;
+  // 2026-05-18: adaptive trail. When present, arm threshold = first
+  // [peak,retrace] pair's peak, and active retrace = retrace of the HIGHEST
+  // peak threshold crossed. Lets the trail be tight on small movers (friction
+  // protection) and loose on runners (let unicorns stretch). Falls back to
+  // the static tier3_trail_pct when adaptive_trail_json is null/empty.
+  let activeTrailPct = strat.tier3_trail_pct || 0;
+  if (strat.adaptive_trail_json) {
+    try {
+      const at = JSON.parse(strat.adaptive_trail_json);
+      if (Array.isArray(at) && at.length) {
+        t3Trig = at[0][0];
+        let dyn = null;
+        for (const [arm, retrace] of at) {
+          if (peakFromEntry >= arm) dyn = retrace; else break;
+        }
+        if (dyn !== null) activeTrailPct = dyn;
+      }
+    } catch (err) {
+      console.warn(`[adaptive-trail] parse failed for ${p.strategy}: ${err.message}`);
+    }
+  }
   // Ladder sanity — t1 < t2 < t3 must hold or the cascade is broken. Both
   // tiers can fire on the same tick if t2 < t1, and tier3 trail/sell never
   // happens if t3 <= t2 because tier2 absorbs the fill first.
@@ -1041,7 +1062,7 @@ function checkPosition(p) {
   if (!t2Hit && peakPctRaw >= t2Trig && tierConfirmed(p.id, 2)) {
     p = fireTier(p, 2, strat.tier2_sell_pct, currentPrice, m.current_market_cap_sol || 0);
   }
-  if (!t3Hit && peakPctRaw >= t3Trig && (strat.tier3_trail_pct || 0) <= 0 && tierConfirmed(p.id, 3)) {
+  if (!t3Hit && peakPctRaw >= t3Trig && activeTrailPct <= 0 && tierConfirmed(p.id, 3)) {
     p = fireTier(p, 3, strat.tier3_sell_pct, currentPrice, m.current_market_cap_sol || 0);
   }
 
@@ -1053,10 +1074,10 @@ function checkPosition(p) {
   // for max_hold). Using peakFromEntry: once peak has ever crossed arm, trail
   // stays armed permanently for that position. This is how trails are supposed
   // to work.
-  const t3Armed = tiersAfter.includes('TIER_3') ? false : (peakFromEntry >= t3Trig && (strat.tier3_trail_pct || 0) > 0);
+  const t3Armed = tiersAfter.includes('TIER_3') ? false : (peakFromEntry >= t3Trig && activeTrailPct > 0);
   const breakevenArmed = !!p.breakeven_armed;
 
-  const tier3TrailFloor = peakFromEntry - (strat.tier3_trail_pct || 0);
+  const tier3TrailFloor = peakFromEntry - activeTrailPct;
 
   let exitReason = null;
   const beArmPct = strat.breakeven_arm_pct || 0;
