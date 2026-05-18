@@ -28,3 +28,36 @@ SL: -30% (anticipating -42% actual fill)
 max_hold: 45 min
 ```
 Expectation: fewer trail fires (only mints peaking ≥+20%), but each fire net positive after friction. SL fills should match the original V7 risk profile.
+
+## V7.5 (2026-05-18 ~03:51 UTC) — Initial data
+- 1 V7.5 close so far: AqMA2VR7 SL_HIT -40.6% (matches -30% trigger → -42% expected fill). SL fix validated.
+- Trail closes mostly pre-V7.5 era so insufficient new trail data.
+
+## Slippage discovery (2026-05-18 ~04:00 UTC)
+Peak vs realized_pnl_pct across 11 TP_TRAIL closes (V7.3/V7.4):
+- Peak 36% → +11.9% PnL (24 pts gap)
+- Peak 32% → +0.2% (32 pts)
+- Peak 29.9% → -11.8% (42 pts)
+- Peak 25.9% → -2.8% (29 pts)
+- Peak 20.7% → -2.1% (23 pts)
+- Peak 20.3% → -13.9% (34 pts)
+- Peak 16.2% → -6.0% (22 pts)
+- Peak 13.5% → -6.1% (20 pts)
+
+**Mean slippage: ~28 pts between peak and fill** (combines confirm-window price drop + bonding-curve sell-side friction). This is STRUCTURAL on pump.fun — selling during a dump eats huge slippage.
+
+For trail to net 0 after friction: peak ≥ +38%. Median pump.fun mint peaks +22%. So trails systematically lose money on the most common case.
+
+## V7.6 (2026-05-18 ~04:05 UTC) — Replace trail with tier-sells INTO the pump
+Hypothesis: tiers fire when price CROSSES UP through trigger. Selling into pump-side buyers minimizes slippage (vs trail's sell-into-dump). Fill price ≈ trigger price.
+Recipe:
+```
+take_profit_tiers = [
+  { trigger_pct: 0.20, sell_pct: 0.50 },   # T1 at +20%: lock half
+  { trigger_pct: 0.60, sell_pct: 0.30 },   # T2 at +60%: lock more
+  { trigger_pct: 2.00, sell_pct: 0.20 },   # T3 at +200%: full close on big runners
+]
+adaptive_trail: null
+SL: -30%, max_hold 45min
+```
+For median mint (+22% peak): T1 fires at +20%, locks 50% at ~+18% net of friction = +0.018 SOL on 0.18 entry. Remaining 50% rides to TIME_EXIT or SL. Worst-case TIME_EXIT at -10% on remaining 50% = -0.009 SOL. **Net per median mint: +0.009 SOL** (vs V7.5's -0.012 SOL). Real runners (+60%+) compound through T2/T3.
