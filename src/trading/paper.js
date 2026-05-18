@@ -1037,7 +1037,14 @@ function checkPosition(p) {
   }
 
   const tiersAfter = (() => { try { return JSON.parse(p.tiers_hit || '[]'); } catch { return []; } })();
-  const t3Armed = tiersAfter.includes('TIER_3') ? false : (peakPctRaw >= t3Trig && (strat.tier3_trail_pct || 0) > 0);
+  // 2026-05-18: was peakPctRaw — that armed the trail only WHILE current price
+  // was above arm_pct, which meant a fast retracement past the arm threshold
+  // disarmed the trail and stranded the position (PeZn74V7rvrf hit +39.6%
+  // peak, retraced fast through +20% arm, trail never fired, position rotted
+  // for max_hold). Using peakFromEntry: once peak has ever crossed arm, trail
+  // stays armed permanently for that position. This is how trails are supposed
+  // to work.
+  const t3Armed = tiersAfter.includes('TIER_3') ? false : (peakFromEntry >= t3Trig && (strat.tier3_trail_pct || 0) > 0);
   const breakevenArmed = !!p.breakeven_armed;
 
   const tier3TrailFloor = peakFromEntry - (strat.tier3_trail_pct || 0);
