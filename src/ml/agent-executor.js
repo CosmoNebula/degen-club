@@ -398,6 +398,11 @@ function computeLivePctSniper(mintAddress, secondsWindow) {
 function logEntryRejection(recipe, mintAddress, c, ctx, features) {
   try {
     const recipeName = (recipe && recipe.name) || 'unknown';
+    // 2026-05-18: gate_name is part of the PRIMARY KEY — NULL silently fails
+    // the INSERT (SQLite implicit NOT NULL on PK columns). wallet_pool and
+    // similar non-named conditions used c.pool/c.metric instead, so they were
+    // being dropped invisibly. Fallback chain ensures we always have a key.
+    const gateName = c.name || c.pool || c.metric || c.kind || 'unknown';
     const actualVal = c.kind === 'ml_prediction' ? (ctx.preds?.[c.name])
                     : c.kind === 'snapshot_feature' ? (ctx.features?.[c.name])
                     : null;
@@ -413,7 +418,7 @@ function logEntryRejection(recipe, mintAddress, c, ctx, features) {
         actual = excluded.actual,
         mcap_at_reject = excluded.mcap_at_reject,
         age_sec_at_reject = excluded.age_sec_at_reject`).run(
-      recipeName, mintAddress, c.kind, c.name, c.op || null,
+      recipeName, mintAddress, c.kind, gateName, c.op || null,
       (typeof c.value === 'number') ? c.value : null,
       actualNum, Date.now(), mcapAtRej, ageSecAtRej);
   } catch {}
