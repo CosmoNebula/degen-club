@@ -320,11 +320,17 @@ function evalCondition(c, ctx) {
       // 2026-05-17: gate on a column from the mints table for this mintAddress.
       // Examples: { kind: 'mint_state', name: 'migrated', op: '=', value: 1 }
       //           { kind: 'mint_state', name: 'rugged', op: '=', value: 0 }
+      //           { kind: 'mint_state', name: 'current_market_cap_sol', op: '<=', value: 3000 }
       // Cached on ctx so multiple mint_state conditions share one query.
+      // 2026-05-18: added current_market_cap_sol + last_price_sol for post-mig
+      // strategies — the snapshot-pipeline stops at migration so
+      // snapshot_feature.last_mcap_sol freezes at the BC value; mints.current_
+      // market_cap_sol is kept live by the migrated-tracker DexScreener polls.
       if (!ctx.mintAddress) return false;
       if (!ctx._mintState) {
         ctx._mintState = db().prepare(
-          `SELECT migrated, rugged, migrated_at, rugged_at, peak_market_cap_sol
+          `SELECT migrated, rugged, migrated_at, rugged_at, peak_market_cap_sol,
+                  current_market_cap_sol, last_price_sol, amm_liquidity_usd, amm_volume_h24_usd
            FROM mints WHERE mint_address = ?`
         ).get(ctx.mintAddress) || {};
       }
