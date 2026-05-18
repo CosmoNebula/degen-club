@@ -200,98 +200,92 @@ def main():
         # Table or columns might not exist on older DBs
         pass
 
-    # ---------- 6. Per-mint lifecycle records ----------
-    mint_rows = conn.execute(
-        """
-        SELECT
-          m.mint_address, m.symbol, m.name, m.creator_wallet,
-          m.created_at, m.migrated, m.migrated_at, m.rugged, m.rugged_at,
-          m.peak_market_cap_sol, m.last_trade_at,
-          m.twitter, m.telegram, m.website
-        FROM mints m
-        WHERE m.created_at >= ? AND m.created_at < ?
-        ORDER BY m.peak_market_cap_sol DESC NULLS LAST
-        """,
-        (start_ms, end_ms),
-    ).fetchall()
+    # ---------- 6. Per-mint lifecycle records — STREAMED ----------
+    # 2026-05-18: rewritten to stream JSON output instead of building the
+    # full 22k+ mint dict in memory. The previous version peaked at 3.4 GB
+    # RSS on the May 17 rollover and OOM-killed the bot. Now we iterate the
+    # cursor lazily and write each mint's JSON entry directly to the gzip
+    # stream — memory stays bounded regardless of row count.
 
-    mints = []
-    for row in mint_rows:
-        mint = dict(row)
-        addr = mint["mint_address"]
-
-        # Time-to-peak: when did the mint reach its peak mcap? Cheap query if indexed.
-        peak_ts_row = conn.execute(
-            """
-            SELECT MIN(timestamp) AS ts
-            FROM trades
-            WHERE mint_address = ? AND market_cap_sol >= ?
-            """,
-            (addr, mint["peak_market_cap_sol"] or 0),
-        ).fetchone()
-        time_to_peak_sec = None
-        if peak_ts_row and peak_ts_row["ts"] and mint["created_at"]:
-            time_to_peak_sec = int((peak_ts_row["ts"] - mint["created_at"]) / 1000)
-
-        # Trade volume + unique buyer count for the mint
-        agg = conn.execute(
+    def iter_mints():
+        """Yield one mint summary at a time. Holds at most one row + sub-query
+        results in memory."""
+        # Use a separate cursor for the outer iteration so the inner sub-queries
+        # don't interfere with row fetching state.
+        outer = conn.cursor()
+        outer.execute(
             """
             SELECT
-              COUNT(*) AS n_trades,
-              COUNT(DISTINCT wallet) AS n_unique_buyers,
-              ROUND(SUM(CASE WHEN is_buy = 1 THEN sol_amount ELSE 0 END), 2) AS buy_volume_sol
-            FROM trades
-            WHERE mint_address = ?
+              m.mint_address, m.symbol, m.name, m.creator_wallet,
+              m.created_at, m.migrated, m.migrated_at, m.rugged, m.rugged_at,
+              m.peak_market_cap_sol, m.last_trade_at,
+              m.twitter, m.telegram, m.website
+            FROM mints m
+            WHERE m.created_at >= ? AND m.created_at < ?
+            ORDER BY m.peak_market_cap_sol DESC NULLS LAST
             """,
-            (addr,),
-        ).fetchone()
+            (start_ms, end_ms),
+        )
+        for row in outer:
+            mint = dict(row)
+            addr = mint["mint_address"]
 
-        # Top 5 buyers by SOL spent on this mint
-        top_buyers_mint = [
-            r["wallet"] for r in conn.execute(
-                """
-                SELECT wallet
-                FROM trades
-                WHERE mint_address = ? AND is_buy = 1
-                GROUP BY wallet
-                ORDER BY SUM(sol_amount) DESC
-                LIMIT 5
-                """,
+            peak_ts_row = conn.execute(
+                "SELECT MIN(timestamp) AS ts FROM trades WHERE mint_address = ? AND market_cap_sol >= ?",
+                (addr, mint["peak_market_cap_sol"] or 0),
+            ).fetchone()
+            time_to_peak_sec = None
+            if peak_ts_row and peak_ts_row["ts"] and mint["created_at"]:
+                time_to_peak_sec = int((peak_ts_row["ts"] - mint["created_at"]) / 1000)
+
+            agg = conn.execute(
+                """SELECT COUNT(*) AS n_trades,
+                          COUNT(DISTINCT wallet) AS n_unique_buyers,
+                          ROUND(SUM(CASE WHEN is_buy = 1 THEN sol_amount ELSE 0 END), 2) AS buy_volume_sol
+                   FROM trades WHERE mint_address = ?""",
                 (addr,),
-            )
-        ]
+            ).fetchone()
 
-        mints.append({
-            "addr": addr,
-            "symbol": mint.get("symbol"),
-            "name": mint.get("name"),
-            "creator": mint.get("creator_wallet"),
-            "created_at": mint["created_at"],
-            "peak_mcap": mint.get("peak_market_cap_sol"),
-            "time_to_peak_sec": time_to_peak_sec,
-            "migrated": bool(mint.get("migrated")),
-            "migrated_at": mint.get("migrated_at"),
-            "rugged": bool(mint.get("rugged")),
-            "rugged_at": mint.get("rugged_at"),
-            "outcome": outcome(
-                mint.get("rugged") or 0,
-                mint.get("migrated") or 0,
-                mint.get("peak_market_cap_sol"),
-                mint.get("last_trade_at"),
-                end_ms,
-            ),
-            "n_trades": agg["n_trades"] if agg else 0,
-            "n_unique_buyers": agg["n_unique_buyers"] if agg else 0,
-            "buy_volume_sol": agg["buy_volume_sol"] if agg else 0,
-            "top_buyers": top_buyers_mint,
-            "has_twitter": bool(mint.get("twitter")),
-            "has_telegram": bool(mint.get("telegram")),
-            "has_website": bool(mint.get("website")),
-        })
+            top_buyers_mint = [
+                r["wallet"] for r in conn.execute(
+                    """SELECT wallet FROM trades
+                       WHERE mint_address = ? AND is_buy = 1
+                       GROUP BY wallet ORDER BY SUM(sol_amount) DESC LIMIT 5""",
+                    (addr,),
+                )
+            ]
 
-    conn.close()
+            yield {
+                "addr": addr,
+                "symbol": mint.get("symbol"),
+                "name": mint.get("name"),
+                "creator": mint.get("creator_wallet"),
+                "created_at": mint["created_at"],
+                "peak_mcap": mint.get("peak_market_cap_sol"),
+                "time_to_peak_sec": time_to_peak_sec,
+                "migrated": bool(mint.get("migrated")),
+                "migrated_at": mint.get("migrated_at"),
+                "rugged": bool(mint.get("rugged")),
+                "rugged_at": mint.get("rugged_at"),
+                "outcome": outcome(
+                    mint.get("rugged") or 0,
+                    mint.get("migrated") or 0,
+                    mint.get("peak_market_cap_sol"),
+                    mint.get("last_trade_at"),
+                    end_ms,
+                ),
+                "n_trades": agg["n_trades"] if agg else 0,
+                "n_unique_buyers": agg["n_unique_buyers"] if agg else 0,
+                "buy_volume_sol": agg["buy_volume_sol"] if agg else 0,
+                "top_buyers": top_buyers_mint,
+                "has_twitter": bool(mint.get("twitter")),
+                "has_telegram": bool(mint.get("telegram")),
+                "has_website": bool(mint.get("website")),
+            }
 
-    payload = {
+    # Build the prefix payload (everything except the mints array) so we can
+    # write the file shape correctly. mints gets injected as a streamed array.
+    prefix = {
         "day": args.day,
         "generated_at": int(time.time() * 1000),
         "version": 1,
@@ -300,19 +294,34 @@ def main():
         "top_buyers": top_buyers,
         "strategy_perf": strategy_perf,
         "regime": regime,
-        "mints": mints,
     }
+    prefix_json = json.dumps(prefix, separators=(",", ":"))
+    # Drop the closing brace; we'll append "mints": [...] then close ourselves.
+    assert prefix_json.endswith("}")
+    prefix_open = prefix_json[:-1] + ',"mints":['
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows_written = 0
     with gzip.open(out_path, "wt", encoding="utf-8", compresslevel=6) as fh:
-        json.dump(payload, fh, separators=(",", ":"))
+        fh.write(prefix_open)
+        first = True
+        for mint in iter_mints():
+            if not first:
+                fh.write(",")
+            json.dump(mint, fh, separators=(",", ":"))
+            first = False
+            rows_written += 1
+        fh.write("]}")
+
+    conn.close()
 
     size = out_path.stat().st_size
     print(json.dumps({
         "path": str(out_path),
         "size_bytes": size,
-        "rows_mints": len(mints),
+        "rows_mints": rows_written,
     }))
 
 
