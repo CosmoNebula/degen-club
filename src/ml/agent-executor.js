@@ -43,8 +43,15 @@ function S() {
          AND migrated_at > strftime('%s','now')*1000 - 72 * 3600000
          AND amm_liquidity_usd > 1000
        ORDER BY amm_volume_h24_usd DESC LIMIT ?`),
+    // 2026-05-18: cooldown checks BOTH entered_at and exited_at. Originally
+    // only checked entered_at, which missed the case where a long-held
+    // position closes — e.g. CVgssrLt held 18min then TIERED_FULL'd, then
+    // re-entered 14s later because the original entry was past the 10min
+    // cooldown window. Chasing a 5× post-pump price with a fresh full bag.
+    // Now any recent exit on this mint also blocks re-entry.
     recentEntry: d.prepare(`SELECT id FROM paper_positions
-       WHERE strategy = ? AND mint_address = ? AND entered_at > ?
+       WHERE strategy = ? AND mint_address = ?
+         AND (entered_at > ? OR (status = 'closed' AND exited_at > ?))
        LIMIT 1`),
     // 2026-05-15: extended-cooldown lookup for coins that already failed
     // our entry premise via FAST_FAIL / FAKE_PUMP.
@@ -416,6 +423,7 @@ function logEntryRejection(recipe, mintAddress, c, ctx, features) {
     const gateName = c.name || c.pool || c.metric || c.kind || 'unknown';
     const actualVal = c.kind === 'ml_prediction' ? (ctx.preds?.[c.name])
                     : c.kind === 'snapshot_feature' ? (ctx.features?.[c.name])
+                    : c.kind === 'mint_state' ? (ctx._mintState?.[c.name])
                     : null;
     const actualNum = (typeof actualVal === 'number') ? actualVal : null;
     const mcapAtRej = features?.last_mcap_sol ?? null;
@@ -795,7 +803,7 @@ async function evaluateOneMint(strategy, mintAddress) {
   // Post-exit cooldown — don't re-enter immediately after we just closed it.
   if (entryCooldownMs > 0) {
     const cutoff = Date.now() - entryCooldownMs;
-    const recent = S().recentEntry.get(strategy.id, mintAddress, cutoff);
+    const recent = S().recentEntry.get(strategy.id, mintAddress, cutoff, cutoff);
     if (recent) return false;
   }
   // Extended-cooldown for already-failed coins (FAST_FAIL/FAKE_PUMP/SL_HIT).
