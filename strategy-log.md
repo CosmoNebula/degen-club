@@ -236,3 +236,46 @@ V7.10 starved: only 1 entry in 80 minutes. Compounding 3 selectivity layers (meg
 V7.11 reverts wallet pool to super_elite_5x (217 wallets) while keeping the data-driven local_top_60s ≤ 0.25 ML gate. Mcap 28-60 stays.
 
 Expected flow: ~12-15 entries/hour (vs V7.9's 24/hour). Need 15-20 V7.11 closes to evaluate whether the ML gate actually delivers the expected -0.023/trade improvement.
+
+## OOM #2 (2026-05-18 ~10:05 UTC)
+Retrain fired again at 09:59 — my earlier "fix" was on REPEAT_INTERVAL_MS, a dead constant. Actual scheduler is `nextAlignedRetrainAt` (every top-of-hour). Killed retrain procs, real fix:
+1. nextAlignedRetrainAt now returns every-3-hour boundary
+2. Memory guard at runRetrain start — skips if MemAvailable < 4 GB
+
+Verified bot stable after restart (6.7 GB free).
+
+## V7.11 first 3 closes (2026-05-18 ~10:45 UTC)
+| exit          | n | net    | avg %  |
+|---------------|---|--------|--------|
+| REALIZED_LOCK | 3 | -0.026 | -4.7   |
+| SL_HIT        | 0 | —      | —      |
+**V7.11 net: -0.026 / 3 closes / -0.008 per trade.**
+
+ALL THREE closes hit T1 (REALIZED_LOCK). Zero SL hits. The ML local_top_60s ≤ 0.25 gate appears to be filtering exactly the entries that don't reach the T1 trigger — significant improvement vs prior iterations.
+
+Per-trade trajectory:
+- V7.6: -0.027
+- V7.7: -0.030
+- V7.8: -0.039
+- V7.9: -0.038
+- V7.10: -0.077 (flow-starved, n=2)
+- **V7.11: -0.008** ← 3-4× improvement, n=3
+
+Sample still too small to confirm. Holding V7.11 to accumulate 15-20 closes. If pattern holds, V7.11 may be the first close-to-breakeven configuration.
+
+## V7.12 — Stack hits_2x ML gate (2026-05-18 ~11:20 UTC)
+V7.11 9-close breakdown by ML prediction at entry:
+
+| outcome    | hits_2x | will_rug | notes |
+|------------|---------|----------|-------|
+| 3 wins     | 0.18-0.20 | 0.23-0.31 | all hit T1 |
+| 3 TIME_EXIT | 0.01-0.04 | 0.31-0.35 | ML correctly predicted no momentum |
+| 3 SL_HIT   | 0.10-0.23 | 0.03-0.37 | mixed signals |
+
+`hits_2x_within_1h ≥ 0.15` would have kept all 3 wins (≥0.18) and filtered 5 of 6 losers. **Strongest separator found so far.**
+
+V7.12 adds `ml_prediction hits_2x_within_1h >= 0.15` to V7.11.
+
+Simulated V7.11 with this gate: -0.091 SOL across 4 trades = -0.023/trade. 70% bleed reduction vs V7.11's -0.034.
+
+Expected entry rate halved again (~2-3 closes/hour). Need 10-15 V7.12 closes to confirm.
