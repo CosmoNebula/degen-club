@@ -274,6 +274,11 @@ const _CMP_OPS = {
   '<':  (a, b) => a < b,
   '<=': (a, b) => a <= b,
   '==': (a, b) => a === b,
+  // 2026-05-18: '=' as alias for '=='. The mint_state condition example
+  // comment in this file uses '=' and recipes (V8) were written that way.
+  // Without this alias, every '=' comparison silently failed → entire
+  // strategies rejected at the first mint_state condition.
+  '=':  (a, b) => a === b,
 };
 
 // Returns: true (gate passes), false (HARD reject — strategy fails entry),
