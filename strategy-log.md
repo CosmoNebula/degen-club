@@ -229,3 +229,10 @@ Other features analyzed (not used):
 - will_rug, hits_2x: not discriminative (similar means/medians across wins/losses)
 - mint_age: 30-60m bucket 0% win (n=3, small) — not strong enough alone
 - wallet_count: super_n=3 had 1 win in 1 sample, not statistically meaningful
+
+## V7.11 — Revert wallet pool, keep ML gate (2026-05-18 ~09:00 UTC)
+V7.10 starved: only 1 entry in 80 minutes. Compounding 3 selectivity layers (mega_elite + mcap 28-60 + ML local_top gate) was too much.
+
+V7.11 reverts wallet pool to super_elite_5x (217 wallets) while keeping the data-driven local_top_60s ≤ 0.25 ML gate. Mcap 28-60 stays.
+
+Expected flow: ~12-15 entries/hour (vs V7.9's 24/hour). Need 15-20 V7.11 closes to evaluate whether the ML gate actually delivers the expected -0.023/trade improvement.
