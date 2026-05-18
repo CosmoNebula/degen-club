@@ -737,8 +737,18 @@ async function evaluateOneMint(strategy, mintAddress) {
   if (!features) return false;
   // Pull all ML predictions in one round-trip
   const preds = await getAllPredictions(mintAddress, `agent_eval:${strategy.id}`);
-  if (!preds) return false;
-  if (!evalEntry(recipe, mintAddress, features, preds)) return false;
+  // 2026-05-18: post-mig strategies (targets_migrated=true) operate on mints
+  // that aren't being snapshotted/predicted by the bonding-curve ML pipeline.
+  // getAllPredictions returns null for these — but if the recipe doesn't gate
+  // on any ml_prediction, that null is irrelevant. Only bail on null preds
+  // when the recipe actually uses ML conditions.
+  const usesMl = (() => {
+    const flat = recipe?.entry?.conditions || [];
+    const groups = (recipe?.entry?.condition_groups || []).flat();
+    return [...flat, ...groups].some(c => c?.kind === 'ml_prediction' || c?.kind === 'composite_score');
+  })();
+  if (usesMl && !preds) return false;
+  if (!evalEntry(recipe, mintAddress, features, preds || {})) return false;
   // D3 smell test (2026-05-13): after the strategy's own gates pass, apply
   // a universal counter-evidence veto. Catches adverse signals (shill, bundle,
   // whale capture, dev dumping) that strategies might miss because they don't
