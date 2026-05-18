@@ -551,9 +551,40 @@ export function isCopyTradeTarget(wallet) {
   return _copyTradeTargets.has(wallet);
 }
 
-function computeEntrySol(recipe, preds) {
+function computeEntrySol(recipe, preds, mintAddress) {
   const sizing = recipe.sizing || {};
   let sol = sizing.sol || 0.13;
+  // 2026-05-18: wallet_tier_scaled sizing. Lets a single strategy scale entry
+  // size based on the quality of the wallet that triggered it — bigger size
+  // when a mega_elite or ultra_elite wallet is in the trigger window, smaller
+  // when only super_elite. Avoids needing 3 separate strategies (which would
+  // triple-enter on ultra signals).
+  //   sizing: {
+  //     type: 'wallet_tier_scaled',
+  //     sol: 0.18,           // base (super_elite alone)
+  //     mega_mult: 1.3,      // if any mega_elite buyer in window
+  //     ultra_mult: 1.7,     // if any ultra_elite buyer in window (takes precedence)
+  //     window_sec: 60,
+  //   }
+  if (sizing.type === 'wallet_tier_scaled' && mintAddress) {
+    const since = Date.now() - (sizing.window_sec || 60) * 1000;
+    let mult = 1.0;
+    try {
+      const ultraN = db().prepare(`SELECT COUNT(DISTINCT t.wallet) AS n FROM trades t
+        JOIN wallet_5x_score w ON w.address = t.wallet AND w.is_ultra_elite = 1
+        WHERE t.mint_address = ? AND t.is_buy = 1 AND t.timestamp >= ?`).get(mintAddress, since)?.n || 0;
+      if (ultraN > 0) {
+        mult = sizing.ultra_mult || 1.7;
+      } else {
+        const megaN = db().prepare(`SELECT COUNT(DISTINCT t.wallet) AS n FROM trades t
+          JOIN wallet_5x_score w ON w.address = t.wallet AND w.is_mega_elite = 1
+          WHERE t.mint_address = ? AND t.is_buy = 1 AND t.timestamp >= ?`).get(mintAddress, since)?.n || 0;
+        if (megaN > 0) mult = sizing.mega_mult || 1.3;
+      }
+    } catch { /* table missing or other error — fall through with 1.0 mult */ }
+    sol = sol * mult;
+    if (sizing.max_sol) sol = Math.min(sol, sizing.max_sol);
+  }
   if (sizing.type === 'scaled_by_peak_pct' && preds.peak_pct_max != null) {
     // Legacy path — kept for backwards compat. peak_pct_max is a fraction
     // (1.0 = 100% peak); scale base SOL by (1 + pred), floor 0.5x.
@@ -736,7 +767,7 @@ async function evaluateOneMint(strategy, mintAddress) {
     ? S().recentFailedExit.get(strategy.id, mintAddress, failedCutoff)
     : null;
   if (recentFail) return false;
-  const sol = computeEntrySol(recipe, preds);
+  const sol = computeEntrySol(recipe, preds, mintAddress);
   // Use last_price_sol from features as entry price
   const entryPrice = features.last_price_sol;
   if (!entryPrice || entryPrice <= 0) return false;
