@@ -43,7 +43,14 @@ const _fastFailWarned = new Set();
 // tracks when the trail floor was first breached. Trail exits only fire
 // once the breach has been sustained for TRAIL_CONFIRM_MS. Clears on
 // recovery above floor and on position close.
-const TRAIL_CONFIRM_MS = 3000;
+//
+// 2026-05-18: 3000ms → 500ms. V7's trail-only design needs the trail to
+// fire decisively — 3s confirmation was swallowing legit retracements on
+// volatile pump.fun mints (PeZn74V7rvrf peaked +39.6%, bounced under the
+// trail floor for ~5min without ever staying for a full 3s, never fired
+// while peak was forming). 500ms = 2 monitor ticks — filters single-tick
+// whale wicks while still firing on sustained retracements within seconds.
+const TRAIL_CONFIRM_MS = 500;
 const _trailBreachStartedAt = new Map();
 // 2026-05-14: 2-tick tier confirmation. Position monitor sees a tier
 // trigger → marks it pending. Only fires when seen AGAIN on a subsequent
