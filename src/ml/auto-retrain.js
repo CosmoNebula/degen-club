@@ -19,7 +19,13 @@ const SCRIPT = path.join(ML_ROOT, 'scripts', 'retrain_all.py');
 const LAST_TRAIN_META = path.join(ML_ROOT, 'data', '.last_train_meta.json');
 
 const FIRST_RUN_DELAY_MS = 15 * 60 * 1000;   // 15 min after boot
-const REPEAT_INTERVAL_MS = 1 * 60 * 60 * 1000;   // 2026-05-13 PM: restored to hourly after 4-CPU droplet resize. Original 2h cadence was a CPU-pressure throttle on the 2-CPU box (96% peak during retrain + A1 universal eval). With 4 cores the retrain subprocess sits on its own core via nice/ionice and doesn't preempt the trading loop, so 24x/day fresh models is safe and helps react to regime shifts faster.
+// 2026-05-18: bumped 1h → 3h after OOM kill at 06:27 UTC. CPU isn't the
+// bottleneck — MEMORY is. retrain_all.py holds 3.2 GB parent while spawning
+// train.py children at 2.8 GB each, peaking ~6 GB. On an 8 GB box that
+// leaves <2 GB for the bot, OOMing under any feature-collector spike.
+// 3h still captures regime shifts within a half-trading-day. Long-term fix
+// is chunked feature loading in retrain_all.py.
+const REPEAT_INTERVAL_MS = 3 * 60 * 60 * 1000;
 
 // Adaptive trigger (added 2026-05-11): check every 5min for either
 // (a) NEW_LABELS > N since last retrain AND last retrain ≥ 30min ago, or
@@ -28,7 +34,9 @@ const REPEAT_INTERVAL_MS = 1 * 60 * 60 * 1000;   // 2026-05-13 PM: restored to h
 const ADAPTIVE_CHECK_MS = 5 * 60 * 1000;
 const MIN_NEW_LABELS = 50;
 const MIN_MINUTES_SINCE_LAST = 30;
-const DD_THRESHOLD_SOL = -2.0; // closed PnL ≤ -2.0 SOL in last 24h triggers
+// 2026-05-18: -2.0 → -5.0 to stop adaptive retrains firing during normal
+// strategy-tuning sessions (V7.x bleed is hitting -2 routinely without rugs).
+const DD_THRESHOLD_SOL = -5.0; // closed PnL ≤ -5.0 SOL in last 24h triggers
 const DD_THRESHOLD_PCT = -0.15; // OR ≥15% drawdown vs starting balance
 
 let _running = false;
