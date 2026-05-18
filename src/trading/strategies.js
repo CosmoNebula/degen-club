@@ -273,6 +273,21 @@ function humanizeRecipe(recipe) {
     if (!key && c.kind === 'narrative_match') key = 'narrative_match';
     if (!key && c.kind === 'composite_score') key = 'composite_score';
     if (!key && c.kind === 'creator_stat') key = c.name || 'creator_stat';
+    // 2026-05-18: kind-aware labels for mint_state conditions. The legacy
+    // COND_LABELS map assumes 'migrated'/'rugged' are ML predictions, but
+    // mint_state.migrated is a binary 0/1 field on the mint itself. Render
+    // a sensible label and skip the (=1) threshold (binary is obvious from
+    // the label).
+    if (c.kind === 'mint_state') {
+      const want = c.value === 1 || c.value === true;
+      const stateLabels = {
+        migrated:    want ? 'Mint has migrated to AMM'        : 'Mint has NOT migrated',
+        rugged:      want ? 'Mint is rugged'                   : 'Mint is NOT rugged',
+      };
+      const sLbl = stateLabels[c.name] || `${c.name} ${c.op} ${c.value}`;
+      lines.push(`• ${sLbl}`);
+      continue;
+    }
     const labelOverride = {
       narrative_match: 'matches active narrative',
       composite_score: 'composite score',
