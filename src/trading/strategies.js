@@ -129,7 +129,7 @@ function S() {
       ORDER BY s.name
     `),
     toggleStrategy: d.prepare('UPDATE strategy_state SET enabled = 1 - enabled, updated_at = ? WHERE name = ?'),
-    countOpen: d.prepare("SELECT COUNT(*) AS n FROM paper_positions WHERE status = 'open'"),
+    countOpen: d.prepare("SELECT COUNT(*) AS n FROM paper_positions WHERE status = 'open' AND is_moonbag = 0"),
     // Anti-snipe gate: distinct buyers + distinct sniper-tagged buyers for a
     // mint. Uses idx_trades_sniper for an efficient scan.
     sniperRatio: d.prepare(`SELECT
@@ -141,7 +141,7 @@ function S() {
     // longer counts toward maxSolExposure — the remaining bag is pure
     // upside, no downside risk to original capital.
     sumOpenSol: d.prepare(`SELECT COALESCE(SUM(MAX(0, entry_sol - COALESCE(sol_realized_so_far, 0))), 0) AS s
-                           FROM paper_positions WHERE status = 'open'`),
+                           FROM paper_positions WHERE status = 'open' AND is_moonbag = 0`),
     holdingMint: d.prepare("SELECT strategy FROM paper_positions WHERE mint_address = ? AND strategy = ? AND status = 'open' AND COALESCE(position_mode,'paper') = ? LIMIT 1"),
     recentClose: d.prepare(`SELECT strategy, exited_at, realized_pnl_sol FROM paper_positions
       WHERE mint_address = ? AND status = 'closed' AND exited_at > ?

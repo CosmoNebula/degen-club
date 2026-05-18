@@ -81,7 +81,7 @@ function S() {
     paperClosedPnl: d.prepare(`SELECT COALESCE(SUM(realized_pnl_sol), 0) AS pnl
        FROM paper_positions WHERE status = 'closed' AND entered_at >= ?`),
     paperOpenLocked: d.prepare(`SELECT COALESCE(SUM(entry_sol - sol_realized_so_far), 0) AS locked
-       FROM paper_positions WHERE status = 'open' AND entered_at >= ?`),
+       FROM paper_positions WHERE status = 'open' AND is_moonbag = 0 AND entered_at >= ?`),
     upsertStrategyState: d.prepare(`INSERT OR REPLACE INTO strategy_state
        (name, label, description, enabled, entry_sol, sl_pct, max_hold_min,
         tier1_trigger_pct, tier1_sell_pct,

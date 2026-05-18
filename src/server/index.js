@@ -698,8 +698,18 @@ export function startServer(getIngestionStatus) {
              m.migrated, m.rugged, m.last_price_source, m.last_price_source_at
       FROM paper_positions pp
       LEFT JOIN mints m ON m.mint_address = pp.mint_address
-      WHERE pp.status = 'open' AND pp.entered_at >= ?
+      WHERE pp.status = 'open' AND pp.is_moonbag = 0 AND pp.entered_at >= ?
       ORDER BY pp.entered_at DESC
+    `).all(sessionStart);
+    // 2026-05-18: moonbag = held leftover (e.g. 5%) after strategy trail
+    // sold the majority. Watch-only; excluded from open count + SOL exposure.
+    const moonbags = d.prepare(`
+      SELECT pp.*, m.symbol, m.name, m.image_uri, m.current_market_cap_sol, m.last_price_sol,
+             m.migrated, m.rugged, m.last_price_source, m.last_price_source_at
+      FROM paper_positions pp
+      LEFT JOIN mints m ON m.mint_address = pp.mint_address
+      WHERE pp.status = 'open' AND pp.is_moonbag = 1 AND pp.entered_at >= ?
+      ORDER BY pp.moonbag_peak_pct DESC, pp.moonbag_started_at DESC
     `).all(sessionStart);
     const recent = d.prepare(`
       SELECT pp.*, m.symbol, m.name
@@ -708,7 +718,7 @@ export function startServer(getIngestionStatus) {
       WHERE pp.status = 'closed' AND pp.entered_at >= ?
       ORDER BY pp.exited_at DESC LIMIT 100
     `).all(sessionStart);
-    res.json({ open, recent });
+    res.json({ open, moonbags, recent });
   });
 
   app.get('/api/strategies', (req, res) => {

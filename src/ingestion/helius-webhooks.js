@@ -49,11 +49,13 @@ function topWallets() {
 // our tracked wallets). Closes the data gap during fast-moving migrated
 // coin holds where DexScreener hasn't indexed pump-amm yet.
 function heldMintAddresses() {
+  // 2026-05-18: moonbag mints are excluded — watch-only, public-RPC pricing
+  // is fine, no need to burn Helius credits subscribing for the small bag.
   return db().prepare(`
     SELECT DISTINCT m.mint_address
     FROM paper_positions p
     JOIN mints m ON m.mint_address = p.mint_address
-    WHERE p.status = 'open' AND m.rugged = 0
+    WHERE p.status = 'open' AND p.is_moonbag = 0 AND m.rugged = 0
   `).all().map(r => r.mint_address);
 }
 

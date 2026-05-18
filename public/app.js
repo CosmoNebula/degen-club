@@ -947,11 +947,15 @@ function exitReasonBadge(r) {
   return `<span class="${cls}">${r}</span>`;
 }
 
-function renderPositionsTables({ open, recent }) {
+function renderPositionsTables({ open, moonbags, recent }) {
   const openEl = document.getElementById('positions-open-table');
   const closedEl = document.getElementById('positions-closed-table');
-  open = applySort(open, 'positions-open-table');
-  recent = applySort(recent, 'positions-closed-table');
+  const moonbagEl = document.getElementById('positions-moonbag-table');
+  const moonbagCountEl = document.getElementById('moonbag-count');
+  open = applySort(open || [], 'positions-open-table');
+  moonbags = applySort(moonbags || [], 'positions-moonbag-table');
+  recent = applySort(recent || [], 'positions-closed-table');
+  if (moonbagCountEl) moonbagCountEl.textContent = moonbags.length ? `(${moonbags.length})` : '';
 
   if (!open.length) {
     openEl.innerHTML = '<tr><td colspan="12" class="empty">No open positions.</td></tr>';
@@ -982,6 +986,38 @@ function renderPositionsTables({ open, recent }) {
         <td class="num">${fmt.age(p.entered_at)}</td>
       </tr>`;
     }).join('');
+  }
+
+  if (moonbagEl) {
+    if (!moonbags.length) {
+      moonbagEl.innerHTML = '<tr><td colspan="10" class="empty">No moonbags yet — V7 trail keeps a 5% bag once it fires.</td></tr>';
+    } else {
+      moonbagEl.innerHTML = moonbags.map(p => {
+        const realized = p.sol_realized_so_far || 0;
+        const un = p.unrealized_pnl_sol || 0;
+        const moonbagPct = p.moonbag_peak_pct || 0;
+        const curPrice = p.last_price_sol || 0;
+        const startPrice = p.migration_price || 0;
+        const sincePct = startPrice > 0 ? (curPrice - startPrice) / startPrice : 0;
+        const startMc = p.migration_mcap_sol || 0;
+        const nowMc = p.current_market_cap_sol || 0;
+        const srcTag = p.last_price_source
+          ? ` <span class="src-pip src-${p.last_price_source.replace(/[^a-z0-9]/gi,'')}" title="last price written by ${p.last_price_source}${p.last_price_source_at ? ' · ' + fmt.age(p.last_price_source_at) : ''}">${p.last_price_source}</span>`
+          : '';
+        return `<tr class="clickable" ${coinLink(p.mint_address)}>
+          <td class="addr">${fmt.dt(p.moonbag_started_at || p.entered_at)}</td>
+          <td>${strategyBadge(p.strategy)}</td>
+          <td><span class="sym">${p.symbol || '???'}</span> <span class="addr">${fmt.short(p.mint_address)}</span></td>
+          <td class="num">${fmt.usd(startMc)}</td>
+          <td class="num ${nowMc >= startMc ? 'pos' : 'neg'}">${fmt.usd(nowMc)}${srcTag}</td>
+          <td class="num pos" title="SOL already realized from trail/tier sells before transition">${fmt.solSigned(realized)}</td>
+          <td class="num ${un >= 0 ? 'pos' : 'neg'}" title="Total P&L = realized + remaining bag value − entry SOL">${fmt.solSigned(un)}</td>
+          <td class="num ${sincePct >= 0 ? 'pos' : 'neg'}" title="Move since moonbag started (after we sold the majority)">${(sincePct * 100).toFixed(1)}%</td>
+          <td class="num pos" title="Best % the bag hit after moonbag transition">${(moonbagPct * 100).toFixed(1)}%</td>
+          <td class="num">${fmt.age(p.moonbag_started_at || p.entered_at)}</td>
+        </tr>`;
+      }).join('');
+    }
   }
 
   if (!recent.length) {

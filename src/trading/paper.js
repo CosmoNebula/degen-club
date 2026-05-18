@@ -789,51 +789,23 @@ function convertToMoonbag(p, m) {
 const _moonbagExitConfirm = new Map(); // positionId -> { reason, count }
 const MOONBAG_EXIT_CONFIRMATIONS = 2;
 
+// 2026-05-18: moonbag is now WATCH-ONLY. When V7's trail fires and the
+// reserve (e.g. 5%) is retained, the position transitions to is_moonbag=1
+// and we just track price from there — no auto-exit ladder, no time exit.
+// Only RUG fires (worthless bag → close it out). Kara wants to see how far
+// the small leftovers actually run after we sold the majority.
 function checkMoonbag(p, m) {
   const s = S();
-  const cfg = config.moonbag;
   const now = Date.now();
   if (!p.migration_price || p.migration_price <= 0) return;
   const currentPrice = m.last_price_sol || p.migration_price;
-  // Defense: ignore ticks that imply >70% drop from migration_price within
-  // the first 10 min after migration — those are usually stale bond-curve
-  // final-state artifacts, not real price action. AFTER 10 min, trust the
-  // tick and let MOONBAG_SL fire normally. (2026-05-11: superapp position
-  // 4562 stuck for 2.5h because this filter was time-unbounded.)
-  const ageSinceMigMs = now - (p.moonbag_started_at || p.entered_at || now);
-  if (ageSinceMigMs < 10 * 60 * 1000 && currentPrice < p.migration_price * 0.3 && !m.rugged) {
+  if (m.rugged) {
+    _moonbagExitConfirm.delete(p.id);
+    finalizePosition(p, currentPrice, m.current_market_cap_sol || 0, 'MOONBAG_RUG');
     return;
   }
   const moonbagPct = (currentPrice - p.migration_price) / p.migration_price;
   const moonbagPeak = Math.max(p.moonbag_peak_pct || 0, moonbagPct);
-  const ageHours = (now - (p.moonbag_started_at || now)) / 3600000;
-
-  let exitReason = null;
-  if (m.rugged) exitReason = 'MOONBAG_RUG';
-  else if (moonbagPct >= cfg.hardTargetPct) exitReason = 'MOONBAG_TARGET';
-  else if (moonbagPct <= cfg.hardSlPct) exitReason = 'MOONBAG_SL';
-  else if (moonbagPeak >= cfg.armTrailAtPct && moonbagPct <= moonbagPeak - cfg.trailPct) exitReason = 'MOONBAG_TRAIL';
-  else if (ageHours >= cfg.maxHoldHours) exitReason = 'MOONBAG_TIME';
-
-  if (exitReason) {
-    // RUG and TIME exits don't debounce — they're certain. TARGET/SL/TRAIL
-    // are price-driven and need a second confirming poll to dodge bad ticks.
-    if (exitReason === 'MOONBAG_RUG' || exitReason === 'MOONBAG_TIME') {
-      _moonbagExitConfirm.delete(p.id);
-      finalizePosition(p, currentPrice, m.current_market_cap_sol || 0, exitReason);
-      return;
-    }
-    const prev = _moonbagExitConfirm.get(p.id);
-    const count = (prev && prev.reason === exitReason) ? prev.count + 1 : 1;
-    if (count < MOONBAG_EXIT_CONFIRMATIONS) {
-      _moonbagExitConfirm.set(p.id, { reason: exitReason, count });
-      return;
-    }
-    _moonbagExitConfirm.delete(p.id);
-    finalizePosition(p, currentPrice, m.current_market_cap_sol || 0, exitReason);
-    return;
-  }
-  _moonbagExitConfirm.delete(p.id);
   const remainingValue = (p.tokens_remaining || 0) * currentPrice;
   const totalUnrealized = (p.sol_realized_so_far || 0) + remainingValue - p.entry_sol;
   const totalUnrealizedPct = totalUnrealized / p.entry_sol;
@@ -892,14 +864,23 @@ function checkPosition(p) {
   if (!strat) return;
 
   // 2026-05-17: per-strategy moonbag mode. Once remaining bag drops at or
-  // below moonbag_pct_reserve fraction of original tokens, bot stops touching
-  // the position — manual close only. Rug-exception: if mint rugged, fall
-  // through so SL/price catches the worthless tokens cleanly.
+  // below moonbag_pct_reserve fraction of original tokens, transition the
+  // position to is_moonbag=1 — separate dashboard section, excluded from
+  // open count + SOL exposure, watch-only (RUG-only exit). Rug-exception:
+  // if mint rugged before we transition, fall through so SL catches it.
   const moonbagReserve = strat.moonbag_pct_reserve || 0;
   if (moonbagReserve > 0 && (p.token_amount || 0) > 0 && !m.rugged) {
     const remainingFraction = (p.tokens_remaining || 0) / p.token_amount;
     if (remainingFraction <= moonbagReserve) {
-      return;  // hands-off — Kara owns this bag
+      const movePrice = m.last_price_sol || p.entry_price;
+      const moveMcap = m.current_market_cap_sol || 0;
+      s.convertToMoonbag.run(
+        p.tokens_remaining, p.sol_realized_so_far, now,
+        movePrice, moveMcap, now,
+        p.id
+      );
+      console.log(`[moonbag] TRANSITION ${p.strategy} on ${p.mint_address.slice(0, 8)}… holding ${((p.tokens_remaining/p.token_amount)*100).toFixed(1)}% bag @ ${movePrice.toExponential(2)} (${moveMcap.toFixed(1)} SOL mcap) · realized ${(p.sol_realized_so_far || 0).toFixed(4)} SOL · watch-only from here`);
+      return;
     }
   }
 
