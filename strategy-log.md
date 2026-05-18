@@ -155,3 +155,77 @@ Session total: -1.68 SOL. Wallet ~8.32 (still 3.3 above 5 SOL freeze).
 - **Mcap range 28-60 SOL** (was 28-100). Mints near 60-100 are approaching migration and have less remaining upside vs downside.
 - **max_hold 30 min** (was 45). Cap death-spiral exposure — V7.8 TIME_EXITs avg -7.5% which is much better than -30% SL hits.
 - Keep mega_elite_5x gate, keep tier sells, SL -25%.
+
+## V7.9 first 5 closes (2026-05-18 ~07:00 UTC)
+| exit          | n | net    | avg % |
+|---------------|---|--------|-------|
+| TIME_EXIT     | 1 | +0.050 | +21.3 |
+| REALIZED_LOCK | 2 | +0.025 | +5.3  |
+| SL_HIT        | 2 | -0.130 | -27.9 |
+**V7.9 net: -0.056 / 5 closes / -0.011 per trade.**
+
+Significant improvement vs prior iterations. The 30-min max_hold caught a pumped mint at +21% before it could fade. SL fills at -27.9% vs -25% trigger = 3pt slip (possibly sample noise, possibly the tighter mcap range has less catastrophic dumps).
+
+Per-trade trajectory: V7.6 -0.027 → V7.7 -0.030 → V7.8 -0.039 → V7.9 -0.011. Holding V7.9 to accumulate ≥20 closes before next iteration.
+
+Wallet 8.35 SOL · 5 SOL freeze threshold still safe.
+
+## OOM incident (2026-05-18 06:27 UTC)
+degen-club OOM killed by retrain_all.py + train.py(hits_2x_within_1h) running
+concurrently at ~6 GB combined. Bot auto-restarted. Memory recovered after
+killing both ML processes manually.
+
+**Fix:** auto-retrain.js REPEAT_INTERVAL_MS 1h → 3h, DD_THRESHOLD_SOL -2 → -5.
+Long-term fix needed: chunk retrain_all.py feature loading so parent process
+doesn't hold 3 GB resident the whole time.
+
+## V7.9 update + iteration pause (2026-05-18 ~08:15 UTC)
+Updated V7.9 ledger (8 closes):
+| exit          | n | net    | avg %  |
+|---------------|---|--------|--------|
+| TIME_EXIT     | 1 | +0.050 | +21.3  |
+| REALIZED_LOCK | 2 | +0.025 | +5.3   |
+| SL_HIT        | 5 | -0.379 | -32.4  |
+**V7.9 net: -0.305 / 8 closes / -0.038 per trade.**
+
+Earlier +21% TIME_EXIT outlier made first 5 closes look good. Next 3 closes all SLs, reverting to the baseline bleed rate.
+
+**Per-trade across iterations:**
+- V7.6: -0.027 (14 closes)
+- V7.7: -0.030 (10 closes)
+- V7.8: -0.039 (12 closes)
+- V7.9: -0.038 (8 closes)
+
+**Diagnosis: I've been pulling the wrong levers.** Wallet pool, mcap range, SL trigger, trail vs tier, max_hold — none of these margin tweaks move per-trade meaningfully. The signal is structurally negative EV after friction.
+
+**What I think is actually needed (no more tweaks until):**
+1. Run a backtest harness WITH friction baked in (the original `/tmp/exit-backtest-v3.py` had ZERO friction — that's why "winners" there don't survive live)
+2. Look at WHAT discriminates winners vs losers in our 50+ V7.x closes: entry mcap, mint age at entry, drift size, time-of-day, wallet count concurrence, ML predictions in combination
+3. If discrimination found → build a per-feature entry gate (not just wallet_pool + mcap range)
+4. If no discrimination → wallet-pool entries are inherently unprofitable; pivot to runner-score or post-migration entries
+
+**Holding V7.9 until I have a substantial change.** Wallet 8.10 / freeze threshold 5 SOL. Memory healthy after auto-retrain detune. Continuing monitor; will not push another V7.X iteration without doing the analysis above first.
+
+## V7.10 — DATA-DRIVEN ENTRY GATE (2026-05-18 ~08:30 UTC)
+Analyzed all 43 V7.x closes. Discriminative finding:
+
+**local_top_60s ML prediction buckets:**
+| bucket | n | win% | per-trade |
+|--------|---|------|-----------|
+| 0.00-0.10 | 9 | 44% | -0.027 |
+| 0.10-0.25 | 9 | 56% | -0.020 |
+| **0.25-0.50** | **22** | **23%** | **-0.042** |
+| 0.50-1.01 | 3 | 33% | -0.029 |
+
+22 of 43 (51%) sit in 0.25-0.50 bucket and account for -0.93 SOL of total bleed.
+
+**V7.10 changes:**
+- Added entry condition: `ml_prediction local_top_60s <= 0.25`
+- Preserves all V7.9 exit params (SL -25%, T1/T2/T3, max_hold 30min, mcap 28-60, mega_elite_5x)
+
+Expected: ~50% fewer entries, per-trade rate -0.039 → -0.023 (40% improvement). Still bleeding but real progress. Next high-leverage move if V7.10 works: combine with entry_mcap 55-70 sweet spot (67% win rate in that band).
+
+Other features analyzed (not used):
+- will_rug, hits_2x: not discriminative (similar means/medians across wins/losses)
+- mint_age: 30-60m bucket 0% win (n=3, small) — not strong enough alone
+- wallet_count: super_n=3 had 1 win in 1 sample, not statistically meaningful
