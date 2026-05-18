@@ -138,3 +138,20 @@ Tightening SL from -30% to -25% didn't help — slippage holds at ~12pt regardle
 - Keep V7.7 exit params (SL -25%, T1+20/50%, T2+60/30%, T3+200/20%, max_age 1h, max_hold 45min)
 
 If V7.8 still bleeds, the wallet-tier signal itself isn't predictive enough and we need to look at ML-gated entries or a different entry vector entirely.
+
+## V7.8 ledger (2026-05-18 ~06:10 UTC)
+| exit          | n | net    | avg %  | best  | worst |
+|---------------|---|--------|--------|-------|-------|
+| REALIZED_LOCK | 2 | +0.017 | +3.3%  | +5.0  | +1.6  |
+| TIME_EXIT     | 4 | -0.060 | -7.5%  | +21.3 | -19.2 |
+| SL_HIT        | 6 | -0.428 | -30.5% | -19.5 | -43.1 |
+**V7.8 net: -0.471 across 12 closes, -0.039/trade** (worse than V7.7's -0.030).
+
+Mega_elite wallet signal didn't materially improve hit rate. SL slip slightly better (~7pt vs V7.7's 12pt) but mega sizing (1.3×) means SOL loss per SL is similar (-0.071 vs -0.068). Wallet-pool gating alone isn't the high-leverage lever.
+
+Session total: -1.68 SOL. Wallet ~8.32 (still 3.3 above 5 SOL freeze).
+
+## V7.9 (2026-05-18 ~06:15 UTC) — Tighten mcap + faster TIME_EXIT
+- **Mcap range 28-60 SOL** (was 28-100). Mints near 60-100 are approaching migration and have less remaining upside vs downside.
+- **max_hold 30 min** (was 45). Cap death-spiral exposure — V7.8 TIME_EXITs avg -7.5% which is much better than -30% SL hits.
+- Keep mega_elite_5x gate, keep tier sells, SL -25%.
