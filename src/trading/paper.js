@@ -584,6 +584,34 @@ function finalizePosition(p, exitPrice, exitMcap, exitReason) {
   }
 }
 
+// 2026-05-18: When a winning trail-style exit fires AND the strategy has a
+// moonbag_pct_reserve > 0, sell everything ABOVE that reserve and transition
+// the position to is_moonbag=1 instead of fully closing. This is how the V7
+// "keep 5% to watch the moon" mechanic actually retains a bag — the trail
+// path otherwise calls finalizePosition with the full remaining tokens.
+// Paper-mode only (live-mode would need a real partial-sell tx).
+function trailExitToMoonbag(p, currentPrice, currentMcap, exitReason, moonbagReserve) {
+  const s = S();
+  const now = Date.now();
+  const targetRemaining = (p.token_amount || 0) * moonbagReserve;
+  const sellTokens = Math.max(0, (p.tokens_remaining || 0) - targetRemaining);
+  let newRemaining = p.tokens_remaining || 0;
+  let newRealized = p.sol_realized_so_far || 0;
+  if (sellTokens > 0 && currentPrice > 0) {
+    const solReceived = applySellFriction(sellTokens, currentPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
+    newRemaining = (p.tokens_remaining || 0) - sellTokens;
+    newRealized = (p.sol_realized_so_far || 0) + solReceived;
+    appendSellEvent(p.id, { r: exitReason, m: currentMcap || 0, s: solReceived });
+    const realizedPnl = newRealized - p.entry_sol;
+    if (realizedPnl > 0) s.bumpWin.run(realizedPnl, p.strategy);
+    else if (realizedPnl < 0) s.bumpLoss.run(realizedPnl, p.strategy);
+    console.log(`[moonbag] TRAIL→MOONBAG ${p.strategy} on ${p.mint_address.slice(0,8)}… ${exitReason} sold ${((1-moonbagReserve)*100).toFixed(0)}% for +${solReceived.toFixed(4)} SOL · realized=${newRealized.toFixed(4)} · keeping ${(moonbagReserve*100).toFixed(0)}% bag @ ${(currentMcap||0).toFixed(1)} SOL mcap`);
+  }
+  _trailBreachStartedAt.delete(p.id);
+  clearTierPending(p.id);
+  s.convertToMoonbag.run(newRemaining, newRealized, now, currentPrice, currentMcap || 0, now, p.id);
+}
+
 function fireTier(p, tierIdx, tierPctSell, currentPrice, currentMcap) {
   const s = S();
   const sellTokens = Math.min(p.token_amount * tierPctSell, p.tokens_remaining);
@@ -1232,7 +1260,15 @@ function checkPosition(p) {
   else if (ageMin >= strat.max_hold_min) exitReason = 'TIME_EXIT';
 
   if (exitReason) {
-    finalizePosition(p, currentPrice, m.current_market_cap_sol || 0, exitReason);
+    // 2026-05-18: route winning trail-style exits through moonbag transition
+    // when strategy reserves one. SL/RUG/TIME/STAGNATED/etc still fully close.
+    const moonbagReserve = strat.moonbag_pct_reserve || 0;
+    const isTrailWin = (exitReason === 'TP_TRAIL' || exitReason === 'PEAK_FLOOR' || exitReason === 'REALIZED_LOCK');
+    if (isTrailWin && moonbagReserve > 0 && peakFromEntry > 0 && !m.rugged && p.position_mode !== 'live') {
+      trailExitToMoonbag(p, currentPrice, m.current_market_cap_sol || 0, exitReason, moonbagReserve);
+    } else {
+      finalizePosition(p, currentPrice, m.current_market_cap_sol || 0, exitReason);
+    }
   } else {
     const remaining = p.tokens_remaining || 0;
     const remainingValue = remaining * currentPrice;
