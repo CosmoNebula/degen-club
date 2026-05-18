@@ -110,6 +110,18 @@ async function runRetrain() {
       return;
     }
   } catch {}
+  // 2026-05-18: memory guard. retrain_all.py + train.py peak at 6 GB combined.
+  // On 8 GB box, free < 4 GB during retrain = OOM kill the bot. Skip the run
+  // if not enough headroom; will fire again on next aligned slot.
+  try {
+    const meminfo = fs.readFileSync('/proc/meminfo', 'utf8');
+    const availMatch = meminfo.match(/MemAvailable:\s+(\d+)\s+kB/);
+    const availMb = availMatch ? Math.floor(parseInt(availMatch[1]) / 1024) : 0;
+    if (availMb > 0 && availMb < 4000) {
+      console.warn(`[auto-retrain] memory pressure (${availMb} MB free) — deferring retrain`);
+      return;
+    }
+  } catch {}
   _running = true;
   const start = Date.now();
   resetProgress();
@@ -260,12 +272,15 @@ function adaptiveTick() {
 function nextAlignedRetrainAt(fromMs = Date.now()) {
   const d = new Date(fromMs);
   const target = new Date(d);
-  // Round up to the next top-of-hour. If we're exactly on HH:00:00, take
-  // HH+1 to avoid double-firing if startup races the boundary.
-  if (d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0) {
-    target.setHours(d.getHours() + 1, 0, 0, 0);
+  // 2026-05-18: was every top-of-hour. Bumped to every 3 hours to reduce
+  // OOM risk on the 8 GB box. Fires at 00, 03, 06, 09, 12, 15, 18, 21 ET.
+  // 3h still captures regime shifts within half a trading day.
+  const next3hHour = Math.floor(d.getHours() / 3) * 3 + 3;
+  if (next3hHour >= 24) {
+    target.setDate(d.getDate() + 1);
+    target.setHours(next3hHour - 24, 0, 0, 0);
   } else {
-    target.setHours(d.getHours() + 1, 0, 0, 0);
+    target.setHours(next3hHour, 0, 0, 0);
   }
   return target;
 }
