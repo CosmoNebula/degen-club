@@ -118,3 +118,23 @@ ML predictions in sample (12 closes): hits_2x ranges 0.09-0.33 across wins and l
 - Adaptive trail still null
 
 Expected effect: smaller SL losses (~-0.060 vs -0.080), fewer SL fires from stale mints.
+
+## V7.7 ledger (2026-05-18 ~05:20 UTC)
+| exit          | n | net SOL  | avg %  | best  | worst |
+|---------------|---|----------|--------|-------|-------|
+| REALIZED_LOCK | 4 | +0.0463  | +5.5%  | +12.1 | -0.3  |
+| TIME_EXIT     | 2 | -0.0693  | -17.3% | -12.9 | -21.7 |
+| SL_HIT        | 4 | -0.2718  | -37.7% | -35.6 | -40.0 |
+**V7.7 net: -0.295 SOL across 10 closes** (-0.030/trade, ≈ V7.6's -0.027).
+
+Tightening SL from -30% to -25% didn't help — slippage holds at ~12pt regardless of trigger, so per-SL loss stays around -0.07 SOL. The -25% trigger just fires sooner without reducing magnitude.
+
+**Diagnosis: SL hit rate (40%) is the structural issue, not the SL magnitude.** Can't fix a high SL rate with exit tuning — that's an entry-quality problem.
+
+## V7.8 (2026-05-18 ~05:25 UTC) — Tighten entry pool
+**Stop tuning exits. Switch to higher-conviction entry signal.**
+- `wallet_pool: super_elite_5x ≥ 1` (217 wallets, 35% hit rate) → `mega_elite_5x ≥ 1` (22 wallets, 45% hit rate)
+- Expected effect: ~10× fewer entries, but each one backed by a wallet with a 10pt-higher win rate
+- Keep V7.7 exit params (SL -25%, T1+20/50%, T2+60/30%, T3+200/20%, max_age 1h, max_hold 45min)
+
+If V7.8 still bleeds, the wallet-tier signal itself isn't predictive enough and we need to look at ML-gated entries or a different entry vector entirely.
