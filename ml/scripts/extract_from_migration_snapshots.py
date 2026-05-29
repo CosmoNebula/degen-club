@@ -46,12 +46,23 @@ FEATURE_COLS = [
 ]
 
 LABEL_COLS = [
+    # Original labels
     'post_mig_peak_mcap_sol', 'post_mig_peak_pct',
     'post_mig_hits_2x', 'post_mig_hits_5x', 'post_mig_hits_10x',
     'post_mig_hits_1m_usd',
     'post_mig_rugs_1h',
     'post_mig_alive_24h', 'post_mig_alive_72h',
     'post_mig_volume_24h_usd', 'post_mig_max_liquidity_usd',
+    # 2026-05-21: Extended labels for new exit-ladder + multi-horizon training
+    'post_mig_peak_pct_30m', 'post_mig_peak_pct_1h',
+    'post_mig_peak_pct_4h', 'post_mig_peak_pct_24h',
+    'post_mig_hits_130pct_4h', 'post_mig_hits_186pct_4h',
+    'post_mig_hits_50pct_30m', 'post_mig_hits_100pct_1h',
+    'post_mig_hits_30x_24h', 'post_mig_hits_100x_24h',
+    'post_mig_drawdown_50_5min', 'post_mig_drawdown_50_30min',
+    'post_mig_drawdown_30_5min',
+    'post_mig_alive_1h', 'post_mig_alive_4h',
+    'post_mig_time_to_peak_min', 'post_mig_ev_with_ladder_sol',
 ]
 
 

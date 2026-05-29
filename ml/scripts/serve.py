@@ -225,6 +225,37 @@ def predict_mint(payload: MintPayload):
     return {'mint': payload.mint, 'predictions': out}
 
 
+@app.post('/predict-postmig')
+def predict_postmig(payload: MintPayload):
+    """Run post-mig models on features from ml_migration_snapshots.
+    The post-mig models were trained on a different feature set than the
+    pre-mig snapshot. This endpoint pulls the correct features (age=0 anchor
+    row by default) and runs only post-mig models."""
+    if not _models:
+        raise HTTPException(503, 'no models loaded')
+    postmig_models = {k: v for k, v in _models.items() if k.startswith('post_mig_')}
+    if not postmig_models:
+        raise HTTPException(404, 'no post-mig models loaded')
+    # All post-mig models share the same feature_cols.
+    cols = next(iter(postmig_models.values()))['feature_cols']
+    import sqlite3, os
+    db = Path(os.environ.get('DEGEN_DB_PATH', str(Path(__file__).resolve().parent.parent.parent / 'data' / 'degen.db')))
+    conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+    # Prefer the latest snapshot age that has data for this mint
+    # (age=0 might not be captured yet if migration is very recent).
+    q = f"SELECT {','.join(cols)} FROM ml_migration_snapshots WHERE mint_address = ? ORDER BY snapshot_age_min ASC LIMIT 1"
+    row = conn.execute(q, (payload.mint,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, f'no migration snapshot for mint {payload.mint}')
+    feats = dict(zip(cols, row))
+    out = {}
+    for target in postmig_models.keys():
+        try: out[target] = _predict(target, feats)
+        except Exception as e: out[target] = None
+    return {'mint': payload.mint, 'predictions': out}
+
+
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='127.0.0.1', port=5050, log_level='info')

@@ -41,3 +41,9 @@ ml/logs/
 
 # Temp test files
 test-*.mjs
+
+# Backup cruft / archives (added 2026-05-28)
+*.bak*
+/public-v1/
+ml/models-archive/
+models-archive/

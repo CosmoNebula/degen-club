@@ -1,299 +1,43 @@
+// config.js — constants + env loading
 import 'dotenv/config';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { strategyConfigs } from './strategies/index.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
 
 export const config = {
-  root: ROOT,
-  port: parseInt(process.env.PORT || '4200', 10),
+  // Pumpportal free WS endpoint (new-token + migration only — no api-key needed)
+  pumpportalWs: 'wss://pumpportal.fun/api/data',
+  // Public Solana RPC WS endpoint (free, accountSubscribe notifications are free)
+  solanaRpcWs: process.env.SOLANA_RPC_WS || 'wss://api.mainnet-beta.solana.com',
+  // Helius WS for accountSubscribe on held positions. Standard WS methods
+  // (accountSubscribe/logsSubscribe) are FREE on Helius — only enhanced
+  // transactionSubscribe costs credits. Way more reliable than public
+  // mainnet-beta which gave us 10 subs with ZERO notifications.
+  heliusWs: process.env.HELIUS_WS_URL || '',
+  // ML service (local Python FastAPI)
+  mlServiceUrl: process.env.ML_SERVICE_URL || 'http://127.0.0.1:5050',
+  // Pump.fun program ID (for PDA derivation, account decoding)
+  pumpProgram: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
+  // Helius reserved for FUTURE live trading via Sender — NOT used in paper
   heliusApiKey: process.env.HELIUS_API_KEY || '',
-  dbPath: path.join(ROOT, 'data', 'degen.db'),
-  publicDir: path.join(ROOT, 'public'),
-
-  pumpPortal: {
-    url: 'wss://pumpportal.fun/api/data',
-    reconnectMinMs: 1000,
-    reconnectMaxMs: 30000,
-  },
-
-  ipfs: {
-    gateways: [
-      'https://pump.mypinata.cloud/ipfs/',
-      'https://ipfs.io/ipfs/',
-      'https://cloudflare-ipfs.com/ipfs/',
-      'https://gateway.pinata.cloud/ipfs/',
-      'https://cf-ipfs.com/ipfs/',
-    ],
-    timeoutMs: 3500,
-  },
-
-  sniper: {
-    secondsWindow: 3,
-    firstNBuyers: 10,
-    firstBlockMaxSeconds: 1,
-    firstBlockMaxRank: 2,
-  },
-
-  flags: {
-    abandonedMinutes: 30,
-    deadDropPct: 0.85,
-    deadQuietMinutes: 10,
-    bundleMinSnipersSold: 5,
-    snipersCohortSize: 10,
-    snipersSoldPctThreshold: 0.5,
-    devHoldingMinMinutes: 5,
-  },
-
-  sweeper: {
-    intervalMs: 30000,
-    maxAgeMs: 4 * 60 * 60 * 1000,
-    maxMints: 500,
-  },
-
-  traders: {
-    recomputeIntervalMs: 120000,
-    minClosedPositions: 20,
-    minRealizedPnlSol: 5,
-    minWinRate: 0.60,
-    maxSniperRatio: 0.4,
-    minGraduatedTouched: 1,
-    fullExitPctThreshold: 0.99,
-    rollingDays: 30,
-    kol: {
-      minClosed30d: 30,
-      minRealizedPnl30d: 10,
-      minWinRate30d: 0.60,
-      minGraduatedTouched: 0,
-      maxSniperRatio: 0.30,
-      sizingBoost: 1.5,
-    },
-  },
-
-  bot: {
-    scalperTradesPerPosition: 6,
-    scalperMinTrades: 20,
-    snipeHeavyMinRatio: 0.6,
-    snipeHeavyMinBuys: 10,
-    fastHandsMaxHoldSec: 20,
-    fastHandsMinClosed: 5,
-    perfectWrMinClosed: 8,
-    perfectWrThreshold: 0.95,
-    humanMinClosed: 5,
-    humanMinAvgHoldSec: 90,
-    humanMaxTradesPerPosition: 4,
-    humanMaxSniperRatio: 0.3,
-    humanMaxWinRate: 0.85,
-    humanMinWinRate: 0.2,
-    copyFriendlyMinHoldSec: 60,
-    sell100PctMaxSec: 120,
-  },
-
-  bundle: {
-    // 2026-05-14: was 5min interval + 24h window — single sweep was 10s+ on
-    // 430k-trade scan, dropping WSS every cycle. Bundles are detected at
-    // coin-launch (cohort window <2s after creation), so a 6h scan catches
-    // every active mint that could still be relevant. 15min interval keeps
-    // it well-clear of WSS reconnect cycles.
-    intervalMs: 15 * 60 * 1000,
-    cohortMaxSeconds: 2,
-    cohortMinSize: 2,
-    cohortMaxSize: 30,
-    minCoincidences: 3,
-    minClusterSize: 3,
-    maxAgeMs: 6 * 60 * 60 * 1000,
-    maxMintsPerSweep: 2000,
-  },
-
-  copySignal: {
-    windowSeconds: 60,
-    minTrackedWallets: 2,
-    dedupeMinutes: 5,
-    maxMintAgeMinutes: 5,
-    minBuyerRank: 3,
-  },
-
-  cluster: {
-    windowSeconds: 10,
-    minWallets: 3,
-  },
-
-  healthyMomentum: {
-    sweepIntervalMs: 20000,
-    minMintAgeMin: 2,
-    maxMintAgeMin: 12,
-    minCurveProgress: 0.18,
-    maxCurveProgress: 0.50,
-    minUniqueBuyers: 15,
-    minBuyersLast60s: 6,
-    minBuyersLast120s: 12,
-    sustainRatio: 1.0,
-    maxBundlePct: 0.50,
-    maxWhalePct: 0.45,
-    maxSniperFrac: 0.30,
-    maxFiresPerSweep: 3,
-    cooldownMinutes: 30,
-  },
-
-volumeSurge: {
-    sweepIntervalMs: 15000,
-    currentWindowSec: 60,
-    baselineWindowSec: 300,
-    minVelocityRatio: 5,
-    minBuysPerMin: 12,
-    minUniqueBuyers: 8,
-    minPriceChange: 0,
-    maxPriceChangeAtFire: 0.15,
-    maxCurveProgress: 0.7,
-    cooldownMinutes: 10,
-    skipFlags: ['BUNDLE', 'ABANDONED', 'DEAD'],
-    minBaselineBuysPerMin: 0.5,
-    confluenceLookbackSec: 60,
-    maxMintAgeMinutes: 30,
-    sizing: {
-      baseEntrySol: 0.05,
-      minEntrySol: 0.025,
-      maxEntrySol: 0.125,
-      maxVelocityRatioForScore: 20,
-      maxBuyerCountForScore: 10,
-      priceMomentumBonus: 1.2,
-      priceMomentumThreshold: 0.10,
-      confluenceBonus: 1.5,
-    },
-  },
-
-  maintenance: {
-    intervalMs: 30 * 60 * 1000,
-    // 2026-05-14: shrunk from 30d quiet / 7d rugged. The bot retrains hourly
-    // and pump.fun meta moves daily — 30+ days of failed-launch trades was
-    // dead weight bloating the live DB to 4.45M trades. All ML labels resolve
-    // within 24h (peaked_*, alive_*, rug_within, hits_5x_within_24h), so 3-day
-    // retention gives a generous buffer for label backfill. Older trades flow
-    // to MEGA Parquet via cold-archive before pruning — the bot's "memory"
-    // lives in the trained models + archive + migrator-stats aggregates, not
-    // raw trade rows. Migrated mints stay forever (not touched here — that
-    // exclusion is in deleteRuggedTrades + deleteQuietTrades WHERE clauses).
-    ruggedRetentionHours: 3 * 24,         // 3 days (was 7d)
-    quietRetentionMinutes: 3 * 24 * 60,   // 3 days (was 30d)
-    // 2026-05-14: migrated mints used to be kept FOREVER for migrator-stats.
-    // But wallet stats are persisted on the wallets table after computation,
-    // not recomputed from raw trades — old trades aren't load-bearing. If a
-    // migrator is still active, processor.js keeps writing to it and its
-    // last_trade_at stays fresh. 3-day window covers the post-mig peak
-    // window with margin.
-    migratedRetentionHours: 3 * 24,
-    startupDelayMs: 60 * 1000,
-  },
-
-  moonbag: {
-    // 2026-05-13: DISABLED. The global auto-convert-on-migration was overriding
-    // every strategy with one hard-coded rule (sell 75% at migration, ride 25%).
-    // For an alive-migrator strategy whose thesis is "this will migrate and run,"
-    // dumping 75% at migration was the opposite of the trade. Each strategy now
-    // owns its full lifecycle via its own tier/trail/SL params in strategy_state.
-    // Existing open positions with is_moonbag=1 continue under checkMoonbag —
-    // only NEW migrations skip the conversion.
-    enabled: false,
-    sellPctAtMigration: 0.75,
-    hardTargetPct: 5.0,
-    trailPct: 0.50,
-    hardSlPct: -0.60,
-    maxHoldHours: 48,
-    pricePollIntervalMs: 10000,
-    armTrailAtPct: 0.20,
-  },
-
-  dexscreener: {
-    apiBase: 'https://api.dexscreener.com',
-    timeoutMs: 8000,
-    pollIntervalMs: 10000,
-  },
-
-  friction: {
-    feePct: 0.01,
-    slippagePct: 0.025,
-    priorityFeeSol: 0.0008,
-  },
-
-  dynamicSizing: {
-    enabled: true,
-    startingBalance: 2.0,
-    curve: 'sqrt',
-    minFactor: 0.5,
-    maxFactor: 3.0,
-    minEntrySol: 0.09,
-    maxEntrySol: 1.5,
-  },
-
-  safety: {
-    maxPerTradeSol: 0.25,
-    dailyMaxLossSol: 0.5,
-    minWalletSolFloor: 0.05,
-    // 2026-05-16: slippage gate effectively disabled per user. 17% was killing
-    // legitimate fast-moving entries on tracker/hunter triggers. Recipes can
-    // still set `entry.max_entry_slippage_pct` to a tighter value if they want.
-    maxEntrySlippagePct: 1.0,
-  },
-
+  // Position sizing + safety limits
   paper: {
-    latencyMs: 0,
+    minTradeSol: 0.001,
+    maxOpenPositions: 25,
+    maxOpenExposureSol: 2.0,
+    entrySizeBase: 0.10,
+    entrySizeMax: 0.20,
+    reentryCooldownMs: 10 * 60 * 1000,
   },
-
-  skim: {
-    enabled: true,
-    thresholdSol: 5.0,
-    keepSol: 2.0,
-    minSweepSol: 0.5,
-    cooldownMs: 30 * 60 * 1000,
-    destination: process.env.MAIN_WALLET_PUBKEY || 'BG7kSq4XJUCv2NffuPqz94NC1pERTiHAdVGd9RNNVwgG',
+  // Policy decision loop
+  policy: {
+    tickMs: 5000,
+    entryScoreThreshold: 0.10,
+    holdScoreFloor: -0.15,
   },
-
-  photon: {
-    apiBase: 'https://photon-sol.tinyastro.io/api',
-    apiKey: process.env.PHOTON_API_KEY || '',
-    apiSecret: process.env.PHOTON_API_SECRET || '',
-    slippageBps: 1500,
-    priorityFeeMicroLamports: 200000,
-  },
-
-  strategies: {
-    monitorIntervalMs: 250,
-    ...strategyConfigs,
-    global: {
-      maxOpenPositions: 200,
-      maxSolExposure: 0.75,
-      minMintAgeSec: 0,
-      maxMintAgeMinutes: 999999,
-      skipFlags: ['ABANDONED', 'DEAD'],
-      mintCooldownMinutes: 0,
-      lossCooldownMinutes: 10,
-      winCooldownMinutes: 8,
-      smartTradeMinMcapSol: 42,
-      smartTradeMcapFloorBypassBoost: true,
-      // 2026-05-15 (PM-5): anti-snipe thresholds promoted from hardcoded
-      // constants in src/trading/strategies.js → config. Classical strategies
-      // use these as defaults; agent strategies don't pass through evaluateGuards.
-      antiSnipeRatio: 0.6,
-      antiSnipeMinBuyers: 5,
-    },
-    holderGate: {
-      enabled: true,
-      maxWhalePct: 0.80,
-      // Bundle gate disabled — pump.fun mints commonly start with sniper-bot
-      // sweeps that briefly hold ~100% of supply, then dilute as the run
-      // continues. In session data, BUNDLE_TOO_HIGH rejected 50 mints with
-      // 71% (37 of 50) going on to be wins (avg 2.45x peak from rejection).
-      // Setting to 1.01 makes it impossible to trip; keep the field for fast
-      // re-enable if a future pattern justifies it.
-      maxBundlePct: 1.01,
-      // Dev cap loosened from 25% → 60% — top missed runners (44x, 43x, etc.)
-      // were rejected by DEV_TOO_HIGH. Pump.fun dev concentration normalizes
-      // as the run continues; rejecting at 25% kills future runners.
-      maxCreatorPct: 0.60,
-      minHolderCount: 0,
-      cacheTtlMs: 5000,
-    },
-  },
+  // Stables/established tokens we ignore
+  skipMints: new Set([
+    'EPjFWdd5AufqSSqeM2qNT1xzybapC8G4wEGGkZwyTDt1v', // USDC
+    'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+    'So11111111111111111111111111111111111111112',  // wSOL
+    'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',  // mSOL
+  ]),
+  dashboardPort: process.env.DASHBOARD_PORT ? parseInt(process.env.DASHBOARD_PORT) : 3000,
 };

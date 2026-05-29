@@ -50,24 +50,41 @@ TARGETS = [
     # ---------- PRE-MIGRATION (csv=training.csv, features-mode=pre) ----------
     # 1. Will it rug? — CANONICAL, keyed off mint.rugged_at (Definition 1 from
     #    audit). Replaces the wick-confused rug_within_5min + will_die_fast.
-    {'name': 'will_rug',                  'out': 'models/will_rug_v1.pkl',                  'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
+    # 2026-05-23 PAUSED (pre-mig lean-out): {'name': 'will_rug',                  'out': 'models/will_rug_v1.pkl',                  'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
     # 2. Will it 2x within 1h? — entry conviction signal.
-    {'name': 'hits_2x_within_1h',         'out': 'models/hits_2x_within_1h_v1.pkl',         'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
+    # 2026-05-23 PAUSED (pre-mig lean-out): {'name': 'hits_2x_within_1h',         'out': 'models/hits_2x_within_1h_v1.pkl',         'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
     # 3. Will it 5x within 24h? — size-up + hold-longer signal.
-    {'name': 'hits_5x_within_24h',        'out': 'models/hits_5x_within_24h_v1.pkl',        'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
+    # 2026-05-23 PAUSED (pre-mig lean-out): {'name': 'hits_5x_within_24h',        'out': 'models/hits_5x_within_24h_v1.pkl',        'min_pos': 30,  'kind': 'binary',     'mode': 'pre'},
     # 4. Will it migrate to Raydium? — CANONICAL, keyed off mint.migrated_at
     #    with 24h window. Replaces migrates_within_15min (too narrow) and
     #    `migrated` (anytime-ever, less actionable).
-    {'name': 'will_migrate',              'out': 'models/will_migrate_v1.pkl',              'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
+    # 2026-05-23 PAUSED (pre-mig lean-out): {'name': 'will_migrate',              'out': 'models/will_migrate_v1.pkl',              'min_pos': 20,  'kind': 'binary',     'mode': 'pre'},
     # 5. Max % gain achievable in 24h — position sizing signal.
-    {'name': 'peak_pct_within_24h',       'out': 'models/peak_pct_within_24h_v1.pkl',       'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
+    # 2026-05-23 PAUSED (pre-mig lean-out): {'name': 'peak_pct_within_24h',       'out': 'models/peak_pct_within_24h_v1.pkl',       'min_pos': 100, 'kind': 'regression', 'mode': 'pre'},
     # 6. Is now a local top? — exit-timing signal.
-    {'name': 'local_top_60s',             'out': 'models/local_top_60s_v1.pkl',             'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
+    # 2026-05-23 PAUSED (pre-mig lean-out): {'name': 'local_top_60s',             'out': 'models/local_top_60s_v1.pkl',             'min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
     # 7. Will buy pressure continue in next 60s? — entry validation.
-    {'name': 'buy_pressure_continues_60s','out': 'models/buy_pressure_continues_60s_v1.pkl','min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
+    # 2026-05-23 PAUSED (pre-mig lean-out): {'name': 'buy_pressure_continues_60s','out': 'models/buy_pressure_continues_60s_v1.pkl','min_pos': 100, 'kind': 'binary',     'mode': 'pre'},
     # ---------- POST-MIGRATION (csv=training_postmig.csv, features-mode=post) ----------
-    # 8. Post-graduation: will it 2x? — drives post-mig strategies.
+    # Original models
     {'name': 'post_mig_hits_2x',          'out': 'models/post_mig_hits_2x_v1.pkl',          'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
+    {'name': 'post_mig_peak_pct',         'out': 'models/post_mig_peak_pct_v1.pkl',         'min_pos': 100, 'kind': 'regression', 'mode': 'post'},
+    {'name': 'post_mig_rugs_1h',          'out': 'models/post_mig_rugs_1h_v1.pkl',          'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
+    # 2026-05-21: Extended targets for new exit ladder (sweep-tuned T1=+130%, T2=+186%)
+    {'name': 'post_mig_hits_130pct_4h',   'out': 'models/post_mig_hits_130pct_4h_v1.pkl',   'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
+    {'name': 'post_mig_hits_186pct_4h',   'out': 'models/post_mig_hits_186pct_4h_v1.pkl',   'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
+    {'name': 'post_mig_hits_50pct_30m',   'out': 'models/post_mig_hits_50pct_30m_v1.pkl',   'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
+    {'name': 'post_mig_hits_100pct_1h',   'out': 'models/post_mig_hits_100pct_1h_v1.pkl',   'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
+    {'name': 'post_mig_hits_30x_24h',     'out': 'models/post_mig_hits_30x_24h_v1.pkl',     'min_pos': 30,  'kind': 'binary',     'mode': 'post'},
+    # Risk-side: predict our SL hits
+    {'name': 'post_mig_drawdown_50_5min', 'out': 'models/post_mig_drawdown_50_5min_v1.pkl', 'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
+    {'name': 'post_mig_drawdown_30_5min', 'out': 'models/post_mig_drawdown_30_5min_v1.pkl', 'min_pos': 50,  'kind': 'binary',     'mode': 'post'},
+    {'name': 'post_mig_alive_4h',         'out': 'models/post_mig_alive_4h_v1.pkl',         'min_pos': 30,  'kind': 'binary',     'mode': 'post'},
+    # Multi-horizon peak regression
+    {'name': 'post_mig_peak_pct_4h',      'out': 'models/post_mig_peak_pct_4h_v1.pkl',      'min_pos': 100, 'kind': 'regression', 'mode': 'post'},
+    {'name': 'post_mig_peak_pct_24h',     'out': 'models/post_mig_peak_pct_24h_v1.pkl',     'min_pos': 100, 'kind': 'regression', 'mode': 'post'},
+    # The holy grail: EV regressor — predicts SOL profit under our exit ladder
+    {'name': 'post_mig_ev_with_ladder_sol','out': 'models/post_mig_ev_with_ladder_sol_v1.pkl','min_pos': 100, 'kind': 'regression', 'mode': 'post'},
 ]
 
 
@@ -145,18 +162,13 @@ def main():
     t0 = time.time()
     import pandas as pd
 
-    # 1a) Extract pre-migration training set
-    print('[retrain] === EXTRACT (pre-mig) ===')
-    r = run([venv_py(), str(ML_ROOT / 'scripts' / 'extract_from_snapshots.py'),
-             '--out', str(TRAINING_CSV.relative_to(ML_ROOT))])
-    if r.returncode != 0:
-        sys.exit('[retrain] pre-mig extract failed')
-    try:
-        df_pre = pd.read_csv(TRAINING_CSV)
-        n_pre = len(df_pre)
-    except Exception as e:
-        sys.exit(f'[retrain] could not read pre-mig CSV: {e}')
-    print(f'[retrain] pre-mig training rows: {n_pre}')
+    # 2026-05-23: pre-mig extract DISABLED — all pre-mig targets are commented
+    # out (post-mig-only focus). The 1.9 GB pandas load OOM-killed the retrain
+    # on the 7.8 GB VM. Skip entirely; pre-mig training loop will no-op via
+    # empty df_pre.
+    print('[retrain] === EXTRACT (pre-mig) SKIPPED — no pre-mig targets ===')
+    df_pre = pd.DataFrame()
+    n_pre = 0
 
     # 1b) Extract post-migration training set
     print('[retrain] === EXTRACT (post-mig) ===')

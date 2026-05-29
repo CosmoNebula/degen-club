@@ -1,195 +1,47 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { init } from './db/index.js';
+// index.js — Degen Club v2 entry point.
+// Wires up: DB → ingest (Pumpportal + RPC sub + pump.fun logs) → snapshot worker
+// → ML client → policy bot → server.
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOG_DIR = path.resolve(__dirname, '..', 'logs');
-fs.mkdirSync(LOG_DIR, { recursive: true });
-const today = new Date().toISOString().slice(0, 10);
-const logPath = path.join(LOG_DIR, `server-${today}.log`);
-const logStream = fs.createWriteStream(logPath, { flags: 'a' });
-const _origLog = console.log;
-const _origErr = console.error;
-function ts() { return new Date().toISOString(); }
-console.log = (...args) => {
-  const line = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
-  _origLog.apply(console, args);
-  logStream.write(`[${ts()}] ${line}\n`);
-};
-console.error = (...args) => {
-  const line = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
-  _origErr.apply(console, args);
-  logStream.write(`[${ts()}] ERROR: ${line}\n`);
-};
-console.log(`[startup] log file: ${logPath}`);
-import { PumpPortalClient } from './ingestion/pumpportal.js';
-import { startProcessor, startSweeper } from './ingestion/processor.js';
-import { startTraderSweep } from './scoring/traders.js';
-import { startWalletGrader } from './scoring/wallet-grader.js';
-import { startWalletLeaderboard } from './scoring/wallet-leaderboard.js';
-import { startWalletLeaderboardWorker } from './scoring/wallet-leaderboard-worker.js';
-import { startDevsWorker } from './scoring/devs-worker.js';
-import { startBundleWorker } from './scoring/bundle-worker.js';
-import { startMaintenanceWorker } from './maintenance-worker.js';
-import { startLabelResolverWorker } from './ml/label-resolver-worker.js';
-import { startWallet5xScorer } from './scoring/wallet-5x-scorer-worker.js';
-import { startRunnerScoreSweep } from './scoring/runner-score.js';
-import { startWhaleSpawnSweep } from './scoring/whale-spawn.js';
-import { startKolDipSweep } from './scoring/kol-dip.js';
-import { startLiveConditionsMonitor } from './scoring/live-conditions.js';
-import { startMicrostructureSweep } from './scoring/mint-microstructure.js';
-import { startSnapshotSweeperWorker } from './ml/snapshot-sweeper-worker.js';
-import { startKnownAddressDetector } from './ml/known-address-detector.js';
-import { startLabelResolver } from './ml/label-resolver.js';
-import { startDiskMonitor } from './ml/disk-monitor.js';
-import { startMlClient } from './ml/ml-client.js';
-import { startScoringSweeper } from './ml/scoring-sweeper.js';
-import { startAutoRetrain } from './ml/auto-retrain.js';
-import { startSentimentScorer } from './ml/sentiment-scorer.js';
-import { startMlConvictionWatcher } from './ml/ml-conviction-watcher.js';
-import { startTrackerConcentration } from './scoring/tracker-concentration.js';
-import { startAgent } from './ml/agent.js';
-import { startEventLoopWatchdog } from './event-loop-watchdog.js';
-import { startTelegramBroadcast } from './ingestion/telegram-broadcast.js';
-import { startServeWatchdog } from './ml/serve-watchdog.js';
-import { startRssIngest } from './ingestion/news/rss-ingest.js';
-import { startRedditIngest } from './ingestion/news/reddit.js';
-import { startTrendingApis } from './ingestion/news/trending-apis.js';
-import { startTwitterIngest } from './ingestion/news/twitter-nitter.js';
-import { startTruthSocialIngest } from './ingestion/news/truth-social.js';
-import { startNewsCleanup } from './ingestion/news/cleanup.js';
-import { startIntelligenceCondensate } from './ml/intelligence-condensate.js';
-import { startAnomalyDetector } from './ml/anomaly-detector.js';
-import { startMigratedTracker } from './ingestion/migrated-tracker.js';
-import { startMigrationSnapshot } from './ml/migration-snapshot.js';
-import { getSolUsd } from './price.js';
-import { startMetaSynthesis } from './ml/agent-meta-synthesis.js';
-import { startSessionLogger } from './scoring/session-logger.js';
-import { startBundleSweep } from './scoring/bundle.js';
-import { startDevSweep } from './scoring/devs.js';
-import { startVolumeSurgeSweep } from './scoring/volume.js';
-import { startMaintenance } from './maintenance.js';
-import { startPostExitSweep } from './scoring/post-exit.js';
-import { initStrategies } from './trading/strategies.js';
-import { startPositionMonitor, recoverLivePositions, recoverPaperPositions } from './trading/paper.js';
-import { startMoonbagPriceFeed, startOpenPositionPriceFeed } from './ingestion/dexscreener.js';
-import { startOnchainPriceWorker } from './ingestion/onchain-price-worker.js';
-import { startOnchainAmm } from './ingestion/onchain-amm-price.js';
-import { startShadowWss } from './ingestion/public-wss-shadow.js';
-import { startHeliusWebhookSync } from './ingestion/helius-webhooks.js';
-import { startTelegramMemberWatcher } from './ingestion/telegram-members.js';
-import { startTelegramCallsBroadcaster } from './ingestion/telegram-calls.js';
-import { heliusWS } from './ingestion/helius.js';
-import { onchainPumpTrades } from './ingestion/onchain-pump-trades.js';
-import { startPriceService } from './price.js';
-import { startHealthHeartbeat } from './health.js';
-import { pollRuntimeLimits } from './runtime-limits.js';
+import { db } from './db.js';
+import { startPumpPortal } from './ingest/pumpportal.js';
+import { startRpcSub } from './ingest/rpc-sub.js';
+import { startLogsSub } from './ingest/logs-sub.js';
+import { restoreWatchlist } from './ingest/watchlist.js';
+import { startSnapshotWorker } from './snapshot/worker.js';
+import { startPositionMonitor } from './workers/position-monitor.js';
+import { startCoverageWorker } from './workers/coverage-worker.js';
+import { startPriceVerifier } from './workers/price-verifier.js';
+import { startAmmPriceFetcher } from './workers/amm-price-fetcher.js';
+import { startThresholdTuner } from './workers/threshold-tuner.js';
+import { startTelegramBroadcaster } from './workers/tg-broadcaster.js';
+import { startWalletSkillTracker } from './workers/wallet-skill-tracker.js';
+import { startMlClient } from './ml/client.js';
+import { startPolicyBot } from './policy/bot.js';
+import { startServer } from './server/api.js';
 
-init();
-pollRuntimeLimits(3000); // pick up dashboard-edited limits within 3s
-initStrategies();
-startPriceService();
-try { recoverPaperPositions(); }
-catch (err) { console.error('[recover-paper] startup failed:', err.message); }
-recoverLivePositions()
-  .catch(err => console.error('[recover] startup failed:', err.message))
-  .finally(() => startPositionMonitor());
-heliusWS.start();
-startMoonbagPriceFeed();
-startOpenPositionPriceFeed();
-startShadowWss();
-startOnchainPriceWorker();
-startOnchainAmm();
-startHeliusWebhookSync();
-startTelegramMemberWatcher();
-startTelegramCallsBroadcaster();
-startPostExitSweep();
+console.log('[boot] Degen Club v2 starting…');
+db();
 
-const pp = new PumpPortalClient();
-startProcessor(pp);
-// Per-mint trade firehose moved off PumpPortal (paid as of 2026-05-01).
-// We now decode TradeEvents directly from Pump.fun program logs.
-startProcessor(onchainPumpTrades);
-onchainPumpTrades.start();
-startSweeper();
-startTraderSweep();
-startWalletGrader();
-// 2026-05-17: leaderboard nuked. 50-row top-N ranking superseded by wallet_5x_score
-// (1,535-wallet pool, 6h cadence). The 13-16s recompute every 15min was pure waste
-// — only leaderboard_rank/avg_buyer_rank features depended on it, and those are
-// already NULL for 99.96% of wallets. Models handle the remaining NULLs natively.
-// startWalletLeaderboard();
-// startWalletLeaderboardWorker();
-startDevsWorker();
-startBundleWorker();
-startMaintenanceWorker();
-startLabelResolverWorker();
-startRunnerScoreSweep();
-startWhaleSpawnSweep();
-startKolDipSweep();
-startLiveConditionsMonitor();
-startMicrostructureSweep();
-startDiskMonitor();
-startSnapshotSweeperWorker();
-startWallet5xScorer();
-startKnownAddressDetector();
-startLabelResolver();
-startMlClient();
-startScoringSweeper();
-startAutoRetrain();
-startSentimentScorer();
-startMlConvictionWatcher();
-startTrackerConcentration();
-startAgent();  // executor + reporting only; Claude/cycle subsystems disabled inside agent.js for V2 test
-startServeWatchdog();
-startEventLoopWatchdog();
-startTelegramBroadcast();
-// Cultural pulse — news/trends/social ingestion + Claude synthesis every 4h
-startRssIngest();
-startRedditIngest();
-startTrendingApis();
-startTwitterIngest();
-startTruthSocialIngest();
-startMetaSynthesis();
-startNewsCleanup();
-startIntelligenceCondensate();
-// 2026-05-15 (PM): anomaly detector DISABLED. Fires `[anomaly] WATCH ...`
-// log lines (theme clusters, dev-cluster bursts, etc.) but nothing
-// downstream gates on them — pure observability noise. Re-enable when an
-// anomaly signal is wired into a gate or alert.
-// startAnomalyDetector();
-startMigratedTracker();
-startMigrationSnapshot(getSolUsd);
-startSessionLogger();
-startBundleSweep();
-startDevSweep();
-startVolumeSurgeSweep();
-startMaintenance();
-pp.start();
-startHealthHeartbeat({ pp, onchainTrades: onchainPumpTrades });
+(async () => {
+  startServer();
+  startMlClient();
+  startPumpPortal();
+  startRpcSub();
+  startLogsSub();                                // pump.fun trades firehose
+  startSnapshotWorker();
+  startPositionMonitor();
+  startCoverageWorker();
+  startPriceVerifier();
+  startAmmPriceFetcher();
+  startThresholdTuner();                          // computes ML features
+  startTelegramBroadcaster();                     // Cosmo Calls + Viktor narration
+  // startWalletSkillTracker disabled: too heavy in-process. Runs via standalone
+  // Python script + cron instead. See scripts/wallet-skill-compute.py
+  setTimeout(() => restoreWatchlist().catch(e => console.error('[boot] restore err:', e.message)), 6000);
+  setTimeout(() => startPolicyBot(), 15000);     // wait for first snapshots
+})();
 
-// Dashboard runs in a separate Node process so its SQL load can't block the
-// trade pipeline (Helius firehose → signal eval → trade fire all run on this
-// thread). Communication is via the shared SQLite DB. Auto-restart on crash.
-let _dashboardProc = null;
-function spawnDashboard() {
-  const dashboardPath = path.resolve(__dirname, 'dashboard.js');
-  console.log(`[bot] spawning dashboard: ${dashboardPath}`);
-  _dashboardProc = spawn(process.execPath, [dashboardPath], {
-    stdio: ['ignore', 'inherit', 'inherit'],
-    env: process.env,
-  });
-  _dashboardProc.on('exit', (code, sig) => {
-    console.error(`[dashboard-proc] exited code=${code} sig=${sig} — restarting in 2s`);
-    _dashboardProc = null;
-    setTimeout(spawnDashboard, 2000);
-  });
-}
-spawnDashboard();
-// Make sure the dashboard child dies with the bot — otherwise restarts leak processes.
-const killChild = () => { try { _dashboardProc?.kill('SIGTERM'); } catch {} };
-process.on('exit', killChild);
-process.on('SIGTERM', () => { killChild(); process.exit(0); });
-process.on('SIGINT', () => { killChild(); process.exit(0); });
+process.on('SIGTERM', () => { console.log('[boot] SIGTERM'); process.exit(0); });
+process.on('SIGINT', () => { console.log('[boot] SIGINT'); process.exit(0); });
+process.on('uncaughtException', (err) => { console.error('[boot] uncaught:', err.stack); process.exit(1); });
+process.on('unhandledRejection', (reason) => { console.error('[boot] unhandled:', reason); process.exit(1); });

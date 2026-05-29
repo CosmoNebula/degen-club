@@ -1,1439 +1,268 @@
-import { db } from '../db/index.js';
+// trading/paper.js — Paper position management v3.
+// Supports per-position tier exits and trailing stops, set adaptively from
+// ML-predicted peak. Each position carries its own tier targets in the DB.
+
+import { db } from '../db.js';
 import { config } from '../config.js';
-import { isLiveMode } from './wallet.js';
-import { getMedianLatency, getPriorityFeeSol } from '../scoring/live-conditions.js';
-import { estimateBuyFriction, estimateSellFriction } from '../scoring/mint-microstructure.js';
-import { triggerWebhookResync } from '../ingestion/helius-webhooks.js';
-import { addHeldMint, removeHeldMint } from './held-mints.js';
-import { subscribePumpAmm, unsubscribePumpAmm } from '../ingestion/onchain-amm-price.js';
-import { warmUpPriceForMint } from '../ingestion/onchain-price.js';
 
-// Audit fix D — fire-and-forget BC warm-up. On position open we want a fresh
-// onchain-curve write to mints.last_price_sol within ~100ms, without waiting
-// for the reconcile-then-subscribe-then-first-notification chain (which can
-// take 30s+ on a new mint). One getAccountInfo call, decode, write. Costs 1
-// Helius credit per position open.
-function warmUpHeldMint(mintAddress) {
-  try {
-    const row = db().prepare('SELECT bonding_curve_key, migrated FROM mints WHERE mint_address = ?').get(mintAddress);
-    if (!row || row.migrated || !row.bonding_curve_key) return;
-    warmUpPriceForMint(mintAddress, row.bonding_curve_key).catch(() => {});
-  } catch {}
-}
-import { Worker, isMainThread } from 'node:worker_threads';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-
-const _pendingSells = new Set();
-const _pendingPaperSells = new Set();
-
-// Track strategies we've already warned about for peak-floor misconfig so the
-// log doesn't spam every 250ms tick on a broken config.
-const _peakFloorWarned = new Set();
-// Same idea for tier ladder inversions (t2<=t1, t3<=t2). A broken ladder
-// means earlier tiers absorb fills meant for later tiers — peaked30 quickflip
-// shipped with t1=10% t2=80% t3=50% on 2026-05-10, masking real moonbag carve.
-const _tierLadderWarned = new Set();
-// And for FAST_FAIL/FAKE_PUMP params that go dead after tier1 fires.
-const _fastFailWarned = new Set();
-
-// 2026-05-13: trail-breach confirmation. uAPE got shaken out by a single
-// whale dump that briefly crashed price below the trail floor for ~3
-// seconds, then recovered to +390% above our exit. Map keyed by position id
-// tracks when the trail floor was first breached. Trail exits only fire
-// once the breach has been sustained for TRAIL_CONFIRM_MS. Clears on
-// recovery above floor and on position close.
-//
-// 2026-05-18: 3000ms → 500ms. V7's trail-only design needs the trail to
-// fire decisively — 3s confirmation was swallowing legit retracements on
-// volatile pump.fun mints (PeZn74V7rvrf peaked +39.6%, bounced under the
-// trail floor for ~5min without ever staying for a full 3s, never fired
-// while peak was forming). 500ms = 2 monitor ticks — filters single-tick
-// whale wicks while still firing on sustained retracements within seconds.
-const TRAIL_CONFIRM_MS = 500;
-const _trailBreachStartedAt = new Map();
-// 2026-05-14: 2-tick tier confirmation. Position monitor sees a tier
-// trigger → marks it pending. Only fires when seen AGAIN on a subsequent
-// monitor tick (different ms). Filters phantom one-shot ticks (sandwich
-// victim, stale WSS push) from arming tier sells. Keyed: positionId-tierN.
-const _tierPendingSince = new Map();
-const TIER_CONFIRM_MS = 1500; // must persist ≥1.5s across ≥2 ticks
-function tierConfirmed(positionId, tierN) {
-  const key = `${positionId}-${tierN}`;
-  const now = Date.now();
-  const first = _tierPendingSince.get(key);
-  if (!first) { _tierPendingSince.set(key, now); return false; }
-  return (now - first) >= TIER_CONFIRM_MS;
-}
-function clearTierPending(positionId) {
-  for (const k of _tierPendingSince.keys()) {
-    if (k.startsWith(`${positionId}-`)) _tierPendingSince.delete(k);
-  }
-}
-
-// Effective paper latency. Defaults to live-measured Helius p90 — replaces the
-// old static config.paper.latencyMs guess. If the dashboard explicitly sets
-// config.paper.latencyMs > 0, that override wins (manual control). Otherwise
-// the bot uses whatever the network is doing right now.
-//
-// REALISM CAP: real Solana confirmation is 1-2 slots = 400-800ms typical,
-// ~3s worst case during congestion. When the RPC probe times out (5-15s+),
-// that's a PROBE failure, not real execution latency — a real trader would
-// see a timeout error and retry on a different RPC, not actually wait 15s.
-// Capping at 3000ms keeps paper simulation grounded in plausible execution.
-const MAX_REALISTIC_PAPER_LAG_MS = 3000;
-function effectiveLatencyMs() {
-  const override = config.paper?.latencyMs;
-  if (override != null && override > 0) return Math.min(Math.round(override), MAX_REALISTIC_PAPER_LAG_MS);
-  const measured = Math.max(0, Math.round(getMedianLatency('helius')));
-  return Math.min(measured, MAX_REALISTIC_PAPER_LAG_MS);
-}
-
-function appendSellEvent(positionId, event) {
-  try {
-    const d = db();
-    const row = d.prepare('SELECT sell_events FROM paper_positions WHERE id = ?').get(positionId);
-    let events = [];
-    try { events = JSON.parse(row?.sell_events || '[]'); } catch {}
-    events.push(event);
-    d.prepare('UPDATE paper_positions SET sell_events = ? WHERE id = ?').run(JSON.stringify(events), positionId);
-  } catch (err) { console.error('[sell-event]', err.message); }
-}
-
-let cached = null;
+let _stmts = null;
 function S() {
-  if (cached) return cached;
+  if (_stmts) return _stmts;
   const d = db();
-  cached = {
-    getMint: d.prepare('SELECT * FROM mints WHERE mint_address = ?'),
+  _stmts = {
+    walletState: d.prepare(`SELECT
+      starting_balance_sol + COALESCE((SELECT SUM(realized_pnl_sol) FROM paper_positions WHERE status='closed' AND entered_at >= paper_wallet.started_at), 0)
+      - COALESCE((SELECT SUM(MAX(0, entry_sol - COALESCE(sol_realized_so_far,0))) FROM paper_positions WHERE status='open' AND entered_at >= paper_wallet.started_at), 0) AS cash,
+      starting_balance_sol, started_at
+      FROM paper_wallet WHERE id = 1`),
+    openExposure: d.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(entry_sol - COALESCE(sol_realized_so_far,0)),0) AS exposure FROM paper_positions WHERE status='open' AND is_moonbag=0"),
+    openByStrategy: d.prepare("SELECT * FROM paper_positions WHERE status='open' AND strategy=?"),
     insertPosition: d.prepare(`INSERT INTO paper_positions
       (mint_address, strategy, entry_signal, entry_price, entry_sol, token_amount,
-       tokens_remaining, sol_realized_so_far, tiers_hit, breakeven_armed,
-       entry_mcap_sol, status, entered_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0, '[]', 0, ?, 'open', ?, ?)`),
-    bumpOpened: d.prepare('UPDATE strategy_state SET positions_opened = positions_opened + 1 WHERE name = ?'),
-    openPositions: d.prepare("SELECT * FROM paper_positions WHERE status = 'open'"),
+       entry_mcap_sol, tokens_remaining, entered_at, updated_at, entry_score,
+       tier1_trigger_pct, tier1_sell_pct, tier2_trigger_pct, tier2_sell_pct,
+       tier3_trigger_pct, tier3_sell_pct, trail_arm_pct, trail_pct, predicted_peak_pct)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     closePosition: d.prepare(`UPDATE paper_positions SET
-      status = 'closed', exit_price = ?, exit_mcap_sol = ?, exit_reason = ?,
-      realized_pnl_sol = ?, realized_pnl_pct = ?, exited_at = ?, updated_at = ?
+      status = 'closed', exit_reason = ?, exit_price = ?, exit_mcap_sol = ?,
+      realized_pnl_sol = ?, realized_pnl_pct = ?,
+      exited_at = ?, updated_at = ?
       WHERE id = ?`),
-    // Atomic tier-fire UPDATE — refuses to apply if this tier is already
-    // present in tiers_hit. Defends against any concurrent fireTier path
-    // (duplicate processes, future race conditions, recovery edge cases).
-    // The last param is the LIKE pattern, e.g. '%"TIER_1"%'. If the row's
-    // current tiers_hit matches, UPDATE matches 0 rows — caller checks
-    // result.changes to decide whether to record the sell.
-    updateTierHit: d.prepare(`UPDATE paper_positions SET
-      tokens_remaining = ?, sol_realized_so_far = ?, tiers_hit = ?, breakeven_armed = ?, updated_at = ?
-      WHERE id = ? AND tiers_hit NOT LIKE ?`),
-    bumpWin: d.prepare('UPDATE strategy_state SET wins = wins + 1, total_pnl_sol = total_pnl_sol + ? WHERE name = ?'),
-    bumpLoss: d.prepare('UPDATE strategy_state SET losses = losses + 1, total_pnl_sol = total_pnl_sol + ? WHERE name = ?'),
-    bumpFlat: d.prepare('UPDATE strategy_state SET total_pnl_sol = total_pnl_sol + ? WHERE name = ?'),
-    updateUnrealized: d.prepare(`UPDATE paper_positions SET
-      unrealized_pnl_sol = ?, unrealized_pnl_pct = ?,
-      highest_pct = MAX(highest_pct, ?), updated_at = ?
-      WHERE id = ?`),
-    getStrategy: d.prepare('SELECT * FROM strategy_state WHERE name = ?'),
-    // Most-recent inflow_accel_pct for a mint — feeds the momentum-confirmed
-    // staying-power gate on STAGNATED. Snapshots fire at age 60s/300s/900s/3600s
-    // so the freshest one is at most ~hour old; for the typical position
-    // lifetime (~5-30min), the 60s or 300s snapshot's velocity is current.
-    getRecentVelocity: d.prepare(`SELECT inflow_accel_pct FROM ml_mint_snapshots
-      WHERE mint_address = ? ORDER BY snapshot_ts DESC LIMIT 1`),
-    // DCA scale-in: applies an averaging-down buy to an existing position.
-    // Updates entry_price (weighted avg), entry_sol (cumulative cost basis),
-    // token_amount + tokens_remaining (add new tokens), and resets the
-    // tier ladder + breakeven so the new bag can fire tiers again on
-    // recovery. Stores the DCA event in sell_events JSON for auditability.
-    applyDca: d.prepare(`UPDATE paper_positions SET
-      entry_price = ?, entry_sol = ?, token_amount = ?, tokens_remaining = ?,
-      tiers_hit = '[]', breakeven_armed = 0, highest_pct = 0,
-      dca_count = dca_count + 1, dca_total_sol_added = dca_total_sol_added + ?,
-      sell_events = ?, updated_at = ?
-      WHERE id = ?`),
-    // Per-mint DCA safety re-check: freshest probabilities for the rug-side
-    // targets. If the model thinks this is rugging RIGHT NOW, we don't add
-    // more capital — the dip is real, not an opportunity. ml_predictions is
-    // appended to every snapshot + every scoring sweep, so the freshest row
-    // per target is current within ~60s.
-    // 2026-05-17: re-pointed at canonical will_rug (replaced rug_within_5min +
-    // will_die_fast in the May 17 label cleanup). Old targets stopped getting
-    // fresh predictions when we collapsed the ML stack to 8 canonical models,
-    // which silently broke the smart-SL and DCA-safety gates that depended on
-    // them. Keeping peaked_100 lookup for back-compat though it's also legacy.
-    getDcaSafety: d.prepare(`SELECT
-        MAX(CASE WHEN target='will_rug' THEN prob END) AS p_will_rug,
-        MAX(CASE WHEN target='peaked_100' THEN prob END) AS p_peaked_100
-      FROM (
-        SELECT target, prob FROM ml_predictions
-        WHERE mint_address = ? AND prob IS NOT NULL
-          AND target IN ('will_rug','peaked_100')
-          AND timestamp > (strftime('%s','now')*1000 - 600000)
-        ORDER BY timestamp DESC LIMIT 30
-      )`),
-    // 2026-05-15: PRED_EXIT support — most recent prob for (mint, target)
-    // in the last 5 minutes. Anything older we treat as missing (the model
-    // would have re-fired by then if conditions still held).
-    getPredForTarget: d.prepare(`SELECT prob, timestamp FROM ml_predictions
-      WHERE mint_address = ? AND target = ? AND prob IS NOT NULL
-        AND timestamp > (strftime('%s','now')*1000 - 300000)
-      ORDER BY timestamp DESC LIMIT 1`),
-    openPositionsForMint: d.prepare("SELECT * FROM paper_positions WHERE mint_address = ? AND status = 'open'"),
-    convertToMoonbag: d.prepare(`UPDATE paper_positions SET
-      tokens_remaining = ?, sol_realized_so_far = ?,
-      is_moonbag = 1, moonbag_started_at = ?,
-      migration_price = ?, migration_mcap_sol = ?,
-      moonbag_peak_pct = 0, updated_at = ?
-      WHERE id = ?`),
-    updateMoonbagPeak: d.prepare(`UPDATE paper_positions SET
-      moonbag_peak_pct = MAX(moonbag_peak_pct, ?),
-      unrealized_pnl_sol = ?, unrealized_pnl_pct = ?,
+    insertPostmortem: d.prepare(`INSERT INTO ml_postmortem
+      (position_id, mint_address, strategy, entry_score, predicted_peak_pct,
+       actual_peak_pct, realized_pnl_pct, exit_reason, hold_duration_sec,
+       pred_will_rug, pred_will_die_fast, pred_hits_2x_within_1h,
+       pred_peaked_100, pred_peaked_300, pred_buy_pressure, pred_peak_within_5min,
+       closed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    entryPreds: d.prepare(`SELECT target, prob FROM ml_predictions
+      WHERE mint_address = ? AND timestamp <= ?
+        AND target IN ('will_rug','will_die_fast','hits_2x_within_1h',
+                       'peaked_100','peaked_300','buy_pressure_continues_60s',
+                       'peak_within_5min')
+      ORDER BY timestamp DESC LIMIT 200`),
+    recordTier: d.prepare(`UPDATE paper_positions SET
+      sol_realized_so_far = COALESCE(sol_realized_so_far,0) + ?,
+      tokens_remaining = MAX(0, COALESCE(tokens_remaining,0) - ?),
+      tiers_hit = ?,
+      trail_armed = ?,
+      highest_pct = MAX(COALESCE(highest_pct,0), ?),
       updated_at = ?
       WHERE id = ?`),
   };
-  return cached;
+  return _stmts;
 }
 
-// Dynamic friction model — when mintAddress is provided, compute per-mint
-// per-network friction from microstructure + live conditions. Fall back to
-// static config.friction otherwise (preserves existing behavior for callers
-// that don't have mint context).
+// Simple sell-slippage estimate using bonding curve constant-product.
+function estimateSell(tokens, vSol, vTokens) {
+  if (!tokens || !vSol || !vTokens) return 0;
+  const k = vSol * vTokens;
+  const newVTokens = vTokens + tokens;
+  const newVSol = k / newVTokens;
+  return Math.max(0, vSol - newVSol);
+}
+// Buy-slippage: same constant-product, going the other direction. Paying solIn
+// raises the price, so you get fewer tokens than naive (solIn / price) suggests.
+function estimateBuy(solIn, vSol, vTokens) {
+  if (!solIn || !vSol || !vTokens) return 0;
+  const k = vSol * vTokens;
+  const newVSol = vSol + solIn;
+  const newVTokens = k / newVSol;
+  return Math.max(0, vTokens - newVTokens);
+}
+
+// =========================================================================
+// FRICTION MODEL
+// pump.fun charges 1% on every BC trade.
+// Network friction (priority fee + base) uses a flat average rather than live
+// sampling — Helius Sender handles priority-fee optimization in live mode, so
+// the live bot won't need real-time priority data, and burning Helius credits
+// to feed paper-mode friction isn't worth it. The 0.0003 SOL average covers
+// base fee + a typical priority fee on a 200K-CU pump.fun swap during normal
+// congestion (~150K microlamports/CU median).
+// =========================================================================
+const BUY_FEE_PCT = 0.01;
+const SELL_FEE_PCT = 0.01;
+const AVG_NETWORK_FRICTION_SOL = 0.0003;
+
+function currentPriorityFeeSol() {
+  return AVG_NETWORK_FRICTION_SOL;
+}
+
+export function getWalletCash() { return S().walletState.get()?.cash || 0; }
+export function getOpenExposure() {
+  const r = S().openExposure.get();
+  return { n: r?.n || 0, exposureSol: r?.exposure || 0 };
+}
+export function getOpenPositions(strategyId) { return S().openByStrategy.all(strategyId); }
+
+// Compute adaptive tier targets from the bot's ML peak prediction.
+// Bounds keep tiers sane even when the regression is uncertain.
 //
-// Components when dynamic:
-//   - slippage: exact bonding-curve math (bondingCurveSlippageBuy/Sell)
-//   - volatility drift: mint volatility × √(network latency seconds)
-//   - sandwich surcharge: 0-4% based on detected MEV pressure
-//   - priority fee: live p90 from getPriorityFeeSol()
-//   - fee pct: still from config (~1% pump.fun fee, deterministic)
+// Inputs:
+//   predictedPeakPct — the model's predicted peak return as a percent (e.g. 80 for +80%)
+//   isMigrated — affects expected magnitudes (post-mig usually bigger runs)
+//
+// Returns: { t1_trig, t1_sell, t2_trig, t2_sell, t3_trig, t3_sell, trail_arm, trail_pct }
+// All triggers are PERCENT returns (e.g. 50 means fire when up 50%).
+// All sell_pcts are FRACTIONS of current remaining position (0..1).
+export function computeAdaptiveTiers(predictedPeakPct, isMigrated) {
+  // Bound the predicted peak. Floor=+50% (don't be too greedy), cap=+500%
+  // (don't park behind an unattainable target on a hot mint).
+  const pp = Math.max(50, Math.min(500, predictedPeakPct || 100));
 
-// `ctx` may be a string (legacy: just the mint address) or an object with
-// { mintAddress, positionId, strategy } — when positionId is provided, we log
-// the friction event to the friction_log table for Phase 1D analysis.
-function _normalizeCtx(ctx) {
-  if (!ctx) return {};
-  if (typeof ctx === 'string') return { mintAddress: ctx };
-  return ctx;
+  // Tier 1: lock in cost basis + small profit early. 30% of predicted peak
+  // but floor at +50% (don't sell on a wiggle), cap at +100%.
+  const t1_trig = Math.max(50, Math.min(100, pp * 0.30));
+  const t1_sell = 0.40;  // sell 40% of position
+
+  // Tier 2: book real profit. 60% of predicted peak, floor +90%, cap +250%.
+  const t2_trig = Math.max(90, Math.min(250, pp * 0.60));
+  const t2_sell = 0.30;  // sell 30% of REMAINING position (~18% of original)
+
+  // Tier 3: full target. predicted peak, floor +180%, cap +500%.
+  const t3_trig = Math.max(180, Math.min(500, pp));
+  const t3_sell = 0.30;  // sell 30% of REMAINING after t2 (~13% of original)
+
+  // Trailing stop on remaining 12% bag. Arms after t1, exits at peak - 20%.
+  const trail_arm = t1_trig;
+  const trail_pct = 20;  // exit at peak − 20%
+
+  return { t1_trig, t1_sell, t2_trig, t2_sell, t3_trig, t3_sell, trail_arm, trail_pct };
 }
 
-let _logStmt = null;
-function _logFriction(row) {
-  try {
-    if (!_logStmt) {
-      _logStmt = db().prepare(`INSERT INTO friction_log
-        (timestamp, position_id, mint_address, strategy, side, trade_size_sol,
-         total_slippage_pct, curve_slip_pct, vol_drift_pct, sandwich_pct,
-         priority_fee_sol, latency_ms, v_sol_in_curve, was_dynamic)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    }
-    _logStmt.run(
-      row.timestamp, row.positionId || null, row.mintAddress || null, row.strategy || null,
-      row.side, row.tradeSizeSol || 0,
-      row.totalSlippagePct || 0, row.curveSlipPct || 0, row.volDriftPct || 0, row.sandwichPct || 0,
-      row.priorityFeeSol || 0, row.latencyMs || 0, row.vSolInCurve || 0, row.wasDynamic ? 1 : 0
-    );
-  } catch (err) { /* never throw from friction logging */ }
-}
-
-function applyBuyFriction(solIn, price, ctx = null) {
-  const c = _normalizeCtx(ctx);
-  const mintAddress = c.mintAddress;
-  const f = config.friction || {};
-  const fee = f.feePct || 0;
-  let priority, slip, components = null, latencyMs = 0, dynamic = false;
-  if (mintAddress) {
-    latencyMs = getMedianLatency('helius');
-    const friction = estimateBuyFriction(mintAddress, solIn, latencyMs);
-    slip = friction.totalSlippagePct;
-    components = friction.components;
-    priority = getPriorityFeeSol();
-    dynamic = true;
-  } else {
-    priority = f.priorityFeeSol || 0;
-    slip = f.slippagePct || 0;
-  }
-  const effectiveSol = Math.max(0, solIn - priority);
-  const effectivePrice = price * (1 + slip);
-  const tokens = (effectiveSol * (1 - fee)) / effectivePrice;
-  if (mintAddress) {
-    _logFriction({
-      timestamp: Date.now(),
-      positionId: c.positionId || null,
-      mintAddress,
-      strategy: c.strategy,
-      side: 'buy',
-      tradeSizeSol: solIn,
-      totalSlippagePct: slip,
-      curveSlipPct: components?.curve || 0,
-      volDriftPct: components?.volatilityDrift || 0,
-      sandwichPct: components?.sandwich || 0,
-      priorityFeeSol: priority,
-      latencyMs,
-      vSolInCurve: components?.vSol || 0,
-      wasDynamic: dynamic,
-    });
-  }
-  return { tokens, costSol: solIn };
-}
-
-function applySellFriction(tokens, price, ctx = null) {
-  const c = _normalizeCtx(ctx);
-  const mintAddress = c.mintAddress;
-  const f = config.friction || {};
-  const fee = f.feePct || 0;
-  let priority, slip, components = null, latencyMs = 0, dynamic = false;
-  if (mintAddress) {
-    latencyMs = getMedianLatency('helius');
-    const friction = estimateSellFriction(mintAddress, tokens, latencyMs);
-    slip = friction.totalSlippagePct;
-    components = friction.components;
-    priority = getPriorityFeeSol();
-    dynamic = true;
-  } else {
-    priority = f.priorityFeeSol || 0;
-    slip = f.slippagePct || 0;
-  }
-  const effectivePrice = price * (1 - slip);
-  const gross = tokens * effectivePrice;
-  const sol = Math.max(0, gross * (1 - fee) - priority);
-  if (mintAddress) {
-    const tradeSizeSolApprox = gross; // sell SOL pre-fee, useful for aggregation
-    _logFriction({
-      timestamp: Date.now(),
-      positionId: c.positionId,
-      mintAddress,
-      strategy: c.strategy,
-      side: 'sell',
-      tradeSizeSol: tradeSizeSolApprox,
-      totalSlippagePct: slip,
-      curveSlipPct: components?.curve || 0,
-      volDriftPct: components?.volatilityDrift || 0,
-      sandwichPct: components?.sandwich || 0,
-      priorityFeeSol: priority,
-      latencyMs,
-      vSolInCurve: components?.vSol || 0,
-      wasDynamic: dynamic,
-    });
-  }
-  return sol;
-}
-
-export function openPaperPosition({ strategy, mintAddress, entryPrice, entrySol, entryMcap, signalDetails, entryScore, positionMode = 'paper', maxEntrySlippagePct }) {
+export async function openPaperPosition({
+  strategy, mintAddress, entryPrice, entrySol, entryMcap, entryScore, phase, tiers,
+}) {
   if (!entryPrice || entryPrice <= 0) return null;
-  // Agent strategies (`agent_*`) bypass the dashboard "Max / Trade" cap — the
-  // agent gets full creative latitude on sizing. Available paper cash is the
-  // only real constraint; the agent's executor checks that before calling here.
-  const isAgent = typeof strategy === 'string' && strategy.startsWith('agent_');
-  if (!isAgent) {
-    const maxPerTrade = config.safety?.maxPerTradeSol || 0.5;
-    if (entrySol > maxPerTrade) {
-      console.log(`[size-cap] ${strategy} on ${mintAddress.slice(0,8)}… clamped ${entrySol.toFixed(4)} → ${maxPerTrade.toFixed(4)} SOL (maxPerTradeSol)`);
-      entrySol = maxPerTrade;
-    }
+  if (!entrySol || entrySol <= 0) return null;
+  // Friction: priority fee comes off the SOL spent before the swap.
+  // 1% pump.fun trade fee reduces the SOL that actually buys tokens.
+  // Pre-mig: use curve math (estimateBuy) — buying raises price so you get
+  // less than naive (sol/price). Post-mig (no curve state): naive fallback.
+  const priorityFee = currentPriorityFeeSol();
+  const solAfterPriorityFee = Math.max(0, entrySol - priorityFee);
+  const solAfterTradeFee = solAfterPriorityFee * (1 - BUY_FEE_PCT);
+  if (solAfterTradeFee <= 0) return null;
+  let tokensReceived;
+  const mintCurve = db().prepare(
+    'SELECT v_sol_in_curve, v_tokens_in_curve, migrated FROM mints WHERE mint_address=?'
+  ).get(mintAddress);
+  if (mintCurve && !mintCurve.migrated && mintCurve.v_sol_in_curve > 0 && mintCurve.v_tokens_in_curve > 0) {
+    tokensReceived = estimateBuy(solAfterTradeFee, mintCurve.v_sol_in_curve, mintCurve.v_tokens_in_curve);
+  } else {
+    tokensReceived = solAfterTradeFee / entryPrice;
   }
-  const s = S();
-  // Snapshot mint state at entry for post-hoc analysis. Stored inside
-  // signalDetails so all downstream JSON.stringify call sites capture it.
-  try {
-    const mintRow = s.getMint.get(mintAddress);
-    if (mintRow) {
-      const ageSec = mintRow.created_at ? Math.round((Date.now() - mintRow.created_at) / 1000) : null;
-      const concurrentOpen = db().prepare(`SELECT COUNT(*) AS n FROM paper_positions WHERE status='open'`).get().n;
-      signalDetails = {
-        ...(signalDetails || {}),
-        _entry_state: {
-          age_sec: ageSec,
-          mcap_sol: mintRow.current_market_cap_sol || null,
-          peak_mcap_sol: mintRow.peak_market_cap_sol || null,
-          v_sol_in_curve: mintRow.v_sol_in_curve || null,
-          unique_buyers: mintRow.unique_buyer_count || 0,
-          trade_count: mintRow.trade_count || 0,
-          bundle_buyers: mintRow.bundle_buyer_count || 0,
-          runner_score: mintRow.runner_score == null ? null : mintRow.runner_score,
-          concurrent_open: concurrentOpen,
-        },
-      };
-    }
-  } catch {}
-  let tokenAmount, finalEntryPrice = entryPrice, finalEntrySol = entrySol;
-
-  if (positionMode === 'live') {
-    const now = Date.now();
-    const result = s.insertPosition.run(
-      mintAddress, strategy, JSON.stringify({ ...(signalDetails || {}), pending: true }),
-      entryPrice, entrySol, 0, 0, entryMcap || 0, now, now
-    );
-    const positionId = result.lastInsertRowid;
-    db().prepare("UPDATE paper_positions SET position_mode = 'live', pending_fill = 1 WHERE id = ?").run(positionId);
-    addHeldMint(mintAddress); subscribePumpAmm(mintAddress); warmUpHeldMint(mintAddress);
-    triggerWebhookResync();
-    if (entryScore && entryScore !== 1.0) {
-      db().prepare('UPDATE paper_positions SET entry_score = ? WHERE id = ?').run(entryScore, positionId);
-    }
-    console.log(`[live] PENDING ${strategy} on ${mintAddress.slice(0,8)}… firing buy ${entrySol.toFixed(4)} SOL`);
-    import('./executor.js').then(async exec => {
-      const r = await exec.executeBuy({ mint: mintAddress, solAmount: entrySol, strategy, triggerPrice: entryPrice, force: true });
-      const updNow = Date.now();
-      if (!r.success) {
-        db().prepare(`UPDATE paper_positions SET status = 'closed', exit_reason = ?, exited_at = ?, updated_at = ?, realized_pnl_sol = 0, realized_pnl_pct = 0, pending_fill = 0 WHERE id = ?`)
-          .run(`LIVE_BUY_FAIL:${(r.error || 'unknown').slice(0, 60)}`, updNow, updNow, positionId);
-        console.log(`[live] BUY FAIL ${strategy} on ${mintAddress.slice(0,8)}… ${r.error || 'unknown'} — placeholder closed`);
-        return;
-      }
-      const realPrice = r.fillPrice || entryPrice;
-      const realTokens = r.tokensReceived || 0;
-      db().prepare(`UPDATE paper_positions SET
-        entry_price = ?, entry_sol = ?, token_amount = ?, tokens_remaining = ?,
-        entry_signal = ?, pending_fill = 0, updated_at = ?
-        WHERE id = ?`).run(
-        realPrice, r.solSpent || entrySol, realTokens, realTokens,
-        JSON.stringify({ ...(signalDetails || {}), txSig: r.txSig, fillPrice: realPrice }),
-        updNow, positionId
-      );
-      s.bumpOpened.run(strategy);
-      console.log(`[live] OPEN ${strategy} on ${mintAddress.slice(0,8)}… ${realTokens} tokens @ ${realPrice.toExponential(3)} (${(r.solSpent || entrySol).toFixed(4)} SOL paid, tx ${r.txSig?.slice(0,8)}…)`);
-      broadcastEntryToTelegram({ strategy, mintAddress, entryPrice: realPrice, entrySol: r.solSpent || entrySol, entryMcap, signalDetails });
-    }).catch(err => {
-      const updNow = Date.now();
-      try {
-        db().prepare(`UPDATE paper_positions SET status = 'closed', exit_reason = 'LIVE_BUY_THROW', exited_at = ?, updated_at = ?, realized_pnl_sol = 0, pending_fill = 0 WHERE id = ?`).run(updNow, updNow, positionId);
-      } catch {}
-      console.error('[live] open threw', err.message);
-    });
-    return positionId;
-  }
-
-  const paperLatencyMs = effectiveLatencyMs();
-  if (paperLatencyMs > 0) {
-    const now = Date.now();
-    const insertResult = s.insertPosition.run(
-      mintAddress, strategy, JSON.stringify({ ...(signalDetails || {}), pending: true, triggerPrice: entryPrice }),
-      entryPrice, entrySol, 0, 0, entryMcap || 0, now, now
-    );
-    const positionId = insertResult.lastInsertRowid;
-    db().prepare("UPDATE paper_positions SET pending_fill = 1 WHERE id = ?").run(positionId);
-    addHeldMint(mintAddress); subscribePumpAmm(mintAddress); warmUpHeldMint(mintAddress);
-    triggerWebhookResync();
-    if (entryScore && entryScore !== 1.0) {
-      db().prepare('UPDATE paper_positions SET entry_score = ? WHERE id = ?').run(entryScore, positionId);
-    }
-    console.log(`[paper-lat] PENDING ${strategy} on ${mintAddress.slice(0,8)}… defer ${paperLatencyMs}ms (trigger ${entryPrice.toExponential(3)})`);
-    setTimeout(() => {
-      try {
-        const m = s.getMint.get(mintAddress);
-        const fillPrice = (m && m.last_price_sol > 0) ? m.last_price_sol : entryPrice;
-        const drift = (fillPrice - entryPrice) / entryPrice;
-        // 2026-05-16: slippage check is strategy-OWNED now. Only fires if the
-        // recipe explicitly sets entry.max_entry_slippage_pct. No global default.
-        const maxDrift = (typeof maxEntrySlippagePct === 'number') ? maxEntrySlippagePct : Infinity;
-        if (drift > maxDrift) {
-          const updNow = Date.now();
-          db().prepare(`UPDATE paper_positions SET status = 'closed', exit_reason = ?, exited_at = ?, updated_at = ?, realized_pnl_sol = 0, realized_pnl_pct = 0, pending_fill = 0 WHERE id = ?`)
-            .run(`STALE_QUOTE_PAPER:${(drift*100).toFixed(1)}%`, updNow, updNow, positionId);
-          console.log(`[paper-lat] BUY ABORT ${strategy} on ${mintAddress.slice(0,8)}… STALE_QUOTE drift ${(drift*100).toFixed(1)}% > ${(maxDrift*100).toFixed(1)}%`);
-          return;
-        }
-        const { tokens } = applyBuyFriction(entrySol, fillPrice, { mintAddress, positionId, strategy });
-        if (tokens <= 0) {
-          const updNow = Date.now();
-          db().prepare(`UPDATE paper_positions SET status = 'closed', exit_reason = 'BAD_FILL', exited_at = ?, updated_at = ?, pending_fill = 0 WHERE id = ?`).run(updNow, updNow, positionId);
-          return;
-        }
-        const updNow = Date.now();
-        db().prepare(`UPDATE paper_positions SET
-          entry_price = ?, token_amount = ?, tokens_remaining = ?,
-          entry_signal = ?, pending_fill = 0, updated_at = ?
-          WHERE id = ?`).run(
-          fillPrice, tokens, tokens,
-          JSON.stringify({ ...(signalDetails || {}), triggerPrice: entryPrice, fillPrice, driftPct: drift, latencyMs: paperLatencyMs }),
-          updNow, positionId
-        );
-        s.bumpOpened.run(strategy);
-        console.log(`[paper-lat] OPEN ${strategy} on ${mintAddress.slice(0,8)}… @ ${fillPrice.toExponential(3)} (drift ${(drift*100).toFixed(1)}%, ${entrySol.toFixed(4)} SOL)`);
-        broadcastEntryToTelegram({ strategy, mintAddress, entryPrice: fillPrice, entrySol, entryMcap, signalDetails });
-      } catch (err) {
-        console.error('[paper-lat] fill threw:', err.message);
-      }
-    }, paperLatencyMs);
-    return positionId;
-  }
-
-  // 2026-05-13 CRITICAL FIX: the caller passes entryPrice from a snapshot's
-  // last_price_sol which can be tens of seconds stale. Without this drift
-  // check we book phantom wins — ALgoat case: snapshot price 1.22e-08, live
-  // price at "fill" 2.27e-07 (18x higher) → bot pretends to buy 9.8M tokens
-  // for 0.12 SOL when reality could only get 528K → on legit exit at 2.30e-07
-  // we record 14x phantom PnL. The latency-simulation branch above already
-  // does this; this branch silently bypassed it.
-  // Read live price at fill time, abort if drift > maxEntrySlippagePct,
-  // otherwise use the LIVE fill price (not the stale trigger price) for
-  // token math + entry_price storage. All downstream pct calculations
-  // (tiers, trail, SL) then operate from a real entry.
-  const mintNow = s.getMint.get(mintAddress);
-  const fillPrice = (mintNow && mintNow.last_price_sol > 0) ? mintNow.last_price_sol : entryPrice;
-  const drift = entryPrice > 0 ? (fillPrice - entryPrice) / entryPrice : 0;
-  // 2026-05-16: strategy-owned slippage. No global default.
-  const maxDrift = (typeof maxEntrySlippagePct === 'number') ? maxEntrySlippagePct : Infinity;
-  if (drift > maxDrift) {
-    const stamp = Date.now();
-    const abortResult = s.insertPosition.run(
-      mintAddress, strategy, JSON.stringify({ ...(signalDetails || {}), triggerPrice: entryPrice, fillPrice }),
-      entryPrice, entrySol, 0, 0, entryMcap || 0, stamp, stamp
-    );
-    db().prepare(`UPDATE paper_positions SET status = 'closed', exit_reason = ?, exited_at = ?, updated_at = ?, realized_pnl_sol = 0, realized_pnl_pct = 0 WHERE id = ?`)
-      .run(`STALE_QUOTE_PAPER:${(drift * 100).toFixed(1)}%`, stamp, stamp, abortResult.lastInsertRowid);
-    console.log(`[paper] BUY ABORT ${strategy} on ${mintAddress.slice(0, 8)}… STALE_QUOTE drift ${(drift * 100).toFixed(1)}% > ${(maxDrift * 100).toFixed(1)}%`);
-    return null;
-  }
-  ({ tokens: tokenAmount } = applyBuyFriction(entrySol, fillPrice, { mintAddress, strategy }));
-  if (tokenAmount <= 0) return null;
+  if (tokensReceived <= 0) return null;
   const now = Date.now();
-  const result = s.insertPosition.run(
-    mintAddress, strategy,
-    JSON.stringify({ ...(signalDetails || {}), triggerPrice: entryPrice, fillPrice, driftPct: drift }),
-    fillPrice, entrySol, tokenAmount, tokenAmount, entryMcap || 0, now, now
+  const signal = JSON.stringify({ source: 'ml-policy', phase, score: entryScore, tiers, friction: { priorityFee, buyFeePct: BUY_FEE_PCT } });
+  const t = tiers || {};
+  // Store gross entry_sol so wallet accounting stays consistent; the friction
+  // is captured by us receiving fewer tokens than entry_sol/entry_price would suggest.
+  const r = S().insertPosition.run(
+    mintAddress, strategy, signal, entryPrice, entrySol, tokensReceived,
+    entryMcap || 0, tokensReceived, now, now, entryScore || 0,
+    t.t1_trig ?? null, t.t1_sell ?? null,
+    t.t2_trig ?? null, t.t2_sell ?? null,
+    t.t3_trig ?? null, t.t3_sell ?? null,
+    t.trail_arm ?? null, t.trail_pct ?? null,
+    t.predictedPeak ?? null,
   );
-  s.bumpOpened.run(strategy);
-  addHeldMint(mintAddress); subscribePumpAmm(mintAddress); warmUpHeldMint(mintAddress);
-  triggerWebhookResync();
-  if (entryScore && entryScore !== 1.0) {
-    db().prepare('UPDATE paper_positions SET entry_score = ? WHERE id = ?').run(entryScore, result.lastInsertRowid);
-  }
-  console.log(`[paper] OPEN ${strategy} on ${mintAddress.slice(0, 8)}… @ ${fillPrice.toExponential(3)} SOL/tok (drift ${(drift * 100).toFixed(1)}%, ${entrySol.toFixed(4)} SOL${entryScore && entryScore !== 1.0 ? ` · ${entryScore.toFixed(2)}x` : ''})`);
-  broadcastEntryToTelegram({ strategy, mintAddress, entryPrice, entrySol, entryMcap, signalDetails });
-  return result.lastInsertRowid;
+  return r.lastInsertRowid;
 }
 
-// Fire-and-forget TG broadcaster — invoked after every successful entry path
-// (synchronous paper fill, latency-deferred paper fill, and live fill). Was
-// previously only wired into the synchronous branch, which meant production
-// (paperLatencyMs > 0) never broadcast a single call.
-function broadcastEntryToTelegram({ strategy, mintAddress, entryPrice, entrySol, entryMcap, signalDetails }) {
-  import('../ingestion/telegram-calls.js').then(m => {
-    const mintRow = S().getMint.get(mintAddress);
-    if (!mintRow) return;
-    return m.postCall({
-      mint: mintRow,
-      strategy,
-      entryPrice,
-      entrySol,
-      entryMcap: entryMcap || 0,
-      predictions: signalDetails?.predictions || null,
-      features: signalDetails?.features || null,
-    });
-  }).catch((err) => { console.log(`[tg-calls] hook err: ${err.message}`); });
-}
-
-function finalizePosition(p, exitPrice, exitMcap, exitReason) {
-  const s = S();
-  _trailBreachStartedAt.delete(p.id);
-  clearTierPending(p.id);
-  let finalSol;
-  if (p.position_mode === 'live') {
-    if (_pendingSells.has(p.id)) return;
-    _pendingSells.add(p.id);
-    import('./executor.js').then(async exec => {
-      const fresh = db().prepare('SELECT tokens_remaining, sol_realized_so_far FROM paper_positions WHERE id = ?').get(p.id);
-      const realizedSoFar = fresh?.sol_realized_so_far || 0;
-      const r = await exec.executeSell({ mint: p.mint_address, pct: 1.0, reason: exitReason, force: true });
-      const liveSol = r.success ? (r.solReceived || 0) : 0;
-      const total = realizedSoFar + liveSol;
-      const pnlSol = total - p.entry_sol;
-      const pnlPct = pnlSol / p.entry_sol;
-      const now = Date.now();
-      s.closePosition.run(exitPrice, exitMcap || 0, exitReason, pnlSol, pnlPct, now, now, p.id);
-      appendSellEvent(p.id, { r: exitReason, m: exitMcap || 0, s: liveSol });
-      if (pnlSol > 0) s.bumpWin.run(pnlSol, p.strategy);
-      else if (pnlSol < 0) s.bumpLoss.run(pnlSol, p.strategy);
-      else s.bumpFlat.run(pnlSol, p.strategy);
-      removeHeldMint(p.mint_address); unsubscribePumpAmm(p.mint_address);
-      triggerWebhookResync();
-      console.log(`[live] CLOSE ${p.strategy} on ${p.mint_address.slice(0,8)}… ${exitReason} ${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL (${(pnlPct*100).toFixed(1)}%) tx=${r.txSig?.slice(0,8) || 'none'}`);
-    }).catch(err => console.error('[live] close failed', err.message))
-      .finally(() => _pendingSells.delete(p.id));
-    return;
-  }
-  finalSol = applySellFriction(p.tokens_remaining || 0, exitPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
-  const totalRealized = (p.sol_realized_so_far || 0) + finalSol;
-  const realizedPnlSol = totalRealized - p.entry_sol;
-  const realizedPnlPct = realizedPnlSol / p.entry_sol;
-  const now = Date.now();
-  s.closePosition.run(
-    exitPrice, exitMcap || 0, exitReason,
-    realizedPnlSol, realizedPnlPct, now, now,
-    p.id
-  );
-  appendSellEvent(p.id, { r: exitReason, m: exitMcap || 0, s: finalSol });
-  if (realizedPnlSol > 0) s.bumpWin.run(realizedPnlSol, p.strategy);
-  else if (realizedPnlSol < 0) s.bumpLoss.run(realizedPnlSol, p.strategy);
-  else s.bumpFlat.run(realizedPnlSol, p.strategy);
-  removeHeldMint(p.mint_address); unsubscribePumpAmm(p.mint_address);
-  triggerWebhookResync();
-  console.log(`[paper] CLOSE ${p.strategy} on ${p.mint_address.slice(0, 8)}… ${exitReason} ${realizedPnlSol >= 0 ? '+' : ''}${realizedPnlSol.toFixed(4)} SOL (${(realizedPnlPct * 100).toFixed(1)}%)`);
-
-  // SL re-entry watchlist: if the position closed via SL_HIT, mark the mint
-  // for a 30-min "bounce" window. tryFire checks this and allows a re-entry
-  // (at half size) when a tracked-wallet buys AND price recovered to ≥80% of
-  // original entry. See backtest evidence: 33% of SL'd mints showed bounce
-  // signals, 85% of those re-entries hit +30% target.
-  if (exitReason === 'SL_HIT') {
-    try {
-      const expires = now + 30 * 60 * 1000;
-      db().prepare(`INSERT OR REPLACE INTO sl_watchlist (mint_address, original_strategy, original_entry_price, sl_at, expires_at, consumed) VALUES (?, ?, ?, ?, ?, 0)`)
-        .run(p.mint_address, p.strategy, p.entry_price, now, expires);
-    } catch (err) { console.error('[reentry] watchlist insert failed:', err.message); }
-  }
-}
-
-// 2026-05-18: When a winning trail-style exit fires AND the strategy has a
-// moonbag_pct_reserve > 0, sell everything ABOVE that reserve and transition
-// the position to is_moonbag=1 instead of fully closing. This is how the V7
-// "keep 5% to watch the moon" mechanic actually retains a bag — the trail
-// path otherwise calls finalizePosition with the full remaining tokens.
-// Paper-mode only (live-mode would need a real partial-sell tx).
-function trailExitToMoonbag(p, currentPrice, currentMcap, exitReason, moonbagReserve) {
-  const s = S();
-  const now = Date.now();
-  const targetRemaining = (p.token_amount || 0) * moonbagReserve;
-  const sellTokens = Math.max(0, (p.tokens_remaining || 0) - targetRemaining);
-  let newRemaining = p.tokens_remaining || 0;
-  let newRealized = p.sol_realized_so_far || 0;
-  if (sellTokens > 0 && currentPrice > 0) {
-    const solReceived = applySellFriction(sellTokens, currentPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
-    newRemaining = (p.tokens_remaining || 0) - sellTokens;
-    newRealized = (p.sol_realized_so_far || 0) + solReceived;
-    appendSellEvent(p.id, { r: exitReason, m: currentMcap || 0, s: solReceived });
-    const realizedPnl = newRealized - p.entry_sol;
-    if (realizedPnl > 0) s.bumpWin.run(realizedPnl, p.strategy);
-    else if (realizedPnl < 0) s.bumpLoss.run(realizedPnl, p.strategy);
-    console.log(`[moonbag] TRAIL→MOONBAG ${p.strategy} on ${p.mint_address.slice(0,8)}… ${exitReason} sold ${((1-moonbagReserve)*100).toFixed(0)}% for +${solReceived.toFixed(4)} SOL · realized=${newRealized.toFixed(4)} · keeping ${(moonbagReserve*100).toFixed(0)}% bag @ ${(currentMcap||0).toFixed(1)} SOL mcap`);
-  }
-  _trailBreachStartedAt.delete(p.id);
-  clearTierPending(p.id);
-  s.convertToMoonbag.run(newRemaining, newRealized, now, currentPrice, currentMcap || 0, now, p.id);
-}
-
-function fireTier(p, tierIdx, tierPctSell, currentPrice, currentMcap) {
-  const s = S();
-  const sellTokens = Math.min(p.token_amount * tierPctSell, p.tokens_remaining);
-  if (sellTokens <= 0) return p;
-  let solReceived;
-  if (p.position_mode === 'live') {
-    if (_pendingSells.has(p.id)) return p;
-    _pendingSells.add(p.id);
-    const tierPct = Math.min(1, sellTokens / Math.max(1, p.tokens_remaining));
-    import('./executor.js').then(async exec => {
-      const r = await exec.executeSell({ mint: p.mint_address, pct: tierPct, reason: `TIER_${tierIdx}`, force: true });
-      const liveSol = r.success ? (r.solReceived || 0) : 0;
-      const tokensSold = r.success ? (r.tokensSold || sellTokens) : 0;
-      const fresh = db().prepare('SELECT tokens_remaining, sol_realized_so_far, tiers_hit, breakeven_armed FROM paper_positions WHERE id = ?').get(p.id);
-      // Dedup guard: tier already in fresh.tiers_hit → race detected, skip.
-      const tierMark = `"TIER_${tierIdx}"`;
-      if ((fresh?.tiers_hit || '').includes(tierMark)) {
-        console.warn(`[live] TIER_${tierIdx} race-skip on ${p.mint_address.slice(0,8)}… — tier already in tiers_hit`);
-        return;
-      }
-      const newRem = Math.max(0, (fresh?.tokens_remaining || 0) - tokensSold);
-      const newReal = (fresh?.sol_realized_so_far || 0) + liveSol;
-      let tiers = []; try { tiers = JSON.parse(fresh?.tiers_hit || '[]'); } catch {}
-      if (r.success) tiers.push(`TIER_${tierIdx}`);
-      const be = (tierIdx === 1 && p._breakeven_after_tier1 && r.success) ? 1 : (fresh?.breakeven_armed || 0);
-      // Atomic UPDATE — last param is the LIKE pattern that must NOT match.
-      const dedupPattern = `%${tierMark}%`;
-      const upd = s.updateTierHit.run(newRem, newReal, JSON.stringify(tiers), be, Date.now(), p.id, dedupPattern);
-      if (upd.changes === 0) {
-        console.warn(`[live] TIER_${tierIdx} atomic-reject on ${p.mint_address.slice(0,8)}… — tier raced in via another path`);
-        return;
-      }
-      if (r.success) {
-        const liveMint = db().prepare('SELECT current_market_cap_sol FROM mints WHERE mint_address = ?').get(p.mint_address);
-        appendSellEvent(p.id, { r: `TIER_${tierIdx}`, m: liveMint?.current_market_cap_sol || 0, s: liveSol });
-        console.log(`[live] TIER_${tierIdx} ${p.strategy} on ${p.mint_address.slice(0,8)}… +${liveSol.toFixed(4)} SOL`);
-      } else console.log(`[live] TIER_${tierIdx} FAIL ${p.strategy} on ${p.mint_address.slice(0,8)}… ${r.error || 'unknown'}`);
-    }).catch(err => console.error('[live] tier failed', err.message))
-      .finally(() => _pendingSells.delete(p.id));
-    return p;
-  }
-  const paperLatencyMs = effectiveLatencyMs();
-  if (paperLatencyMs > 0 && !_pendingPaperSells.has(p.id)) {
-    _pendingPaperSells.add(p.id);
-    const triggerPrice = currentPrice;
-    const triggerTier = tierIdx;
-    const triggerPctSell = tierPctSell;
-    const triggerBeFlag = p._breakeven_after_tier1;
-    setTimeout(() => {
-      try {
-        const fresh = db().prepare('SELECT tokens_remaining, sol_realized_so_far, tiers_hit, breakeven_armed FROM paper_positions WHERE id = ?').get(p.id);
-        // Dedup guard: tier already fired by another path (e.g. duplicate
-        // process — should be impossible under launchd but defense in depth).
-        const tierMark = `"TIER_${triggerTier}"`;
-        if ((fresh?.tiers_hit || '').includes(tierMark)) {
-          console.warn(`[paper-lat] TIER_${triggerTier} race-skip on ${p.mint_address.slice(0,8)}… — tier already in tiers_hit`);
-          return;
-        }
-        const m = s.getMint.get(p.mint_address);
-        const fillPrice = (m && m.last_price_sol > 0) ? m.last_price_sol : triggerPrice;
-        const sellNow = Math.min(p.token_amount * triggerPctSell, fresh?.tokens_remaining || 0);
-        if (sellNow <= 0) return;
-        const drift = (fillPrice - triggerPrice) / Math.max(1e-30, triggerPrice);
-        const sol = applySellFriction(sellNow, fillPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
-        const newRem = Math.max(0, (fresh?.tokens_remaining || 0) - sellNow);
-        const newReal = (fresh?.sol_realized_so_far || 0) + sol;
-        let tiers = []; try { tiers = JSON.parse(fresh?.tiers_hit || '[]'); } catch {}
-        tiers.push(`TIER_${triggerTier}`);
-        const be = (triggerTier === 1 && triggerBeFlag) ? 1 : (fresh?.breakeven_armed || 0);
-        // Atomic UPDATE — refuses to apply if dedup pattern matches.
-        const dedupPattern = `%${tierMark}%`;
-        const upd = s.updateTierHit.run(newRem, newReal, JSON.stringify(tiers), be, Date.now(), p.id, dedupPattern);
-        if (upd.changes === 0) {
-          console.warn(`[paper-lat] TIER_${triggerTier} atomic-reject on ${p.mint_address.slice(0,8)}… — tier raced in`);
-          return;
-        }
-        appendSellEvent(p.id, { r: `TIER_${triggerTier}`, m: m?.current_market_cap_sol || 0, s: sol, drift });
-        console.log(`[paper-lat] TIER_${triggerTier} ${p.strategy} on ${p.mint_address.slice(0,8)}… defer ${paperLatencyMs}ms · drift ${(drift*100).toFixed(2)}% · +${sol.toFixed(4)} SOL`);
-      } catch (err) {
-        console.error('[paper-lat] tier fill threw:', err.message);
-      } finally {
-        _pendingPaperSells.delete(p.id);
-      }
-    }, paperLatencyMs);
-    return p;
-  }
-
-  // Instant paper path — pre-fire dedup guard against `p` being stale.
-  const tierMark = `"TIER_${tierIdx}"`;
-  if ((p.tiers_hit || '').includes(tierMark)) {
-    console.warn(`[paper] TIER_${tierIdx} race-skip on ${p.mint_address.slice(0, 8)}… — tier already in passed-in p.tiers_hit`);
-    return p;
-  }
-  solReceived = applySellFriction(sellTokens, currentPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
-  const newRemaining = Math.max(0, p.tokens_remaining - sellTokens);
-  const newRealized = (p.sol_realized_so_far || 0) + solReceived;
-  let tiers = [];
-  try { tiers = JSON.parse(p.tiers_hit || '[]'); } catch {}
-  tiers.push(`TIER_${tierIdx}`);
-  const breakeven = (tierIdx === 1 && p._breakeven_after_tier1) ? 1 : (p.breakeven_armed || 0);
-  // Atomic UPDATE — last param is the LIKE pattern that must NOT match.
-  const dedupPattern = `%${tierMark}%`;
-  const upd = s.updateTierHit.run(newRemaining, newRealized, JSON.stringify(tiers), breakeven, Date.now(), p.id, dedupPattern);
-  if (upd.changes === 0) {
-    console.warn(`[paper] TIER_${tierIdx} atomic-reject on ${p.mint_address.slice(0, 8)}… — tier was already fired by another writer`);
-    return p;
-  }
-  appendSellEvent(p.id, { r: `TIER_${tierIdx}`, m: currentMcap || 0, s: solReceived });
-  console.log(`[paper] TIER_${tierIdx} ${p.strategy} on ${p.mint_address.slice(0, 8)}… sold ${(tierPctSell*100).toFixed(0)}% of bag for +${solReceived.toFixed(4)} SOL`);
-  return { ...p, tokens_remaining: newRemaining, sol_realized_so_far: newRealized, tiers_hit: JSON.stringify(tiers), breakeven_armed: breakeven };
-}
-
-// DCA scale-in — adds size to an existing losing position at a lower entry,
-// averaging down the cost basis. Re-arms tiers + breakeven on the new bag
-// so the recovered position can fire tier exits again.
+// Partial-sell at a tier hit. Updates sol_realized_so_far, tokens_remaining,
+// records the tier in tiers_hit JSON. Does NOT close the position.
 //
-// Paper mode only for now (live mode would need executor.executeBuy() with
-// reason='DCA' wiring + pending_buy tracking). Returns the updated position
-// row so checkPosition can keep using fresh values for the rest of the tick.
-function fireDca(p, addSol, currentPrice, currentMcap, strat) {
-  const s = S();
-  if (p.position_mode === 'live') {
-    // Punt for now — live DCA requires more pending-buy plumbing. Log and skip.
-    console.log(`[dca] LIVE mode DCA not wired yet for ${p.mint_address.slice(0,8)}… (paper only)`);
-    return p;
+// Returns the SOL realized from this partial sell.
+export async function partialSellAtTier(p, tierName, tierSellPct, currentPrice, currentMcap) {
+  if (!p || !p.id || !tierSellPct || tierSellPct <= 0) return 0;
+  const tokens = p.tokens_remaining || 0;
+  if (tokens <= 0) return 0;
+  const tokensToSell = tokens * tierSellPct;
+
+  // Compute SOL out via bonding curve if pre-mig and we have curve state
+  let solOut;
+  const mint = db().prepare('SELECT v_sol_in_curve, v_tokens_in_curve, migrated FROM mints WHERE mint_address=?').get(p.mint_address);
+  if (mint && !mint.migrated && mint.v_sol_in_curve > 0 && mint.v_tokens_in_curve > 0) {
+    solOut = estimateSell(tokensToSell, mint.v_sol_in_curve, mint.v_tokens_in_curve);
+  } else {
+    solOut = tokensToSell * (currentPrice || p.entry_price);
   }
-  // Apply buy friction to the additional SOL — same as initial entry.
-  // applyBuyFriction returns { tokens, costSol }. Derive effective fill
-  // price from the inverse (avg cost per token) for audit logging.
-  const fricResult = applyBuyFriction(addSol, currentPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
-  const addedTokens = fricResult.tokens || 0;
-  if (addedTokens <= 0) {
-    console.warn(`[dca] friction returned 0 tokens for ${p.mint_address.slice(0,8)}… — skipping DCA`);
-    return p;
-  }
-  const fillPrice = addSol / addedTokens;
-  const oldTokenAmount = p.token_amount || 0;
-  const oldEntrySol = p.entry_sol || 0;
-  const oldRemaining = p.tokens_remaining || 0;
-  const newTokenAmount = oldTokenAmount + addedTokens;
-  const newEntrySol = oldEntrySol + addSol;
-  const newRemaining = oldRemaining + addedTokens;
-  // Weighted-avg entry price using TOTAL cost basis / TOTAL tokens. This
-  // produces the true average — current price * tokens may not = entry_sol
-  // due to friction, so we use entry_sol as the canonical cost basis.
-  const newEntryPrice = newEntrySol / Math.max(newTokenAmount, 1e-30);
-  // Append DCA event to sell_events JSON for audit trail.
-  let events = []; try { events = JSON.parse(p.sell_events || '[]'); } catch {}
-  events.push({
-    r: 'DCA',
-    at: Date.now(),
-    add_sol: addSol,
-    add_tokens: addedTokens,
-    fill_price: fillPrice,
-    pre_entry_price: p.entry_price,
-    post_entry_price: newEntryPrice,
-    pre_peak_pct: p.highest_pct || 0,
-    m: currentMcap || 0,
-  });
-  s.applyDca.run(
-    newEntryPrice, newEntrySol, newTokenAmount, newRemaining,
-    addSol, JSON.stringify(events).slice(0, 8000), Date.now(),
+  // Friction: 1% sell fee + priority fee deduction
+  solOut = Math.max(0, solOut * (1 - SELL_FEE_PCT) - currentPriorityFeeSol());
+
+  // Update tiers_hit JSON
+  let tiersHit;
+  try { tiersHit = JSON.parse(p.tiers_hit || '[]'); }
+  catch { tiersHit = []; }
+  if (!tiersHit.includes(tierName)) tiersHit.push(tierName);
+
+  // Trail arms after first tier hit
+  const trailArmed = tiersHit.length >= 1 ? 1 : (p.trail_armed || 0);
+
+  const curPct = currentPrice > 0 ? (currentPrice / p.entry_price - 1) * 100 : 0;
+
+  S().recordTier.run(
+    solOut,
+    tokensToSell,
+    JSON.stringify(tiersHit),
+    trailArmed,
+    curPct,
+    Date.now(),
     p.id,
   );
-  console.log(`[dca] ${p.strategy} on ${p.mint_address.slice(0,8)}… added ${addSol.toFixed(4)} SOL · entry ${p.entry_price.toExponential(2)} → ${newEntryPrice.toExponential(2)} · tiers + breakeven reset`);
-  return {
-    ...p,
-    entry_price: newEntryPrice,
-    entry_sol: newEntrySol,
-    token_amount: newTokenAmount,
-    tokens_remaining: newRemaining,
-    tiers_hit: '[]',
-    breakeven_armed: 0,
-    highest_pct: 0,
-    dca_count: (p.dca_count || 0) + 1,
-    sell_events: JSON.stringify(events),
-  };
+
+  console.log(`[paper] ${tierName} ${p.mint_address.slice(0,8)}… sold ${(tierSellPct*100).toFixed(0)}% @ ${curPct.toFixed(1)}% pnl, +${solOut.toFixed(4)} SOL realized`);
+  return solOut;
 }
 
-function convertToMoonbag(p, m) {
-  const s = S();
-  const cfg = config.moonbag;
-  const now = Date.now();
-  const sellTokens = (p.tokens_remaining || 0) * cfg.sellPctAtMigration;
-  const sellPrice = m.last_price_sol || p.entry_price;
-  const sellSol = applySellFriction(sellTokens, sellPrice, { mintAddress: p.mint_address, positionId: p.id, strategy: p.strategy });
-  const newRemaining = (p.tokens_remaining || 0) - sellTokens;
-  const newRealized = (p.sol_realized_so_far || 0) + sellSol;
-
-  s.convertToMoonbag.run(
-    newRemaining, newRealized, now,
-    sellPrice, m.current_market_cap_sol || 0, now,
-    p.id
-  );
-  console.log(`[moonbag] CONVERT ${p.strategy} on ${p.mint_address.slice(0, 8)}… sold ${(cfg.sellPctAtMigration*100).toFixed(0)}% @ migration for +${sellSol.toFixed(4)} SOL · keeping ${((1-cfg.sellPctAtMigration)*100).toFixed(0)}% bag for ride`);
-}
-
-// Per-position debounce: require N consecutive polls confirming the
-// exit-trigger condition before actually closing. Migration-moment ticks
-// (2026-05-11 Goblinjak) caused a single bad price reading to fire the
-// trail. Requiring 2 confirming polls means a one-off bad tick gets
-// overridden by the next legit poll within ~20s and the position stays open.
-const _moonbagExitConfirm = new Map(); // positionId -> { reason, count }
-const MOONBAG_EXIT_CONFIRMATIONS = 2;
-
-// 2026-05-18: moonbag is now WATCH-ONLY. When V7's trail fires and the
-// reserve (e.g. 5%) is retained, the position transitions to is_moonbag=1
-// and we just track price from there — no auto-exit ladder, no time exit.
-// Only RUG fires (worthless bag → close it out). Kara wants to see how far
-// the small leftovers actually run after we sold the majority.
-function checkMoonbag(p, m) {
-  const s = S();
-  const now = Date.now();
-  if (!p.migration_price || p.migration_price <= 0) return;
-  const currentPrice = m.last_price_sol || p.migration_price;
-  if (m.rugged) {
-    _moonbagExitConfirm.delete(p.id);
-    finalizePosition(p, currentPrice, m.current_market_cap_sol || 0, 'MOONBAG_RUG');
-    return;
-  }
-  const moonbagPct = (currentPrice - p.migration_price) / p.migration_price;
-  const moonbagPeak = Math.max(p.moonbag_peak_pct || 0, moonbagPct);
-  const remainingValue = (p.tokens_remaining || 0) * currentPrice;
-  const totalUnrealized = (p.sol_realized_so_far || 0) + remainingValue - p.entry_sol;
-  const totalUnrealizedPct = totalUnrealized / p.entry_sol;
-  s.updateMoonbagPeak.run(moonbagPeak, totalUnrealized, totalUnrealizedPct, now, p.id);
-}
-
-// 2026-05-13: Migration grace window. During the 90 seconds after a mint
-// migrates, four different price-writers compete for mints.last_price_sol
-// (bonding-curve PDA emitting final state, AMM router quoting before
-// liquidity stabilizes, DexScreener picking up the new pool, etc.). Phantom
-// values get through and trigger bad price-driven exits — caught NUBBIX,
-// CUPPY, BALLSACKDORKL, others exiting at fake 4.108e-07. Freezing price-
-// driven exits for 90s lets the dust settle and the HOT DexScreener poll
-// (10s cadence) get ~9 fresh quotes before we trust the data again.
-//
-// What still fires during grace: RUGGED (the rug flag is set independently
-// from price-monitor logic, so it's trustworthy). What does NOT fire: every
-// price-driven exit (TARGET, SL, TRAIL, FAKE_PUMP, etc.). Max-hold also
-// keeps firing because it's time-based.
-const MIGRATION_GRACE_MS = 90 * 1000;
-
-function checkPosition(p) {
-  const s = S();
-  const now = Date.now();
-  if (p.pending_fill) return;
-  if (p.position_mode === 'live' && _pendingSells.has(p.id)) return;
-  if (_pendingPaperSells.has(p.id)) return;
-  const m = s.getMint.get(p.mint_address);
-  if (!m) return;
-
-  // Migration grace: freeze price-driven exits for 90s after migration.
-  // Only the RUGGED check fires inside the window (rugged isn't price-driven
-  // and is the only condition where we'd want immediate action regardless).
-  if (m.migrated && m.migrated_at && (now - m.migrated_at) < MIGRATION_GRACE_MS) {
-    if (m.rugged) {
-      // Even during grace, a rugged mint should exit immediately
-      // (RUGGED flag is set by independent rug-detection logic).
-    } else {
-      // Skip this poll cycle entirely — let the AMM pool stabilize.
-      return;
-    }
-  }
-
-  // 2026-05-17: GLOBAL moonbag disabled. Kara wants each strategy to own its
-  // moonbag logic via recipe.exit.moonbag_pct_reserve. Old auto-conversion
-  // at migration triggered confusing exits that fought the strategy's intent.
-  // Preserved is_moonbag branch for any LEGACY positions still flagged (none
-  // in current paper state — wiped at V2 reset — but defensive).
-  if (p.is_moonbag) {
-    return checkMoonbag(p, m);
-  }
-  // (auto-convert at migration intentionally removed — was:
-  //   if (m.migrated && config.moonbag.enabled && tokens_remaining > 0) convertToMoonbag)
-
-  const strat = s.getStrategy.get(p.strategy);
-  if (!strat) return;
-
-  // 2026-05-17: per-strategy moonbag mode. Once remaining bag drops at or
-  // below moonbag_pct_reserve fraction of original tokens, transition the
-  // position to is_moonbag=1 — separate dashboard section, excluded from
-  // open count + SOL exposure, watch-only (RUG-only exit). Rug-exception:
-  // if mint rugged before we transition, fall through so SL catches it.
-  const moonbagReserve = strat.moonbag_pct_reserve || 0;
-  if (moonbagReserve > 0 && (p.token_amount || 0) > 0 && !m.rugged) {
-    const remainingFraction = (p.tokens_remaining || 0) / p.token_amount;
-    if (remainingFraction <= moonbagReserve) {
-      const movePrice = m.last_price_sol || p.entry_price;
-      const moveMcap = m.current_market_cap_sol || 0;
-      s.convertToMoonbag.run(
-        p.tokens_remaining, p.sol_realized_so_far, now,
-        movePrice, moveMcap, now,
-        p.id
-      );
-      console.log(`[moonbag] TRANSITION ${p.strategy} on ${p.mint_address.slice(0, 8)}… holding ${((p.tokens_remaining/p.token_amount)*100).toFixed(1)}% bag @ ${movePrice.toExponential(2)} (${moveMcap.toFixed(1)} SOL mcap) · realized ${(p.sol_realized_so_far || 0).toFixed(4)} SOL · watch-only from here`);
-      return;
-    }
-  }
-
-  const currentPrice = m.last_price_sol || p.entry_price;
-  // Sanity guard: pump.fun mints legitimately peak around +500-1000% on
-  // strong runners. Anything ≥ +5000% (50x) is a data artifact — typically
-  // a stale-quote tick, a precision error, or a near-zero denominator on
-  // the price computation. On 2026-05-10 a single such tick on mint
-  // FffvxVAR registered as a +734,545% peak and triggered a PEAK_FLOOR
-  // exit at +206,117%, injecting fake +309 SOL into the paper wallet.
-  // Reject the tick entirely — don't update highest_pct, don't fire exits.
-  // The next tick (with a real price) processes normally.
-  const SANITY_PEAK_CAP = 1000;  // 100,000% from entry (1000x)
-  // SANITY_PRICE_FLOOR — pump.fun bonding curve has a mathematical price
-  // floor at ~2.8e-8 SOL/token (30 SOL initial / 1.073B initial tokens).
-  // Any price BELOW that during bonding-curve phase is junk — a single bad
-  // trade with miscalculated price made it into mint state. Reject the tick;
-  // wait for the next real one. Only applies pre-migration: post-mig AMM
-  // prices can legitimately crater, and rugged mints can also be ~0.
-  // This guard catches the recording bug observed 2026-05-11 where positions
-  // entered at 100+ SOL mcap exited with stored exit_mcap_sol < 5 SOL.
-  const SANITY_PRICE_FLOOR = 1e-8;
-  if (!p.entry_price || p.entry_price <= 0) return;
-  const rawPct = (currentPrice - p.entry_price) / p.entry_price;
-  if (!isFinite(rawPct) || rawPct > SANITY_PEAK_CAP || rawPct < -1) {
-    console.warn(`[position] REJECT bogus price tick for ${p.mint_address.slice(0, 8)}… : current=${currentPrice} entry=${p.entry_price} rawPct=${rawPct.toFixed(2)}`);
-    return;
-  }
-  if (currentPrice < SANITY_PRICE_FLOOR && !m.migrated && !m.rugged) {
-    console.warn(`[position] REJECT sub-curve-floor tick for ${p.mint_address.slice(0, 8)}… : current=${currentPrice.toExponential(2)} (floor=${SANITY_PRICE_FLOOR.toExponential(0)}) — bonding curve math says this is impossible. Waiting for real tick.`);
-    return;
-  }
-  const peakPctRaw = rawPct;
-  const ageMin = (now - p.entered_at) / 60000;
-  const ageSec = (now - p.entered_at) / 1000;
-  // peakFromEntry needed early — DCA logic at line ~830 references it before
-  // the tier-firing block below redefines/uses it. Compute once up-front.
-  const peakFromEntry = Math.max(p.highest_pct || 0, peakPctRaw);
-  const minutesSinceLastTrade = m.last_trade_at ? (now - m.last_trade_at) / 60000 : ageMin;
-  const tiers = (() => { try { return JSON.parse(p.tiers_hit || '[]'); } catch { return []; } })();
-
-  const t1Hit = tiers.includes('TIER_1');
-  const t2Hit = tiers.includes('TIER_2');
-  const t3Hit = tiers.includes('TIER_3');
-
-  p._breakeven_after_tier1 = strat.breakeven_after_tier1;
-
-  const cashbackBoost = (m.cashback_enabled === 1 && (strat.cashback_trigger_boost || 1.0) > 1.0)
-    ? strat.cashback_trigger_boost : 1.0;
-  const t1Trig = strat.tier1_trigger_pct * cashbackBoost;
-  const t2Trig = strat.tier2_trigger_pct * cashbackBoost;
-  let t3Trig = strat.tier3_trigger_pct * cashbackBoost;
-  // 2026-05-18: adaptive trail. When present, arm threshold = first
-  // [peak,retrace] pair's peak, and active retrace = retrace of the HIGHEST
-  // peak threshold crossed. Lets the trail be tight on small movers (friction
-  // protection) and loose on runners (let unicorns stretch). Falls back to
-  // the static tier3_trail_pct when adaptive_trail_json is null/empty.
-  let activeTrailPct = strat.tier3_trail_pct || 0;
-  if (strat.adaptive_trail_json) {
-    try {
-      const at = JSON.parse(strat.adaptive_trail_json);
-      if (Array.isArray(at) && at.length) {
-        t3Trig = at[0][0];
-        let dyn = null;
-        for (const [arm, retrace] of at) {
-          if (peakFromEntry >= arm) dyn = retrace; else break;
-        }
-        if (dyn !== null) activeTrailPct = dyn;
-      }
-    } catch (err) {
-      console.warn(`[adaptive-trail] parse failed for ${p.strategy}: ${err.message}`);
-    }
-  }
-  // Ladder sanity — t1 < t2 < t3 must hold or the cascade is broken. Both
-  // tiers can fire on the same tick if t2 < t1, and tier3 trail/sell never
-  // happens if t3 <= t2 because tier2 absorbs the fill first.
-  if (t1Trig > 0 && t2Trig > 0 && t3Trig > 0 &&
-      (t2Trig <= t1Trig || t3Trig <= t2Trig) &&
-      !_tierLadderWarned.has(p.strategy)) {
-    _tierLadderWarned.add(p.strategy);
-    console.warn(`[tier-ladder] BROKEN on ${p.strategy}: t1=${t1Trig.toFixed(2)} t2=${t2Trig.toFixed(2)} t3=${t3Trig.toFixed(2)} — expect t1 < t2 < t3. Tiers may fire out of order or be absorbed.`);
-  }
-
-  // DCA scale-in evaluation — fires BEFORE tier sells. Strict gates:
-  //   1) strategy opted in (dca_enabled = 1)
-  //   2) we haven't already exhausted dca_max_dca for this position
-  //   3) position is in the [dca_min_age_sec, dca_max_age_min] window — too
-  //      young = haven't seen real action yet; too old = the thesis has died
-  //   4) position peaked at +1%+ before dumping (showed promise vs never-pumped)
-  //   5) current PnL is at-or-below dca_trigger_pct (the dip we're buying)
-  //   6) PER-MINT SAFETY: ml says rug-side targets are LOW (skip rugs)
-  // When all true, fires a buy of (entry_sol × dca_size_pct), averages down,
-  // resets tiers + breakeven so the rebuilt bag can take profit again.
-  // Skip in live mode for now (fireDca() noops in live, paper-only v1).
-  if (
-    p.position_mode !== 'live' &&
-    (strat.dca_enabled || 0) === 1 &&
-    (p.dca_count || 0) < (strat.dca_max_dca || 1) &&
-    ageSec >= (strat.dca_min_age_sec || 60) &&
-    ageMin <= (strat.dca_max_age_min || 30) &&
-    peakFromEntry >= 0.01 &&
-    peakPctRaw <= (strat.dca_trigger_pct || -0.25)
-  ) {
-    // Per-mint safety re-check — don't add capital if ML thinks this is
-    // rugging right now. 2026-05-17: re-pointed at canonical will_rug
-    // (calibrated 3.4% predicted = 3.4% actual). Threshold 0.10 = "3× the
-    // base rate" — flags coins with elevated rug risk while still letting
-    // legitimate dips DCA.
-    const safety = s.getDcaSafety.get(p.mint_address);
-    const WILL_RUG_VETO = 0.10;
-    const safetyVeto = safety && (
-      safety.p_will_rug != null && safety.p_will_rug >= WILL_RUG_VETO
-    );
-    if (safetyVeto) {
-      // One-time log per position so we can see when DCA was vetoed — useful
-      // for future analysis of when DCA helped vs hurt.
-      if (!p._dcaVetoedLogged) {
-        p._dcaVetoedLogged = true;
-        console.log(`[dca] VETO ${p.mint_address.slice(0,8)}… on ${p.strategy} — ML flags rug (will_rug=${(safety.p_will_rug ?? 0).toFixed(3)}) at ${(peakPctRaw*100).toFixed(0)}% drawdown`);
-      }
-    } else {
-      const addSol = (p.entry_sol || 0) * (strat.dca_size_pct || 0.5);
-      if (addSol > 0) {
-        // Respect exposure cap — check before firing.
-        const exposureRow = db().prepare(
-          "SELECT COALESCE(SUM(MAX(0, entry_sol - COALESCE(sol_realized_so_far, 0))), 0) AS s FROM paper_positions WHERE status = 'open'"
-        ).get();
-        const wouldBeExposure = (exposureRow?.s || 0) + addSol;
-        const maxExposure = config.limits?.maxSolExposure || config.strategies?.global?.maxSolExposure || 50;
-        if (wouldBeExposure <= maxExposure) {
-          p = fireDca(p, addSol, currentPrice, m.current_market_cap_sol || 0, strat);
-          // Recompute peak metrics from the updated entry — fresh basis means
-          // the current tick's tier checks should NOT fire (we just averaged
-          // down; price hasn't actually moved). Skip rest of tick.
-          const newRem = p.tokens_remaining || 0;
-          const remValue = newRem * currentPrice;
-          const totalUnrealized = (p.sol_realized_so_far || 0) + remValue - (p.entry_sol || 0);
-          const totalUnrealizedPct = totalUnrealized / Math.max(p.entry_sol, 0.001);
-          s.updateUnrealized.run(totalUnrealized, totalUnrealizedPct, 0, now, p.id);
-          return;
-        } else {
-          console.log(`[dca] ${p.mint_address.slice(0,8)}… SKIP — adding ${addSol.toFixed(3)} SOL would exceed maxSolExposure ${maxExposure}`);
-        }
-      }
-    }
-  }
-
-  if (!t1Hit && peakPctRaw >= t1Trig && tierConfirmed(p.id, 1)) {
-    p = fireTier(p, 1, strat.tier1_sell_pct, currentPrice, m.current_market_cap_sol || 0);
-  }
-  if (!t2Hit && peakPctRaw >= t2Trig && tierConfirmed(p.id, 2)) {
-    p = fireTier(p, 2, strat.tier2_sell_pct, currentPrice, m.current_market_cap_sol || 0);
-  }
-  if (!t3Hit && peakPctRaw >= t3Trig && activeTrailPct <= 0 && tierConfirmed(p.id, 3)) {
-    p = fireTier(p, 3, strat.tier3_sell_pct, currentPrice, m.current_market_cap_sol || 0);
-  }
-
-  const tiersAfter = (() => { try { return JSON.parse(p.tiers_hit || '[]'); } catch { return []; } })();
-  // 2026-05-18: was peakPctRaw — that armed the trail only WHILE current price
-  // was above arm_pct, which meant a fast retracement past the arm threshold
-  // disarmed the trail and stranded the position (PeZn74V7rvrf hit +39.6%
-  // peak, retraced fast through +20% arm, trail never fired, position rotted
-  // for max_hold). Using peakFromEntry: once peak has ever crossed arm, trail
-  // stays armed permanently for that position. This is how trails are supposed
-  // to work.
-  const t3Armed = tiersAfter.includes('TIER_3') ? false : (peakFromEntry >= t3Trig && activeTrailPct > 0);
-  const breakevenArmed = !!p.breakeven_armed;
-
-  const tier3TrailFloor = peakFromEntry - activeTrailPct;
-
-  let exitReason = null;
-  const beArmPct = strat.breakeven_arm_pct || 0;
-  // When breakeven_after_tier1 = 0 AND breakeven_arm_pct > 0, the breakeven
-  // trail arms on peak threshold WITHOUT needing tier1 to fire first.
-  // Lets a strategy say "if peak >= +X% and pulls back below +Y%, sell" as a
-  // standalone exit (no tier1 dependency).
-  const beStandalone = !strat.breakeven_after_tier1 && beArmPct > 0;
-  const beActive = (breakevenArmed || beStandalone) && peakFromEntry >= beArmPct;
-  const postT1TrailPct = strat.tp_trail_pct || 0;
-  const postT1ArmPct = strat.tp_trail_arm_pct || 0;
-  // 2026-05-13: removed `breakevenArmed &&` prerequisite. Original gating tied
-  // trail to "tier1 has locked profit" which made the trail INERT for any
-  // strategy with breakeven_after_tier1=0 OR whose runners peaked above
-  // arm_pct but below T1 trigger. Caught when alive-migrator-v1 round-tripped
-  // 5 positions that peaked +100-145% back down to TIME_EXIT at -50-70%
-  // because the trail never armed. peakFromEntry >= postT1ArmPct is itself
-  // the correct gate — once peak crosses the arm threshold, protect it.
-  const trailArmed = postT1TrailPct > 0 && peakFromEntry >= postT1ArmPct;
-  const postT1TrailFloor = trailArmed
-    ? Math.max(0, peakFromEntry - postT1TrailPct)
-    : null;
-
-  const fastFailSec = strat.fast_fail_sec || 0;
-  const fastFailMinPeak = strat.fast_fail_min_peak_pct || 0;
-  const fastFailSl = strat.fast_fail_sl_pct || 0;
-  // INTENTIONAL gate: FAST_FAIL/FAKE_PUMP only fire BEFORE tier1 has locked
-  // in profit. After breakevenArmed, BREAKEVEN_SL takes over as the floor
-  // (and is typically tighter). If a strategy ships with FAST_FAIL params
-  // AND breakeven_after_tier1=1, those params silently become dead code
-  // after tier1 fires — warn once so the user can see the conflict.
-  if ((fastFailSec > 0 || strat.fakepump_sec > 0) &&
-      strat.breakeven_after_tier1 === 1 &&
-      !_fastFailWarned.has(p.strategy)) {
-    _fastFailWarned.add(p.strategy);
-    console.warn(`[exit-config] NOTE ${p.strategy}: FAST_FAIL/FAKE_PUMP configured AND breakeven_after_tier1=1 — those modes ONLY fire pre-tier1. Post-tier1 the BREAKEVEN_SL floor takes over.`);
-  }
-  const fastFailActive = !breakevenArmed && fastFailSec > 0 &&
-    ageSec >= fastFailSec && peakFromEntry < fastFailMinPeak;
-
-  const fakeSec = strat.fakepump_sec || 0;
-  const fakeMinPeak = strat.fakepump_min_peak_pct || 0;
-  const fakeSl = strat.fakepump_sl_pct || 0;
-  const fakePumpActive = !breakevenArmed && fakeSec > 0 &&
-    ageSec >= fakeSec && peakFromEntry < fakeMinPeak;
-
-  const flatMin = strat.flat_exit_min || 0;
-  const flatMaxPeak = strat.flat_exit_max_peak_pct || 0;
-  const flatActive = flatMin > 0 && ageMin >= flatMin && peakFromEntry < flatMaxPeak;
-
-  // Recent inflow_accel_pct from the freshest ml_mint_snapshots row for this
-  // mint — feeds the momentum-confirmed staying-power gate on STAGNATED.
-  // NULL means no snapshot yet (mint < 60s old, or this is a non-pump.fun mint).
-  // One DB read per checkPosition call — cheap.
-  const recentVelocity = s.getRecentVelocity.get(p.mint_address)?.inflow_accel_pct ?? null;
-  const volumeAccelerating = recentVelocity != null && recentVelocity > 0.20;
-
-  // Realized PnL lock: once tier sells have realized ≥50% of entry SOL, the
-  // remaining bag should NEVER exit at a loss vs entry. Lock a hard floor at
-  // +20% so we keep at least *some* gain on the residual bag even if it
-  // collapses. Fires only when this is the strictest active floor (cascade
-  // priority means TP_TRAIL/PEAK_FLOOR/BREAKEVEN_SL trump REALIZED_LOCK when
-  // configured with higher thresholds — REALIZED_LOCK catches the rest).
-  const realizedFrac = (p.sol_realized_so_far || 0) / Math.max(p.entry_sol, 0.001);
-  const REALIZED_LOCK_THRESHOLD = 0.5;
-  const REALIZED_LOCK_FLOOR = 0.20;
-  const realizedLockActive = realizedFrac >= REALIZED_LOCK_THRESHOLD;
-
-  // SANITY: a peak-floor level only makes sense when exit < arm. If a strategy
-  // ships with exit >= arm (e.g. arm=1.0/exit=1.2), the level would arm at
-  // peakFromEntry >= 1.0 and then fire IMMEDIATELY on any tick where current
-  // dipped below 1.2 — which is always, post-pullback. That's exactly what
-  // was burning winners. Drop misconfigured levels and warn once per strategy.
-  const _rawPfLevels = [
-    { name: 'L1', arm: strat.peak_floor_arm_pct || 0, exit: strat.peak_floor_exit_pct || 0 },
-    { name: 'L2', arm: strat.peak_floor_arm2_pct || 0, exit: strat.peak_floor_exit2_pct || 0 },
-    { name: 'L3', arm: strat.peak_floor_arm3_pct || 0, exit: strat.peak_floor_exit3_pct || 0 },
-  ];
-  const pfLevels = _rawPfLevels
-    .filter(l => {
-      if (l.arm <= 0) return false;
-      if (l.exit >= l.arm || l.exit < 0) {
-        const key = `${p.strategy}:${l.name}`;
-        if (!_peakFloorWarned.has(key)) {
-          _peakFloorWarned.add(key);
-          console.warn(`[peak-floor] DROPPING misconfigured ${l.name} on ${p.strategy}: arm=${l.arm} exit=${l.exit} — exit must be > 0 and < arm. Would fire immediately on any pullback.`);
-        }
-        return false;
-      }
-      return true;
-    })
-    .sort((a, b) => b.arm - a.arm);
-  const armedLevel = pfLevels.find(l => peakFromEntry >= l.arm);
-  const peakFloorActive = !!armedLevel;
-  const peakFloorExit = armedLevel ? armedLevel.exit : 0;
-
-  // Trail-breach confirmation. Update breach state every tick: if current is
-  // below either trail floor, record/keep the breach start timestamp;
-  // otherwise clear it. Only fire the trail exit once the breach has been
-  // sustained for TRAIL_CONFIRM_MS. Filters out single-tick whale dumps
-  // that immediately recover (uAPE: shaken out 21s after entry, ran to
-  // +390% above our exit moments later).
-  const inTrailBreach =
-    (t3Armed && peakPctRaw <= tier3TrailFloor) ||
-    (postT1TrailFloor !== null && peakPctRaw <= postT1TrailFloor);
-  if (inTrailBreach) {
-    if (!_trailBreachStartedAt.has(p.id)) _trailBreachStartedAt.set(p.id, now);
+export async function closePaperPosition(p, exitPrice, exitMcap, exitReason) {
+  if (!p || !p.id) return;
+  const tokens = p.tokens_remaining || 0;
+  let solOut;
+  const mint = db().prepare('SELECT v_sol_in_curve, v_tokens_in_curve, migrated FROM mints WHERE mint_address=?').get(p.mint_address);
+  if (mint && !mint.migrated && mint.v_sol_in_curve > 0 && mint.v_tokens_in_curve > 0) {
+    solOut = estimateSell(tokens, mint.v_sol_in_curve, mint.v_tokens_in_curve);
   } else {
-    _trailBreachStartedAt.delete(p.id);
+    solOut = tokens * (exitPrice || p.entry_price);
   }
-  const trailBreachConfirmedNow = _trailBreachStartedAt.has(p.id) &&
-    (now - _trailBreachStartedAt.get(p.id)) >= TRAIL_CONFIRM_MS;
+  // Friction on the close leg
+  solOut = Math.max(0, solOut * (1 - SELL_FEE_PCT) - currentPriorityFeeSol());
+  const totalRealized = (p.sol_realized_so_far || 0) + solOut;
+  const pnl = totalRealized - p.entry_sol;
+  const pnlPct = p.entry_sol > 0 ? (pnl / p.entry_sol) * 100 : 0;
+  const now = Date.now();
+  S().closePosition.run(exitReason, exitPrice, exitMcap, pnl, pnlPct, now, now, p.id);
+  console.log(`[paper] CLOSE ${p.strategy} on ${p.mint_address.slice(0,8)}… ${exitReason} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL (${pnlPct.toFixed(1)}%)`);
 
-  if (m.rugged) exitReason = 'RUGGED';
-  // 2026-05-13: removed `else if (m.migrated)` auto-exit. With config.moonbag
-  // disabled, this line was firing on EVERY migrated position — CUPPY entered
-  // and exited within 1 second of migration. The strategy's tier/trail/SL
-  // should own post-migration behavior. AMM pollers (dexscreener.js, etc.)
-  // keep price ticking; smart-SL + spike-guard already defend against
-  // migration-moment phantom prices.
-  else if ((p.tokens_remaining || 0) <= 0) exitReason = ((strat.tier2_sell_pct || 0) > 0) ? 'TIERED_FULL' : 'TARGET_HIT';
-  else if (t3Armed && peakPctRaw <= tier3TrailFloor && trailBreachConfirmedNow) exitReason = 'TP_TRAIL';
-  else if (postT1TrailFloor !== null && peakPctRaw <= postT1TrailFloor && trailBreachConfirmedNow) exitReason = 'POST_T1_TRAIL';
-  else if (peakFloorActive && peakPctRaw < peakFloorExit) exitReason = 'PEAK_FLOOR';
-  else if (beActive && !trailArmed && peakPctRaw <= (strat.breakeven_floor_pct || 0)) exitReason = 'BREAKEVEN_SL';
-  else if (fastFailActive && peakPctRaw <= fastFailSl) exitReason = 'FAST_FAIL';
-  // 2026-05-13: FAKE_PUMP missed 2/8 huge runners (NUBBIX +935% post-exit,
-  // MONET +140% post-exit). Common signal at exit moment: inflow_accel_pct
-  // was positive — buyers stepping in even though price was momentarily under
-  // -15%. Veto FAKE_PUMP when inflow is actively accelerating so we don't
-  // panic out right before a recovery. Null velocity (no snapshot yet) and
-  // negative/zero velocity both leave the rule firing normally.
-  else if (fakePumpActive && peakPctRaw <= fakeSl &&
-           !(recentVelocity != null && recentVelocity > 0)) exitReason = 'FAKE_PUMP';
-  else if (flatActive) exitReason = 'FLAT_EXIT';
-  // REALIZED_LOCK — once 50%+ of entry SOL has been realized via tier sells,
-  // never let the residual bag drop below +20% from entry. Skips when other
-  // floor-style exits (PEAK_FLOOR, BREAKEVEN_SL) already handled it via a
-  // stricter trigger; only fires when this would be the active floor.
-  else if (realizedLockActive && peakPctRaw <= REALIZED_LOCK_FLOOR) exitReason = 'REALIZED_LOCK';
-  // 2026-05-15: PRED_EXIT — strategy-level ML prediction triggers an immediate
-  // exit. Gated by a 60-second min-age so we don't react to stale predictions
-  // for newly opened positions. Threshold + op + target come from
-  // strategy_state.pred_exit_*, populated from the recipe's exit.prediction_exit.
-  // IIFE keeps this as a single else-if so the cascade below continues
-  // cleanly when the prob check doesn't fire.
-  else if (strat.pred_exit_target && strat.pred_exit_value != null && ageSec >= 60 && (() => {
-    try {
-      const row = s.getPredForTarget.get(p.mint_address, strat.pred_exit_target);
-      if (!row || row.prob == null) return false;
-      const v = row.prob, thr = strat.pred_exit_value, op = strat.pred_exit_op || '>';
-      return (op === '>'  && v >  thr) ||
-             (op === '>=' && v >= thr) ||
-             (op === '<'  && v <  thr) ||
-             (op === '<=' && v <= thr) ||
-             (op === '==' && v === thr);
-    } catch { return false; }
-  })()) exitReason = 'PRED_EXIT';
-  else if (!breakevenArmed && peakPctRaw <= strat.sl_pct) {
-    // Hard SL fires when peak drawdown breaches the recipe's stop_loss_pct.
-    // 2026-05-17: simplified. Original "smart SL" required ML confirmation
-    // (rug_within_5min or will_die_fast) before cutting — designed for tight
-    // SLs that needed help distinguishing wicks from real dies. V2 recipes
-    // use WIDE SLs (-50% to -60%) chosen specifically to survive wicks, so
-    // by the time we hit SL it's a sustained drop, not a wick. The ML gate
-    // was actively blocking legitimate exits (positions stuck -60 to -75%
-    // for 80+ minutes with will_rug=0.0025 saying "not rugging").
-    // Recipe owns SL placement; we just fire when it hits.
-    exitReason = 'SL_HIT';
-  }
-  else if (
-    strat.stagnant_exit_min > 0 &&
-    minutesSinceLastTrade >= strat.stagnant_exit_min &&
-    peakPctRaw <= strat.stagnant_loss_pct &&
-    // Momentum-confirmed staying power: skip STAGNATED if volume is
-    // accelerating (>+20%). Price stagnant + volume building = breakout
-    // setup, not death.
-    !volumeAccelerating
-  ) exitReason = 'STAGNATED';
-  else if (
-    (strat.dead_bag_age_min || 0) > 0 &&
-    ageMin >= strat.dead_bag_age_min &&
-    peakFromEntry < (strat.dead_bag_max_peak_pct || 0) &&
-    peakPctRaw <= (strat.dead_bag_loss_pct || 0)
-  ) exitReason = 'DEAD_BAG';
-  // FADE_EXIT / MID_FADE deleted 2026-05-11 — never fired in any closed
-  // position across all of history. The fade_exit_* / mid_fade_* strategy
-  // columns remain but are now no-ops (no value in dropping cols on SQLite).
-  else if (
-    // LAZY_EXIT — alive but going nowhere. Cycles stuck positions out so the
-    // exposure cap doesn't lock us out of fresh runners. Asymmetric band:
-    // only fires when CURRENT PnL is at-or-below breakeven AND within band
-    // of zero on the loss side. We never cycle a position that's currently
-    // in profit — even a small winner deserves to keep running.
-    (strat.lazy_exit_age_min || 0) > 0 &&
-    ageMin >= strat.lazy_exit_age_min &&
-    peakFromEntry < (strat.lazy_exit_max_peak_pct || 0) &&
-    peakPctRaw <= 0 &&
-    peakPctRaw >= -(strat.lazy_exit_band_pct || 0)
-  ) exitReason = 'LAZY_EXIT';
-  else if (ageMin >= strat.max_hold_min) exitReason = 'TIME_EXIT';
-
-  if (exitReason) {
-    // 2026-05-18: route winning trail-style exits through moonbag transition
-    // when strategy reserves one. SL/RUG/TIME/STAGNATED/etc still fully close.
-    const moonbagReserve = strat.moonbag_pct_reserve || 0;
-    const isTrailWin = (exitReason === 'TP_TRAIL' || exitReason === 'PEAK_FLOOR' || exitReason === 'REALIZED_LOCK');
-    if (isTrailWin && moonbagReserve > 0 && peakFromEntry > 0 && !m.rugged && p.position_mode !== 'live') {
-      trailExitToMoonbag(p, currentPrice, m.current_market_cap_sol || 0, exitReason, moonbagReserve);
-    } else {
-      finalizePosition(p, currentPrice, m.current_market_cap_sol || 0, exitReason);
-    }
-  } else {
-    const remaining = p.tokens_remaining || 0;
-    const remainingValue = remaining * currentPrice;
-    const totalUnrealized = (p.sol_realized_so_far || 0) + remainingValue - p.entry_sol;
-    const totalUnrealizedPct = totalUnrealized / p.entry_sol;
-    s.updateUnrealized.run(totalUnrealized, totalUnrealizedPct, peakFromEntry, now, p.id);
-  }
-}
-
-export function monitorPositions() {
-  const s = S();
-  const opens = s.openPositions.all();
-  if (!opens.length) return;
-  for (const p of opens) {
-    try { checkPosition(p); } catch (err) { console.error('[paper] monitor', err.message); }
-  }
-}
-
-export function checkPositionsForMint(mintAddress) {
-  const s = S();
-  const opens = s.openPositionsForMint.all(mintAddress);
-  if (!opens.length) return;
-  for (const p of opens) {
-    try { checkPosition(p); } catch (err) { console.error('[paper] checkForMint', err.message); }
-  }
-}
-
-let _monitorWorker = null;
-
-export function startPositionMonitor() {
-  if (!isMainThread) return; // worker imports this module too — never re-spawn from inside the worker
-  spawnMonitorWorker();
-}
-
-function spawnMonitorWorker() {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const workerPath = path.join(here, 'position-monitor-worker.js');
+  // POST-MORTEM: capture predicted vs actual for future calibration.
+  // Latest pred for each target at-or-before entry time (within reason).
   try {
-    _monitorWorker = new Worker(workerPath);
-  } catch (err) {
-    console.error('[monitor-worker] spawn failed:', err.message);
-    return;
-  }
-  _monitorWorker.on('error', (err) => console.error('[monitor-worker] error', err.stack || err.message));
-  _monitorWorker.on('exit', (code) => {
-    _monitorWorker = null;
-    if (code !== 0) {
-      console.error(`[monitor-worker] exited code=${code} — restarting in 1s`);
-      setTimeout(spawnMonitorWorker, 1000);
+    const entryPreds = S().entryPreds.all(p.mint_address, p.entered_at);
+    const predMap = {};
+    for (const r of entryPreds) {
+      if (!(r.target in predMap)) predMap[r.target] = r.prob;
     }
-  });
-}
-
-// Main thread → worker: ask the worker to re-check open positions for a mint
-// that just had a trade. Worker handles it off the main event loop.
-export function notifyTradeForMint(mintAddress) {
-  if (!_monitorWorker) {
-    // Fallback: if the worker isn't up yet (early boot), do it inline.
-    try { checkPositionsForMint(mintAddress); } catch {}
-    return;
+    const holdSec = Math.floor((now - p.entered_at) / 1000);
+    S().insertPostmortem.run(
+      p.id, p.mint_address, p.strategy,
+      p.entry_score ?? null,
+      p.predicted_peak_pct ?? null,
+      p.highest_pct ?? 0,
+      pnlPct,
+      exitReason,
+      holdSec,
+      predMap.will_rug ?? null,
+      predMap.will_die_fast ?? null,
+      predMap.hits_2x_within_1h ?? null,
+      predMap.peaked_100 ?? null,
+      predMap.peaked_300 ?? null,
+      predMap.buy_pressure_continues_60s ?? null,
+      predMap.peak_within_5min ?? null,
+      now,
+    );
+  } catch (e) {
+    console.error('[paper] postmortem insert err:', e.message);
   }
-  _monitorWorker.postMessage({ type: 'checkMint', mint: mintAddress });
-}
-
-// Reconcile open live positions against on-chain state on startup. Handles
-// crash-during-buy (pending_fill rows) and crash-after-sell (DB says open but
-// wallet has 0 tokens). Paper rows are skipped — no on-chain reality to check.
-export async function recoverLivePositions() {
-  const wallet = await import('./wallet.js');
-  const d = db();
-  const open = d.prepare(`SELECT * FROM paper_positions WHERE status='open' AND position_mode='live'`).all();
-  if (open.length === 0) return { checked: 0 };
-  console.log(`[recover] reconciling ${open.length} live position(s) on startup`);
-  let closed = 0, reconciled = 0, ok = 0;
-  for (const p of open) {
-    const tag = `id=${p.id} ${p.mint_address.slice(0,8)}…`;
-    try {
-      const onChain = await wallet.getTokenBalance(p.mint_address);
-      const now = Date.now();
-      if (p.pending_fill === 1) {
-        if (!onChain || onChain <= 0) {
-          d.prepare(`UPDATE paper_positions SET status='closed', exit_reason='RECOVERED_BUY_LOST', exited_at=?, updated_at=?, realized_pnl_sol=0, realized_pnl_pct=0, pending_fill=0 WHERE id=?`).run(now, now, p.id);
-          console.log(`[recover] ${tag} pending buy never landed → CLOSED RECOVERED_BUY_LOST`);
-          closed++; continue;
-        }
-        d.prepare(`UPDATE paper_positions SET pending_fill=0, tokens_remaining=?, token_amount=?, updated_at=? WHERE id=?`).run(onChain, onChain, now, p.id);
-        console.log(`[recover] ${tag} pending buy resolved · ${onChain} tokens · marked OPEN`);
-        reconciled++; continue;
-      }
-      if (!onChain || onChain <= 0) {
-        const realized = p.sol_realized_so_far || 0;
-        const pnl = realized - p.entry_sol;
-        const pnlPct = p.entry_sol > 0 ? pnl / p.entry_sol : 0;
-        d.prepare(`UPDATE paper_positions SET status='closed', exit_reason='RECOVERED_NO_TOKENS', exited_at=?, updated_at=?, realized_pnl_sol=?, realized_pnl_pct=? WHERE id=?`).run(now, now, pnl, pnlPct, p.id);
-        console.log(`[recover] ${tag} 0 tokens on-chain (DB had ${p.tokens_remaining}) → CLOSED RECOVERED_NO_TOKENS · pnl ${pnl.toFixed(4)} SOL`);
-        closed++; continue;
-      }
-      const dbRem = p.tokens_remaining || 0;
-      const drift = dbRem > 0 ? Math.abs(onChain - dbRem) / dbRem : 0;
-      if (drift > 0.05) {
-        d.prepare(`UPDATE paper_positions SET tokens_remaining=?, updated_at=? WHERE id=?`).run(onChain, now, p.id);
-        console.log(`[recover] ${tag} reconciled tokens_remaining ${dbRem} → ${onChain} (drift ${(drift*100).toFixed(1)}%)`);
-        reconciled++; continue;
-      }
-      console.log(`[recover] ${tag} OK · ${onChain} tokens (DB ${dbRem})`);
-      ok++;
-    } catch (err) {
-      console.error(`[recover] ${tag} reconcile error:`, err.message);
-    }
-  }
-  console.log(`[recover] done: ${ok} ok, ${reconciled} reconciled, ${closed} closed`);
-  return { checked: open.length, ok, reconciled, closed };
-}
-
-// Symmetric recovery for paper positions. Live positions can be reconciled
-// against on-chain token balances; paper positions have no external truth.
-// If a paper position is stuck in pending_fill=1 on startup, it means we
-// crashed during the latency-deferred entry block — entry_price was already
-// set, but the friction-application + drift-check never completed. We close
-// these as RECOVERED_PAPER_PENDING (treat as failed entry rather than
-// keeping a half-initialized position alive) so the strategy can cleanly
-// re-evaluate the mint on its next signal.
-export function recoverPaperPositions() {
-  const d = db();
-  const stuck = d.prepare(
-    `SELECT id, mint_address, strategy FROM paper_positions
-     WHERE status='open' AND position_mode='paper' AND pending_fill=1`
-  ).all();
-  if (stuck.length === 0) return { checked: 0 };
-  console.log(`[recover-paper] releasing ${stuck.length} stuck paper position(s)`);
-  const now = Date.now();
-  for (const p of stuck) {
-    try {
-      d.prepare(
-        `UPDATE paper_positions SET status='closed',
-         exit_reason='RECOVERED_PAPER_PENDING',
-         exited_at=?, updated_at=?,
-         realized_pnl_sol=0, realized_pnl_pct=0, pending_fill=0
-         WHERE id=?`
-      ).run(now, now, p.id);
-      console.log(`[recover-paper] id=${p.id} ${p.mint_address.slice(0,8)}… → CLOSED RECOVERED_PAPER_PENDING`);
-    } catch (err) {
-      console.error(`[recover-paper] id=${p.id} failed:`, err.message);
-    }
-  }
-  return { checked: stuck.length };
 }

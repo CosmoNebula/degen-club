@@ -47,6 +47,10 @@ REGRESSION_TARGETS = {
     # even if dropped from the training set in retrain_all.py.
     'peak_pct_max', 'time_to_peak_sec', 'time_to_peak_5x_sec',
     'post_mig_peak_pct',
+    # 2026-05-21: extended post-mig regression targets
+    'post_mig_peak_pct_4h', 'post_mig_peak_pct_24h',
+    'post_mig_ev_with_ladder_sol',
+    'post_mig_time_to_peak_min',
 }
 
 # Regression targets with heavy-tailed POSITIVE distributions get log1p-
@@ -63,6 +67,7 @@ LOG_TRANSFORM_TARGETS = set()
 SIGNED_LOG_TRANSFORM_TARGETS = {
     'hold_1h_pct', 'hold_4h_pct', 'hold_24h_pct',
     'pnl_pct_60s', 'pnl_pct_300s',  # 2026-05-15 short-horizon exit-PnL forecasts
+    'post_mig_ev_with_ladder_sol',  # 2026-05-21 — can be negative, heavy-tailed both ways
 }
 # Poisson regression for count-valued targets (non-negative integers, often
 # zero-inflated). Uses sklearn HistGradientBoostingRegressor with loss='poisson'.
@@ -135,6 +140,18 @@ POSTMIG_FEATURE_COLS = [
     'name_length', 'symbol_length',
     'migration_hour_utc', 'migration_dow',
     'amm_initial_liquidity_usd',
+    # 2026-05-21: STACKED features — pre-mig model OUTPUTS used as features.
+    # The post-mig model now sees what the pre-mig models predicted before
+    # the coin migrated. Captures pre-mig hype/risk in a compact form.
+    'pre_pred_will_migrate',
+    'pre_pred_peak_pct_max',
+    'pre_pred_will_rug',
+    'pre_pred_hits_2x_within_1h',
+    'pre_pred_buy_pressure_continues_60s',
+    'pre_pred_peaked_100',
+    'pre_pred_peaked_300',
+    'pre_pred_local_top_60s',
+    'pre_pred_drawdown_20pct_300s',
 ]
 
 DEFAULT_TARGET = 'migrated'
