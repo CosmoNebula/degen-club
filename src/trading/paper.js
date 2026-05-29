@@ -107,26 +107,27 @@ export function getOpenPositions(strategyId) { return S().openByStrategy.all(str
 // All triggers are PERCENT returns (e.g. 50 means fire when up 50%).
 // All sell_pcts are FRACTIONS of current remaining position (0..1).
 export function computeAdaptiveTiers(predictedPeakPct, isMigrated) {
-  // Bound the predicted peak. Floor=+50% (don't be too greedy), cap=+500%
-  // (don't park behind an unattainable target on a hot mint).
-  const pp = Math.max(50, Math.min(500, predictedPeakPct || 100));
+  // Bounds match the recalibrated predictPeakPct (2026-05-28): typical realized
+  // peak is ~17%, so tier triggers must be REACHABLE. The old +50/+90/+180
+  // floors meant tier 1 almost never fired and the trail never armed, so winners
+  // round-tripped all the way back down.
+  const pp = Math.max(10, Math.min(300, predictedPeakPct || 18));
 
-  // Tier 1: lock in cost basis + small profit early. 30% of predicted peak
-  // but floor at +50% (don't sell on a wiggle), cap at +100%.
-  const t1_trig = Math.max(50, Math.min(100, pp * 0.30));
+  // Tier 1: lock initials early. 40% of predicted peak, floor +10%, cap +60%.
+  const t1_trig = Math.max(10, Math.min(60, pp * 0.40));
   const t1_sell = 0.40;  // sell 40% of position
 
-  // Tier 2: book real profit. 60% of predicted peak, floor +90%, cap +250%.
-  const t2_trig = Math.max(90, Math.min(250, pp * 0.60));
-  const t2_sell = 0.30;  // sell 30% of REMAINING position (~18% of original)
+  // Tier 2: book real profit. 75% of predicted peak, floor +20%, cap +150%.
+  const t2_trig = Math.max(20, Math.min(150, pp * 0.75));
+  const t2_sell = 0.30;  // 30% of REMAINING (~18% of original)
 
-  // Tier 3: full target. predicted peak, floor +180%, cap +500%.
-  const t3_trig = Math.max(180, Math.min(500, pp));
-  const t3_sell = 0.30;  // sell 30% of REMAINING after t2 (~13% of original)
+  // Tier 3: full target. 1.2x predicted peak, floor +45%, cap +300%.
+  const t3_trig = Math.max(45, Math.min(300, pp * 1.2));
+  const t3_sell = 0.30;  // 30% of REMAINING after t2 (~13% of original)
 
-  // Trailing stop on remaining 12% bag. Arms after t1, exits at peak - 20%.
+  // Trailing stop on the remaining ~12% moonbag. Arms at t1, exits peak - 20%.
   const trail_arm = t1_trig;
-  const trail_pct = 20;  // exit at peak − 20%
+  const trail_pct = 20;
 
   return { t1_trig, t1_sell, t2_trig, t2_sell, t3_trig, t3_sell, trail_arm, trail_pct };
 }

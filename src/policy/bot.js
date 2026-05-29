@@ -122,27 +122,22 @@ function predictPeakPct(mint, isMigrated) {
   if (isMigrated) {
     const p4h = pred(mint, 'post_mig_peak_pct_4h');
     const p24h = pred(mint, 'post_mig_peak_pct_24h');
-    // post_mig_peak_pct_4h is in fraction (e.g. 0.50 = +50%). Convert to percent.
-    if (p4h != null) return Math.max(50, Math.min(500, Math.max(p4h, p24h ?? 0) * 100));
-    return 100;
+    // post_mig_peak_pct_4h is a fraction (0.50 = +50%). Floor lowered +50%->+20%
+    // to match the pre-mig recalibration; no migrated closes in the last 3d to
+    // fit against, so this stays conservative until data accrues.
+    if (p4h != null) return Math.max(20, Math.min(500, Math.max(p4h, p24h ?? 0) * 100));
+    return 60;
   }
-  // Pre-mig: expected peak from probability ladder.
-  // Buckets and their midpoint expected peaks:
-  //   <30%      midpoint ~10
-  //   30-100    midpoint ~65
-  //   100-300   midpoint ~200
-  //   300+      midpoint ~500
-  const p30 = pred(mint, 'peaked_30') ?? 0;
+  // Pre-mig expected peak — CALIBRATED 2026-05-28 to 3 days of realized peaks.
+  // The prior probability-ladder used midpoints (65/200/500) ~3x too high and a
+  // +50% floor, so it predicted ~53% while actual peaks averaged 17.7% with no
+  // spread across outcomes. Of the model outputs only peaked_100 carries real
+  // signal (p100>=0.20 cohort peaked ~34%; below that flat ~17%); peaked_300 is
+  // near-noise so it only adds a small runner premium.
   const p100 = pred(mint, 'peaked_100') ?? 0;
   const p300 = pred(mint, 'peaked_300') ?? 0;
-  // Each bucket gets the probability of being IN that bucket × midpoint expected
-  const e = 10 * Math.max(0, (1 - p30))
-          + 65 * Math.max(0, p30 - p100)
-          + 200 * Math.max(0, p100 - p300)
-          + 500 * Math.max(0, p300);
-  // Don't let it go below 50% — tier 1 floor in computeAdaptiveTiers will clamp anyway,
-  // but this keeps the prediction reasonable for logging.
-  return Math.max(50, Math.min(500, e));
+  const e = 10 + 85 * clamp01(p100) + 35 * clamp01(p300);
+  return Math.max(10, Math.min(200, e));
 }
 
 function scoreEntryPreMig(mint) {
