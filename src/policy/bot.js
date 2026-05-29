@@ -181,16 +181,13 @@ function scoreEntryPreMig(mint) {
                   + 0.15 * clamp01((buyersNext - sellersNext) / 8);
   const migBonus = 0.50 * migSoon + 0.30 * willMigrate;
 
-  // 2026-05-28: SMART-MONEY BOOST. Real-time signal from wallet_stats joined
-  // at snapshot time. Pre-ML-retrain shortcut so the bot reacts immediately to
-  // smart wallets cluster-buying. Mild weights — the ML signal still dominates.
-  // When retrain bakes these features into the model the boost can be lowered.
-  const sig = walletSig(mint);
-  const smartBoost = 0.08 * clamp01(sig.smart_buyer_count / 5)         // 5+ smart = full boost
-                   + 0.06 * clamp01(sig.whale_buyer_count / 3)         // 3+ whales = full boost
-                   + 0.04 * clamp01(sig.top_buyer_skill_p90 / 8);      // top skill ≥8 = full boost
-
-  const raw = 0.55 * pumpScore + 0.30 * flowScore + 0.15 * migBonus + smartBoost;
+  // 2026-05-28: REMOVED smart-money entry boost — it was anti-predictive.
+  // 3d data: entries with 3+ smart buyers lost -0.65 SOL (142 trades) vs
+  // +0.04 SOL for 0 smart buyers. "Smart" wallets here are snipers/flippers
+  // that dump first, so boosting on them steered entries into the worst cohort
+  // (and pickSize then sized them up). ML retrain can learn the true sign from
+  // the snapshot features directly.
+  const raw = 0.55 * pumpScore + 0.30 * flowScore + 0.15 * migBonus;
   return raw * (1 - willRug);
 }
 
@@ -253,14 +250,15 @@ function scoreHold(mint, isMigrated) {
   // 2026-05-28: SMART-MONEY HOLD/SELL signals from wallet_stats snapshot join.
   // - smart sellers actively exiting = bearish (they know something)
   // - smart buyers still entering = bullish (smart money still believes)
+  // 2026-05-28: kept smartSellWarn (smart money dumping = real death signal)
+  // but dropped smartBuyKeep — smart *buying* is anti-predictive here (flippers),
+  // so treating it as bullish was making the bot hold losers longer.
   const sig = walletSig(mint);
   const smartSellWarn = clamp01(sig.smart_seller_count / 4);
-  const smartBuyKeep  = clamp01(sig.smart_buyer_count / 5);
 
   const migBonus = 0.50 * migSoon + 0.30 * willMig;
   const bull = 0.25 * priceUp60 + 0.15 * priceUp300 + 0.20 * buyPress + 0.15 * p100
-             + 0.15 * alive1h + 0.10 * clamp01(buyersNext / 15)
-             + 0.10 * smartBuyKeep;
+             + 0.15 * alive1h + 0.10 * clamp01(buyersNext / 15);
   const bear = 0.20 * clamp01(ddFromPeak / 30) + 0.25 * localTop + 0.20 * dd20
              + 0.20 * willDie + 0.15 * peakSoon
              + 0.15 * smartSellWarn;
