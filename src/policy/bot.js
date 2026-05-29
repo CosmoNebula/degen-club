@@ -112,6 +112,21 @@ function getRuntimeThreshold() {
   return _runtimeThreshold ?? config.policy.entryScoreThreshold;
 }
 
+// Cached peak-calibration multiplier (updated by workers/exit-tuner.js). Keeps
+// predicted peaks tracking realized peaks as the ML model + market drift, so the
+// adaptive tier ladder stays correctly placed. Defaults to 1.0 (no correction).
+let _peakMult = null;
+let _peakMultAt = 0;
+function getPeakMult() {
+  if (Date.now() - _peakMultAt < 30000) return _peakMult ?? 1.0;
+  try {
+    const row = db().prepare("SELECT value FROM bot_runtime_settings WHERE key = 'peak_calibration_mult'").get();
+    if (row?.value != null) _peakMult = row.value;
+  } catch {}
+  _peakMultAt = Date.now();
+  return _peakMult ?? 1.0;
+}
+
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
 
 // Predict the peak return % from ML signals at entry time.
@@ -119,14 +134,15 @@ const clamp01 = (x) => Math.max(0, Math.min(1, x));
 //   Pre-mig:  use the discrete pump-probability ladder (peaked_30/100/300)
 //             since peak_pct_max regression is too noisy (R²=0.03)
 function predictPeakPct(mint, isMigrated) {
+  const mult = getPeakMult();
   if (isMigrated) {
     const p4h = pred(mint, 'post_mig_peak_pct_4h');
     const p24h = pred(mint, 'post_mig_peak_pct_24h');
     // post_mig_peak_pct_4h is a fraction (0.50 = +50%). Floor lowered +50%->+20%
     // to match the pre-mig recalibration; no migrated closes in the last 3d to
     // fit against, so this stays conservative until data accrues.
-    if (p4h != null) return Math.max(20, Math.min(500, Math.max(p4h, p24h ?? 0) * 100));
-    return 60;
+    if (p4h != null) return Math.max(20, Math.min(500, Math.max(p4h, p24h ?? 0) * 100 * mult));
+    return 60 * mult;
   }
   // Pre-mig expected peak — CALIBRATED 2026-05-28 to 3 days of realized peaks.
   // The prior probability-ladder used midpoints (65/200/500) ~3x too high and a
@@ -136,7 +152,7 @@ function predictPeakPct(mint, isMigrated) {
   // near-noise so it only adds a small runner premium.
   const p100 = pred(mint, 'peaked_100') ?? 0;
   const p300 = pred(mint, 'peaked_300') ?? 0;
-  const e = 10 + 85 * clamp01(p100) + 35 * clamp01(p300);
+  const e = (10 + 85 * clamp01(p100) + 35 * clamp01(p300)) * mult;
   return Math.max(10, Math.min(200, e));
 }
 
