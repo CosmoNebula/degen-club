@@ -132,6 +132,10 @@ function S() {
     dbSize: d.prepare(`SELECT page_count * page_size AS size FROM pragma_page_count, pragma_page_size`),
     countMints: d.prepare(`SELECT COUNT(*) n FROM mints`),
     countTrades: d.prepare(`SELECT COUNT(*) n FROM trades`),
+    // MAX(rowid) is O(1); COUNT(*) on ml_predictions (33M rows) is a ~12s full
+    // scan that froze the shared event loop on every dashboard poll (524s).
+    predTotal: d.prepare(`SELECT MAX(rowid) AS n FROM ml_predictions`),
+    posTotal: d.prepare(`SELECT COUNT(*) n FROM paper_positions`),
     walletHistoryCloses: d.prepare(`SELECT exited_at AS ts, realized_pnl_sol AS pnl
       FROM paper_positions WHERE status='closed' AND strategy='ml-policy-v2'
         AND exited_at IS NOT NULL AND exited_at > ?
@@ -167,6 +171,23 @@ function computeOpenMtm(rows) {
 // ============================================================================
 // API
 // ============================================================================
+// Heavy aggregate/count queries are cached for 60s. The dashboard polls ~5
+// endpoints continuously; without this, every poll re-ran full-table scans on
+// the SAME process/event loop the trading workers use, stalling everything.
+const _aggCache = new Map();
+function aggCached(key, fn, ttlMs = 60000) {
+  const hit = _aggCache.get(key);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.val;
+  const val = fn();
+  _aggCache.set(key, { val, at: Date.now() });
+  return val;
+}
+const cMints = () => aggCached('mints', () => S().countMints.get());
+const cTrades = () => aggCached('trades', () => S().countTrades.get());
+const cSnaps = () => aggCached('snaps', () => S().snapsAgg.get());
+const cPreds = () => aggCached('preds', () => S().predTotal.get());
+const cPos = () => aggCached('pos', () => S().posTotal.get());
+
 async function routeApi(req, res, urlPath, query) {
   const s = S();
   const d = db();
@@ -190,8 +211,8 @@ async function routeApi(req, res, urlPath, query) {
     const drawdown = peak > 0 ? (totalValue - peak) / peak : 0;
     const pctChange = starting > 0 ? (totalValue - starting) / starting : 0;
 
-    const dbCount = s.countMints.get();
-    const tradeCount = s.countTrades.get();
+    const dbCount = cMints();
+    const tradeCount = cTrades();
     const mintsTraded = s.uniqueMintsTraded.get().n || 0;
     const INCINERATE_PER_MINT = 0.00203928;
 
@@ -274,7 +295,7 @@ async function routeApi(req, res, urlPath, query) {
     const ls = getLogsSubStats();
     const dbSize = s.dbSize.get();
     const dbSizeMb = Math.round((dbSize.size || 0) / 1024 / 1024);
-    const tradeCount = s.countTrades.get();
+    const tradeCount = cTrades();
     const lastTrade = s.lastTradeAgo.get();
     const openN = s.opensAgg.get(0).n;
 
@@ -336,11 +357,11 @@ async function routeApi(req, res, urlPath, query) {
   if (urlPath === '/api/db/stats') {
     const dbSize = s.dbSize.get();
     return sendJson(res, 200, {
-      mints: s.countMints.get().n,
-      trades: s.countTrades.get().n,
-      snapshots: s.snapsAgg.get().total,
-      predictions: d.prepare('SELECT COUNT(*) n FROM ml_predictions').get().n,
-      positions: d.prepare('SELECT COUNT(*) n FROM paper_positions').get().n,
+      mints: cMints().n,
+      trades: cTrades().n,
+      snapshots: cSnaps().total,
+      predictions: cPreds().n,
+      positions: cPos().n,
       sizeBytes: dbSize.size || 0,
       sizeMb: Math.round((dbSize.size || 0) / 1024 / 1024),
     });
@@ -440,7 +461,7 @@ async function routeApi(req, res, urlPath, query) {
 
   // -------- /api/ml/status — ML lab panel --------
   if (urlPath === '/api/ml/status') {
-    const snaps = s.snapsAgg.get();
+    const snaps = cSnaps();
     const total = snaps.total || 0;
     const collectionDays = snaps.earliest ? (Date.now() - snaps.earliest) / 86_400_000 : 0;
     const preds3m = d.prepare("SELECT COUNT(*) n FROM ml_predictions WHERE timestamp > (strftime('%s','now')-180)*1000").get();
