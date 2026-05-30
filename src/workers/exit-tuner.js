@@ -24,6 +24,10 @@ const MULT_MIN = 0.4, MULT_MAX = 1.6;  // hard bounds so tiers can never run awa
 const EMA_ALPHA = 0.3;                 // smoothing per update — slow, not jumpy
 const MIN_MOVE = 0.01;                 // ignore sub-1% nudges
 const KEY = 'peak_calibration_mult';
+// predictPeakPct was recalibrated in commit dfc7a9f (2026-05-29 01:14 UTC).
+// Closes before this used the old over-predicting formula; sampling them would
+// mis-fit the multiplier. Ignore anything older than the recalibration.
+const CALIBRATION_EPOCH = Date.parse('2026-05-29T01:14:00Z');
 
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
@@ -47,7 +51,7 @@ function S() {
 }
 
 function tune() {
-  const since = Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const since = Math.max(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000, CALIBRATION_EPOCH);
   const rows = S().sample.all(since);
   if (rows.length < MIN_TRADES) {
     if (Math.random() < 0.1) {
