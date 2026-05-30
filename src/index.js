@@ -14,6 +14,7 @@ import { startPriceVerifier } from './workers/price-verifier.js';
 import { startAmmPriceFetcher } from './workers/amm-price-fetcher.js';
 import { startThresholdTuner } from './workers/threshold-tuner.js';
 import { startExitTuner } from './workers/exit-tuner.js';
+import { startPostExit } from './workers/post-exit.js';
 import { startTelegramBroadcaster } from './workers/tg-broadcaster.js';
 import { startWalletSkillTracker } from './workers/wallet-skill-tracker.js';
 import { startMlClient } from './ml/client.js';
@@ -36,6 +37,7 @@ db();
   startAmmPriceFetcher();
   startThresholdTuner();                          // computes ML features
   startExitTuner();                               // self-calibrates peak prediction -> tiers
+  startPostExit();                                // tracks post-exit price (sold-too-early signal)
   startTelegramBroadcaster();                     // Cosmo Calls + Viktor narration
   // startWalletSkillTracker disabled: too heavy in-process. Runs via standalone
   // Python script + cron instead. See scripts/wallet-skill-compute.py
